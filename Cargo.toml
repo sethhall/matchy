@@ -1,0 +1,48 @@
+[package]
+name = "paraglob-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Seth Hall <seth@remor.com>"]
+license = "BSD-2-Clause"
+description = "Fast multi-pattern glob matching using Aho-Corasick (Rust port)"
+repository = "https://github.com/sethhall/paraglob-rs"
+readme = "README.md"
+keywords = ["glob", "pattern", "aho-corasick", "mmap", "ffi"]
+categories = ["text-processing", "algorithms"]
+
+[lib]
+name = "paraglob_rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+# Keep minimal initially - add as needed
+libc = "0.2"
+memmap2 = "0.9.8"
+
+[dev-dependencies]
+# Testing dependencies
+criterion = "0.5"
+proptest = "1.4"
+tempfile = "3.8"
+rand = "0.8"
+
+[build-dependencies]
+cbindgen = "0.26"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = false  # Keep symbols for debugging initially
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.bench]
+inherits = "release"
+
+[[bench]]
+name = "paraglob_bench"
+harness = false

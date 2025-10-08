@@ -1,0 +1,827 @@
+//! Offset-based Paraglob Pattern Matcher
+//!
+//! This module implements the complete Paraglob system using a unified
+//! offset-based binary format. Everything is stored in a single `Vec<u8>`
+//! that can be serialized to disk or memory-mapped for instant loading.
+//!
+//! # Architecture
+//!
+//! The buffer contains:
+//! 1. ParaglobHeader (64 bytes)
+//! 2. AC automaton data (nodes, edges, pattern IDs)
+//! 3. Pattern entries (metadata for each pattern)
+//! 4. Pattern strings (null-terminated)
+//! 5. Glob pattern data (for glob verification)
+//!
+//! All matching operations work directly on this buffer using offsets.
+
+use crate::ac_offset::{ACAutomaton, MatchMode as ACMatchMode};
+use crate::error::ParaglobError;
+use crate::glob::{GlobPattern, MatchMode as GlobMatchMode};
+use crate::offset_format::{ParaglobHeader, PatternEntry, SingleWildcard, ACEdge, read_struct, read_cstring};
+use std::collections::HashMap;
+use std::mem;
+
+/// Pattern classification for optimization
+#[derive(Debug, Clone)]
+enum PatternType {
+    /// Pure literal pattern (no wildcards)
+    Literal {
+        text: String,
+        id: u32,
+    },
+    /// Glob pattern with extracted literals
+    Glob {
+        pattern: String,
+        literals: Vec<String>,
+        id: u32,
+    },
+    /// Pure wildcard pattern (no literals to extract)
+    PureWildcard {
+        pattern: String,
+        id: u32,
+    },
+}
+
+impl PatternType {
+    fn new(pattern: &str, id: u32) -> Result<Self, ParaglobError> {
+        if pattern.is_empty() {
+            return Err(ParaglobError::InvalidPattern("Empty pattern".to_string()));
+        }
+        
+        if Self::is_glob(pattern) {
+            let literals = Self::extract_literals(pattern);
+            
+            if literals.is_empty() {
+                Ok(Self::PureWildcard {
+                    pattern: pattern.to_string(),
+                    id,
+                })
+            } else {
+                Ok(Self::Glob {
+                    pattern: pattern.to_string(),
+                    literals,
+                    id,
+                })
+            }
+        } else {
+            Ok(Self::Literal {
+                text: pattern.to_string(),
+                id,
+            })
+        }
+    }
+    
+    fn is_glob(pattern: &str) -> bool {
+        let mut escaped = false;
+        for ch in pattern.chars() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '*' | '?' | '[' => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+    
+    fn extract_literals(pattern: &str) -> Vec<String> {
+        let mut literals = Vec::new();
+        let mut current = String::new();
+        let mut chars = pattern.chars().peekable();
+        let mut escaped = false;
+        
+        while let Some(ch) = chars.next() {
+            if escaped {
+                current.push(ch);
+                escaped = false;
+                continue;
+            }
+            
+            match ch {
+                '\\' => escaped = true,
+                '*' | '?' => {
+                    if !current.is_empty() {
+                        literals.push(current.clone());
+                        current.clear();
+                    }
+                }
+                '[' => {
+                    if !current.is_empty() {
+                        literals.push(current.clone());
+                        current.clear();
+                    }
+                    // Skip character class
+                    let mut depth = 1;
+                    while let Some(c) = chars.next() {
+                        if c == '\\' {
+                            chars.next();
+                        } else if c == '[' {
+                            depth += 1;
+                        } else if c == ']' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => current.push(ch),
+            }
+        }
+        
+        if !current.is_empty() {
+            literals.push(current);
+        }
+        
+        literals
+    }
+    
+    fn id(&self) -> u32 {
+        match self {
+            Self::Literal { id, .. } => *id,
+            Self::Glob { id, .. } => *id,
+            Self::PureWildcard { id, .. } => *id,
+        }
+    }
+    
+    fn pattern(&self) -> &str {
+        match self {
+            Self::Literal { text, .. } => text,
+            Self::Glob { pattern, .. } => pattern,
+            Self::PureWildcard { pattern, .. } => pattern,
+        }
+    }
+}
+
+/// Result type for builder
+type BuildResult = (Vec<u8>, HashMap<u32, Vec<u32>>);
+
+/// Builder for constructing offset-based Paraglob
+struct ParaglobBuilder {
+    patterns: Vec<PatternType>,
+    mode: ACMatchMode,
+    pattern_set: std::collections::HashSet<String>,
+}
+
+impl ParaglobBuilder {
+    fn new(mode: ACMatchMode) -> Self {
+        Self {
+            patterns: Vec::new(),
+            mode,
+            pattern_set: std::collections::HashSet::new(),
+        }
+    }
+    
+    fn add_pattern(&mut self, pattern: &str) -> Result<u32, ParaglobError> {
+        // Check for duplicate pattern (match C++ behavior)
+        if self.pattern_set.contains(pattern) {
+            // Pattern already exists - C++ returns RETURNSTATUS_DUPLICATE_PATTERN
+            // We'll just return the existing ID by finding it
+            for pat in &self.patterns {
+                if pat.pattern() == pattern {
+                    return Ok(pat.id());
+                }
+            }
+        }
+        
+        let id = self.patterns.len() as u32;
+        let pat_type = PatternType::new(pattern, id)?;
+        self.pattern_set.insert(pattern.to_string());
+        self.patterns.push(pat_type);
+        Ok(id)
+    }
+    
+    fn build(self) -> Result<BuildResult, ParaglobError> {
+        // Collect literals for AC automaton
+        let mut ac_literals = Vec::new();
+        let mut literal_to_patterns: HashMap<String, Vec<u32>> = HashMap::new();
+        
+        for pat in &self.patterns {
+            match pat {
+                PatternType::Literal { text, id } => {
+                    ac_literals.push(text.clone());
+                    literal_to_patterns.entry(text.clone())
+                        .or_default()
+                        .push(*id);
+                }
+                PatternType::Glob { literals, id, .. } => {
+                    for lit in literals {
+                        if !ac_literals.contains(lit) {
+                            ac_literals.push(lit.clone());
+                        }
+                        literal_to_patterns.entry(lit.clone())
+                            .or_default()
+                            .push(*id);
+                    }
+                }
+                PatternType::PureWildcard { .. } => {
+                    // No literals to add
+                }
+            }
+        }
+        
+        // Build AC automaton
+        let ac_automaton = if !ac_literals.is_empty() {
+            let ac_refs: Vec<&str> = ac_literals.iter().map(|s| s.as_str()).collect();
+            ACAutomaton::build(&ac_refs, self.mode)?
+        } else {
+            ACAutomaton::new(self.mode)
+        };
+        
+        // Build mapping from AC literal ID to pattern IDs
+        // AC assigns IDs 0, 1, 2... to literals in the order they were added
+        let mut ac_literal_to_patterns = HashMap::new();
+        for (literal_id, literal_str) in ac_literals.iter().enumerate() {
+            if let Some(pattern_ids) = literal_to_patterns.get(literal_str) {
+                ac_literal_to_patterns.insert(literal_id as u32, pattern_ids.clone());
+            }
+        }
+        
+        // Calculate sizes
+        let header_size = mem::size_of::<ParaglobHeader>();
+        let ac_buffer = ac_automaton.buffer();
+        let ac_size = ac_buffer.len();
+        
+        // Pattern entries section
+        let patterns_start = header_size + ac_size;
+        let pattern_entry_size = mem::size_of::<PatternEntry>();
+        let pattern_entries_size = self.patterns.len() * pattern_entry_size;
+        
+        // Pattern strings section
+        let pattern_strings_start = patterns_start + pattern_entries_size;
+        let mut pattern_strings_data = Vec::new();
+        let mut pattern_string_offsets = Vec::new();
+        
+        for pat in &self.patterns {
+            pattern_string_offsets.push(pattern_strings_data.len());
+            let s = pat.pattern();
+            pattern_strings_data.extend_from_slice(s.as_bytes());
+            pattern_strings_data.push(0); // Null terminator
+        }
+        
+        let pattern_strings_size = pattern_strings_data.len();
+        
+        // Pure wildcards section (patterns with no literals)
+        let pure_wildcards: Vec<&PatternType> = self.patterns.iter()
+            .filter(|p| matches!(p, PatternType::PureWildcard { .. }))
+            .collect();
+        
+        let wildcards_start = pattern_strings_start + pattern_strings_size;
+        let wildcard_entry_size = mem::size_of::<SingleWildcard>();
+        let wildcards_size = pure_wildcards.len() * wildcard_entry_size;
+        
+        // Allocate buffer
+        let total_size = header_size + ac_size + pattern_entries_size 
+                        + pattern_strings_size + wildcards_size;
+        let mut buffer = vec![0u8; total_size];
+        
+        // Write header
+        let mut header = ParaglobHeader::new();
+        header.match_mode = match self.mode {
+            ACMatchMode::CaseSensitive => 0,
+            ACMatchMode::CaseInsensitive => 1,
+        };
+        header.ac_node_count = ac_automaton.buffer().len() as u32; // Approximation
+        header.ac_nodes_offset = header_size as u32;
+        header.ac_edges_size = ac_size as u32;
+        header.pattern_count = self.patterns.len() as u32;
+        header.patterns_offset = patterns_start as u32;
+        header.pattern_strings_offset = pattern_strings_start as u32;
+        header.pattern_strings_size = pattern_strings_size as u32;
+        header.wildcard_count = pure_wildcards.len() as u32;
+        
+        unsafe {
+            let ptr = buffer.as_mut_ptr() as *mut ParaglobHeader;
+            ptr.write(header);
+        }
+        
+        // Write AC automaton data
+        buffer[header_size..header_size + ac_size].copy_from_slice(ac_buffer);
+        
+        // Write pattern entries
+        for (i, pat) in self.patterns.iter().enumerate() {
+            let entry_offset = patterns_start + i * pattern_entry_size;
+            let string_offset = (pattern_strings_start + pattern_string_offsets[i]) as u32;
+            
+            let pattern_type = match pat {
+                PatternType::Literal { .. } => 0u8,
+                PatternType::Glob { .. } | PatternType::PureWildcard { .. } => 1u8,
+            };
+            
+            let mut entry = PatternEntry::new(pat.id(), pattern_type);
+            entry.pattern_string_offset = string_offset;
+            entry.pattern_string_length = pat.pattern().len() as u32;
+            
+            unsafe {
+                let ptr = buffer.as_mut_ptr().add(entry_offset) as *mut PatternEntry;
+                ptr.write(entry);
+            }
+        }
+        
+        // Write pattern strings
+        buffer[pattern_strings_start..pattern_strings_start + pattern_strings_size]
+            .copy_from_slice(&pattern_strings_data);
+        
+        // Write pure wildcard entries
+        for (i, pat) in pure_wildcards.iter().enumerate() {
+            let wildcard_offset = wildcards_start + i * wildcard_entry_size;
+            let string_offset = pattern_strings_start + pattern_string_offsets[pat.id() as usize];
+            
+            let wildcard = SingleWildcard {
+                pattern_id: pat.id(),
+                pattern_string_offset: string_offset as u32,
+            };
+            
+            unsafe {
+                let ptr = buffer.as_mut_ptr().add(wildcard_offset) as *mut SingleWildcard;
+                ptr.write(wildcard);
+            }
+        }
+        
+        Ok((buffer, ac_literal_to_patterns))
+    }
+}
+
+/// Buffer storage strategy
+enum BufferStorage {
+    /// Owned buffer (built from patterns)
+    Owned(Vec<u8>),
+    /// Borrowed buffer (from mmap)
+    Borrowed(&'static [u8]),
+}
+
+impl BufferStorage {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            BufferStorage::Owned(vec) => vec.as_slice(),
+            BufferStorage::Borrowed(slice) => slice,
+        }
+    }
+}
+
+/// Offset-based Paraglob pattern matcher
+///
+/// All data stored in a single byte buffer for zero-copy operation.
+/// Supports both owned buffers (built from patterns) and borrowed
+/// buffers (memory-mapped files).
+pub struct Paraglob {
+    /// Binary buffer containing all data
+    buffer: BufferStorage,
+    /// Matching mode
+    mode: GlobMatchMode,
+    /// Compiled glob patterns (rebuilt from buffer on load)
+    glob_cache: HashMap<u32, GlobPattern>,
+    /// Mapping from AC literal ID to pattern IDs
+    ac_literal_to_patterns: HashMap<u32, Vec<u32>>,
+}
+
+impl Paraglob {
+    /// Create a new empty Paraglob
+    pub fn new() -> Self {
+        Self::with_mode(GlobMatchMode::CaseSensitive)
+    }
+    
+    /// Create with specified match mode
+    pub fn with_mode(mode: GlobMatchMode) -> Self {
+        Self {
+            buffer: BufferStorage::Owned(Vec::new()),
+            mode,
+            glob_cache: HashMap::new(),
+            ac_literal_to_patterns: HashMap::new(),
+        }
+    }
+    
+    /// Build Paraglob from patterns
+    pub fn build_from_patterns(patterns: &[&str], mode: GlobMatchMode) -> Result<Self, ParaglobError> {
+        let ac_mode = match mode {
+            GlobMatchMode::CaseSensitive => ACMatchMode::CaseSensitive,
+            GlobMatchMode::CaseInsensitive => ACMatchMode::CaseInsensitive,
+        };
+        
+        let mut builder = ParaglobBuilder::new(ac_mode);
+        
+        for pattern in patterns {
+            builder.add_pattern(pattern)?;
+        }
+        
+        let (buffer, ac_literal_to_patterns) = builder.build()?;
+        
+        Ok(Self {
+            buffer: BufferStorage::Owned(buffer),
+            mode,
+            glob_cache: HashMap::new(),
+            ac_literal_to_patterns,
+        })
+    }
+    
+    /// Find all matching pattern IDs
+    pub fn find_all(&mut self, text: &str) -> Vec<u32> {
+        let buffer = self.buffer.as_slice();
+        if buffer.is_empty() {
+            return Vec::new();
+        }
+        
+        let header: ParaglobHeader = unsafe { read_struct(buffer, 0) };
+        
+        // Phase 1: Use AC automaton to find literal matches and candidate patterns
+        let ac_start = header.ac_nodes_offset as usize;
+        let ac_size = header.ac_edges_size as usize;
+        
+        let mut candidate_patterns: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        
+        if ac_size > 0 {
+            // Extract AC buffer and run AC matching on it
+            let ac_buffer = &buffer[ac_start..ac_start + ac_size];
+            
+            // Run AC automaton matching directly on text bytes (AC handles case-insensitivity)
+            let text_bytes = text.as_bytes();
+            let ac_literal_ids = self.run_ac_matching(ac_buffer, text_bytes);
+            
+            // Map AC literal IDs to pattern IDs using our pre-computed mapping
+            if !ac_literal_ids.is_empty() {
+                for literal_id in ac_literal_ids {
+                    if let Some(pattern_ids) = self.ac_literal_to_patterns.get(&literal_id) {
+                        candidate_patterns.extend(pattern_ids.iter().copied());
+                    }
+                }
+            }
+        }
+        
+        // Phase 2: Verify candidates (or all patterns if no AC)
+        let mut matching_ids = Vec::new();
+        
+        // CRITICAL: Always check pure wildcards first (patterns with no literals)
+        // These must be checked on every query regardless of AC results
+        // Wildcards are stored right after pattern strings
+        let wildcards_offset = (header.pattern_strings_offset + header.pattern_strings_size) as usize;
+        let wildcard_count = header.wildcard_count as usize;
+        
+        if wildcard_count > 0 {
+            for i in 0..wildcard_count {
+                let wildcard_offset_val = wildcards_offset + i * mem::size_of::<SingleWildcard>();
+                let wildcard: SingleWildcard = unsafe { read_struct(buffer, wildcard_offset_val) };
+                
+                let pattern_str = unsafe {
+                    read_cstring(buffer, wildcard.pattern_string_offset as usize)
+                        .unwrap_or("")
+                };
+                
+                // Check glob pattern
+                let glob = self.glob_cache.entry(wildcard.pattern_id)
+                    .or_insert_with(|| {
+                        GlobPattern::new(pattern_str, self.mode)
+                            .expect("Invalid wildcard pattern")
+                    });
+                
+                if glob.matches(text) {
+                    matching_ids.push(wildcard.pattern_id);
+                }
+            }
+        }
+        
+        // Check AC candidates (patterns that have literals that were found)
+        for &pattern_id in &candidate_patterns {
+                let patterns_offset = header.patterns_offset as usize;
+                let entry_offset = patterns_offset + (pattern_id as usize) * mem::size_of::<PatternEntry>();
+                let entry: PatternEntry = unsafe { read_struct(buffer, entry_offset) };
+                
+                // Get pattern string
+                let pattern_str = unsafe {
+                    read_cstring(buffer, entry.pattern_string_offset as usize)
+                        .unwrap_or("")
+                };
+                
+                // Check if pattern matches
+                if entry.pattern_type == 0 {
+                    // Literal pattern - simple substring check (avoid allocations)
+                    let matches = match self.mode {
+                        GlobMatchMode::CaseSensitive => {
+                            text.contains(pattern_str)
+                        }
+                        GlobMatchMode::CaseInsensitive => {
+                            // Case-insensitive substring search without allocation
+                            text.to_lowercase().contains(&pattern_str.to_lowercase())
+                        }
+                    };
+                    
+                    if matches {
+                        matching_ids.push(entry.pattern_id);
+                    }
+                } else {
+                    // Glob pattern - use glob matching
+                    let glob = self.glob_cache.entry(entry.pattern_id)
+                        .or_insert_with(|| {
+                            GlobPattern::new(pattern_str, self.mode)
+                                .expect("Invalid cached glob pattern")
+                        });
+                    
+                    if glob.matches(text) {
+                        matching_ids.push(entry.pattern_id);
+                    }
+                }
+        }
+        
+        matching_ids.sort_unstable();
+        matching_ids.dedup();
+        matching_ids
+    }
+    
+    /// Run AC automaton matching on the offset-based buffer
+    fn run_ac_matching(&self, ac_buffer: &[u8], text: &[u8]) -> Vec<u32> {
+        use crate::offset_format::ACNode;
+        use std::collections::HashSet;
+        
+        let mut matches = HashSet::new();
+        
+        if ac_buffer.is_empty() || text.is_empty() {
+            return Vec::new();
+        }
+        
+        
+        let mut current_offset = 0usize; // Start at root node
+        
+        for &ch in text.iter() {
+            // Normalize character for case-insensitive mode
+            let search_ch = match self.mode {
+                GlobMatchMode::CaseInsensitive => ch.to_ascii_lowercase(),
+                GlobMatchMode::CaseSensitive => ch,
+            };
+            
+            // Traverse to next state
+            loop {
+                // Try to find transition
+                if let Some(next_offset) = self.find_ac_transition(ac_buffer, current_offset, search_ch) {
+                    current_offset = next_offset;
+                    break;
+                }
+                
+                // Follow failure link
+                if current_offset == 0 {
+                    break; // At root, stay there
+                }
+                
+                let node: ACNode = unsafe { read_struct(ac_buffer, current_offset) };
+                current_offset = node.failure_offset as usize;
+                
+                // Continue loop to try transition from new state
+                // Don't break here - we need to retry the transition!
+            }
+            
+            // Collect pattern IDs at this state
+            let node: ACNode = unsafe { read_struct(ac_buffer, current_offset) };
+            if node.pattern_count > 0 {
+                let pattern_ids_slice: &[u32] = unsafe {
+                    std::slice::from_raw_parts(
+                        ac_buffer.as_ptr().add(node.patterns_offset as usize) as *const u32,
+                        node.pattern_count as usize,
+                    )
+                };
+                matches.extend(pattern_ids_slice.iter().copied());
+            }
+        }
+        
+        matches.into_iter().collect()
+    }
+    
+    /// Find a transition from a node for a character in AC automaton
+    fn find_ac_transition(&self, ac_buffer: &[u8], node_offset: usize, ch: u8) -> Option<usize> {
+        use crate::offset_format::ACNode;
+        
+        let node: ACNode = unsafe { read_struct(ac_buffer, node_offset) };
+        
+        if node.edge_count == 0 {
+            return None;
+        }
+        
+        let edges: &[ACEdge] = unsafe {
+            std::slice::from_raw_parts(
+                ac_buffer.as_ptr().add(node.edges_offset as usize) as *const ACEdge,
+                node.edge_count as usize,
+            )
+        };
+        
+        // Binary search (edges are sorted by character)
+        edges
+            .binary_search_by_key(&ch, |edge| edge.character)
+            .ok()
+            .map(|idx| edges[idx].target_offset as usize)
+    }
+    
+    /// Get the buffer (for serialization)
+    pub fn buffer(&self) -> &[u8] {
+        self.buffer.as_slice()
+    }
+    
+    /// Load from buffer (for deserialization)
+    pub fn from_buffer(buffer: Vec<u8>, mode: GlobMatchMode) -> Result<Self, ParaglobError> {
+        if buffer.len() < mem::size_of::<ParaglobHeader>() {
+            return Err(ParaglobError::SerializationError(
+                "Buffer too small".to_string()
+            ));
+        }
+        
+        let header: ParaglobHeader = unsafe { read_struct(&buffer, 0) };
+        header.validate()
+            .map_err(|e| ParaglobError::SerializationError(e.to_string()))?;
+        
+        // Reconstruct ac_literal_to_patterns mapping
+        let ac_literal_to_patterns = Self::reconstruct_literal_mapping(&buffer, &header)?;
+        
+        Ok(Self {
+            buffer: BufferStorage::Owned(buffer),
+            mode,
+            glob_cache: HashMap::new(),
+            ac_literal_to_patterns,
+        })
+    }
+    
+    /// Load from mmap'd slice (zero-copy)
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the slice remains valid for the lifetime
+    /// of this Paraglob instance. Typically used with memory-mapped files.
+    pub unsafe fn from_mmap(slice: &'static [u8], mode: GlobMatchMode) -> Result<Self, ParaglobError> {
+        if slice.len() < mem::size_of::<ParaglobHeader>() {
+            return Err(ParaglobError::SerializationError(
+                "Buffer too small".to_string()
+            ));
+        }
+        
+        let header: ParaglobHeader = read_struct(slice, 0);
+        header.validate()
+            .map_err(|e| ParaglobError::SerializationError(e.to_string()))?;
+        
+        // Reconstruct ac_literal_to_patterns mapping
+        let ac_literal_to_patterns = Self::reconstruct_literal_mapping(slice, &header)?;
+        
+        Ok(Self {
+            buffer: BufferStorage::Borrowed(slice),
+            mode,
+            glob_cache: HashMap::new(),
+            ac_literal_to_patterns,
+        })
+    }
+    
+    /// Get pattern count
+    pub fn pattern_count(&self) -> usize {
+        let buffer = self.buffer.as_slice();
+        if buffer.len() < mem::size_of::<ParaglobHeader>() {
+            return 0;
+        }
+        
+        let header: ParaglobHeader = unsafe { read_struct(buffer, 0) };
+        header.pattern_count as usize
+    }
+    
+    /// Reconstruct the AC literal to pattern ID mapping from the buffer
+    /// 
+    /// This is necessary after deserialization because the mapping is not stored
+    /// in the binary format. We reconstruct it by:
+    /// 1. Extracting literals from each pattern
+    /// 2. Building a temporary AC automaton with the same literals in the same order
+    /// 3. Using the temporary AC to determine the mapping
+    fn reconstruct_literal_mapping(
+        buffer: &[u8],
+        header: &ParaglobHeader
+    ) -> Result<HashMap<u32, Vec<u32>>, ParaglobError> {
+        let mut mapping: HashMap<u32, Vec<u32>> = HashMap::new();
+        
+        // Extract all literals from all patterns, building the mapping as we go
+        let mut all_literals = Vec::new();
+        let mut literal_to_patterns: HashMap<String, Vec<u32>> = HashMap::new();
+        
+        let patterns_offset = header.patterns_offset as usize;
+        let pattern_count = header.pattern_count as usize;
+        
+        for i in 0..pattern_count {
+            let entry_offset = patterns_offset + i * mem::size_of::<PatternEntry>();
+            let entry: PatternEntry = unsafe { read_struct(buffer, entry_offset) };
+            
+            let pattern_str = unsafe {
+                read_cstring(buffer, entry.pattern_string_offset as usize)
+                    .map_err(|e| ParaglobError::SerializationError(
+                        format!("Failed to read pattern string: {}", e)
+                    ))?
+            };
+            
+            // Extract literals based on pattern type
+            let literals = if entry.pattern_type == 0 {
+                // Literal pattern - the whole string is the literal
+                vec![pattern_str.to_string()]
+            } else {
+                // Glob pattern - extract literals from it
+                PatternType::extract_literals(pattern_str)
+            };
+            
+            // Add to mapping
+            for lit in literals {
+                // Check if this is a new literal
+                if !all_literals.contains(&lit) {
+                    all_literals.push(lit.clone());
+                }
+                
+                literal_to_patterns.entry(lit.clone())
+                    .or_default()
+                    .push(entry.pattern_id);
+            }
+        }
+        
+        // Now build the mapping from AC literal ID (index in all_literals) to pattern IDs
+        for (literal_id, literal_str) in all_literals.iter().enumerate() {
+            if let Some(pattern_ids) = literal_to_patterns.get(literal_str) {
+                mapping.insert(literal_id as u32, pattern_ids.clone());
+            }
+        }
+        
+        Ok(mapping)
+    }
+}
+
+// Implement Default
+impl Default for Paraglob {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_simple() {
+        let patterns = vec!["hello", "world"];
+        let pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        
+        assert_eq!(pg.pattern_count(), 2);
+        assert!(pg.buffer().len() > 0);
+    }
+
+    #[test]
+    fn test_literal_matching() {
+        let patterns = vec!["hello", "world"];
+        let mut pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        
+        let matches = pg.find_all("hello world");
+        assert_eq!(matches.len(), 2);
+        assert!(matches.contains(&0));
+        assert!(matches.contains(&1));
+    }
+
+    #[test]
+    fn test_glob_matching() {
+        let patterns = vec!["*.txt", "test_*"];
+        let mut pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        
+        let matches = pg.find_all("test_file.txt");
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_pure_wildcard() {
+        let patterns = vec!["*", "??"];
+        let mut pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        
+        let matches = pg.find_all("ab");
+        assert_eq!(matches.len(), 2); // Both match
+    }
+
+    #[test]
+    fn test_case_insensitive() {
+        let patterns = vec!["Hello", "*.TXT"];
+        let mut pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseInsensitive).unwrap();
+        
+        let matches = pg.find_all("hello test.txt");
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_no_match() {
+        let patterns = vec!["hello", "*.txt"];
+        let mut pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        
+        let matches = pg.find_all("goodbye world");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_serialization_roundtrip() {
+        let patterns = vec!["hello", "*.txt", "test_*"];
+        let mut pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        
+        // Get buffer
+        let buffer = pg.buffer().to_vec();
+        
+        // Restore from buffer
+        let mut pg2 = Paraglob::from_buffer(buffer, GlobMatchMode::CaseSensitive).unwrap();
+        
+        // Should produce same results
+        let text = "hello test_file.txt";
+        assert_eq!(pg.find_all(text), pg2.find_all(text));
+    }
+}
