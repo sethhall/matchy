@@ -1,8 +1,8 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::hint::black_box;
 use paraglob_rs::glob::MatchMode;
 use paraglob_rs::serialization::{load, save};
 use paraglob_rs::Paraglob;
+use std::hint::black_box;
 use std::time::Duration;
 use tempfile::NamedTempFile;
 
