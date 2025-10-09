@@ -71,6 +71,8 @@
 
 // Module declarations
 pub mod ac_offset;
+/// Data section encoding/decoding for v2 format
+pub mod data_section;
 /// Error types for Paraglob operations
 pub mod error;
 pub mod glob;
@@ -84,7 +86,7 @@ pub mod c_api;
 
 // Re-exports for Rust consumers
 pub use crate::error::ParaglobError;
-pub use crate::paraglob_offset::Paraglob;
+pub use crate::paraglob_offset::{Paraglob, ParaglobBuilder};
 
 // Version information
 /// Library version string
