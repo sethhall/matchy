@@ -21,7 +21,7 @@ memmap2 = "0.9.8"
 
 [dev-dependencies]
 # Testing dependencies
-criterion = "0.5"
+criterion = "0.7"
 proptest = "1.4"
 tempfile = "3.8"
 rand = "0.8"
