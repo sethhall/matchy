@@ -54,7 +54,7 @@ jobs:
             artifact_name: paraglob_rs.dll
             asset_name: paraglob_rs-windows-x86_64.dll
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
