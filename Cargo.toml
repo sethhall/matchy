@@ -1,6 +1,6 @@
 [package]
 name = "paraglob-rs"
-version = "0.1.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["Seth Hall <seth@remor.com>"]
 license = "BSD-2-Clause"
