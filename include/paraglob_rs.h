@@ -3,7 +3,7 @@
 #ifndef PARAGLOB_RS_H
 #define PARAGLOB_RS_H
 
-/* Generated with cbindgen:0.26.0 */
+/* Generated with cbindgen:0.29.0 */
 
 /* WARNING: This file is auto-generated. Manual changes will be lost. */
 
@@ -14,7 +14,7 @@
 
 #ifdef __cplusplus
 namespace paraglob_rs {
-#endif // __cplusplus
+#endif  // __cplusplus
 
 /*
  Error codes for C API
@@ -447,11 +447,11 @@ enum paraglob_error_t paraglob_save(const struct paraglob_db *db, const char *fi
 const uint8_t *paraglob_get_buffer(const struct paraglob_db *db, uintptr_t *size);
 
 #ifdef __cplusplus
-} // extern "C"
-#endif // __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
 
 #ifdef __cplusplus
-} // namespace paraglob_rs
-#endif // __cplusplus
+}  // namespace paraglob_rs
+#endif  // __cplusplus
 
-#endif /* PARAGLOB_RS_H */
+#endif  /* PARAGLOB_RS_H */

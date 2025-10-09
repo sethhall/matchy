@@ -1,7 +1,7 @@
-///! Production-like test demonstrating real-world usage
-///!
-///! This example shows how paraglob-rs would be used in a production environment
-///! with realistic pattern sets and demonstrates the performance characteristics.
+//! Production-like test demonstrating real-world usage
+//!
+//! This example shows how paraglob-rs would be used in a production environment
+//! with realistic pattern sets and demonstrates the performance characteristics.
 use paraglob_rs::glob::MatchMode;
 use paraglob_rs::serialization::{load, save};
 use paraglob_rs::Paraglob;
