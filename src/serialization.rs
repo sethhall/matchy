@@ -167,17 +167,18 @@ mod tests {
 
     #[test]
     fn test_file_roundtrip() {
-        let path = "/tmp/paraglob_test_file_roundtrip.pgb";
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("paraglob_test_file_roundtrip.pgb");
 
         let patterns = vec!["hello", "*.txt", "test_*"];
         let mut pg =
             Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
 
         // Save
-        save(&pg, path).unwrap();
+        save(&pg, &path).unwrap();
 
         // Load
-        let mut pg_loaded = load(path, GlobMatchMode::CaseSensitive).unwrap();
+        let mut pg_loaded = load(&path, GlobMatchMode::CaseSensitive).unwrap();
 
         // Test matching produces same results
         let text = "hello test_file.txt";
@@ -186,23 +187,24 @@ mod tests {
         assert_eq!(expected, actual);
 
         // Cleanup
-        fs::remove_file(path).ok();
+        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_shared_memory_simulation() {
         // Simulate multiple processes loading same file
         // OS shares physical memory pages between all loads
-        let path = "/tmp/paraglob_test_shared_memory.pgb";
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("paraglob_test_shared_memory.pgb");
 
         let patterns = vec!["hello", "*.txt", "test_*"];
         let pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
-        save(&pg, path).unwrap();
+        save(&pg, &path).unwrap();
 
         // Load multiple times (simulates multiple processes)
-        let mut pg1 = load(path, GlobMatchMode::CaseSensitive).unwrap();
-        let mut pg2 = load(path, GlobMatchMode::CaseSensitive).unwrap();
-        let mut pg3 = load(path, GlobMatchMode::CaseSensitive).unwrap();
+        let mut pg1 = load(&path, GlobMatchMode::CaseSensitive).unwrap();
+        let mut pg2 = load(&path, GlobMatchMode::CaseSensitive).unwrap();
+        let mut pg3 = load(&path, GlobMatchMode::CaseSensitive).unwrap();
 
         // All should produce identical results
         let text = "hello.txt";
@@ -215,12 +217,13 @@ mod tests {
         assert_eq!(m1.len(), 2);
 
         // Cleanup
-        fs::remove_file(path).ok();
+        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_instant_loading() {
-        let path = "/tmp/paraglob_test_instant_loading.pgb";
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("paraglob_test_instant_loading.pgb");
 
         // Create a pattern database
         let patterns: Vec<String> = (0..1000).map(|i| format!("pattern_{}_*.txt", i)).collect();
@@ -228,11 +231,11 @@ mod tests {
 
         let pg =
             Paraglob::build_from_patterns(&pattern_refs, GlobMatchMode::CaseSensitive).unwrap();
-        save(&pg, path).unwrap();
+        save(&pg, &path).unwrap();
 
         // Loading should be instant (just mmap syscall)
         let start = std::time::Instant::now();
-        let _pg_loaded = load(path, GlobMatchMode::CaseSensitive).unwrap();
+        let _pg_loaded = load(&path, GlobMatchMode::CaseSensitive).unwrap();
         let elapsed = start.elapsed();
 
         // Should be very fast (< 100ms) even for large files
@@ -244,7 +247,7 @@ mod tests {
         );
 
         // Cleanup
-        fs::remove_file(path).ok();
+        fs::remove_file(&path).ok();
     }
 
     #[test]
