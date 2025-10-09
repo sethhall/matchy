@@ -2,7 +2,6 @@
 ///!
 ///! This example shows how paraglob-rs would be used in a production environment
 ///! with realistic pattern sets and demonstrates the performance characteristics.
-
 use paraglob_rs::glob::MatchMode;
 use paraglob_rs::serialization::{load, save};
 use paraglob_rs::Paraglob;
@@ -75,7 +74,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive)?;
     let build_time = start.elapsed();
-    println!("  Build time: {:.2}ms", build_time.as_micros() as f64 / 1000.0);
+    println!(
+        "  Build time: {:.2}ms",
+        build_time.as_micros() as f64 / 1000.0
+    );
     println!("  Patterns loaded: {}", pg.pattern_count());
 
     // === Test 2: Matching Performance ===
@@ -112,7 +114,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    println!("\n  Average match time: {:.2}µs", (total_time.as_nanos() as f64 / test_strings.len() as f64) / 1000.0);
+    println!(
+        "\n  Average match time: {:.2}µs",
+        (total_time.as_nanos() as f64 / test_strings.len() as f64) / 1000.0
+    );
     println!("  Total matches found: {}", total_matches);
 
     // === Test 3: Serialization ===
@@ -126,9 +131,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let file_size = std::fs::metadata(temp_file)?.len();
 
-    println!("  Save time: {:.2}ms", save_time.as_micros() as f64 / 1000.0);
-    println!("  File size: {} bytes ({:.2} KB)", file_size, file_size as f64 / 1024.0);
-    println!("  Bytes per pattern: {:.1}", file_size as f64 / patterns.len() as f64);
+    println!(
+        "  Save time: {:.2}ms",
+        save_time.as_micros() as f64 / 1000.0
+    );
+    println!(
+        "  File size: {} bytes ({:.2} KB)",
+        file_size,
+        file_size as f64 / 1024.0
+    );
+    println!(
+        "  Bytes per pattern: {:.1}",
+        file_size as f64 / patterns.len() as f64
+    );
 
     // === Test 4: Load Performance (The Magic!) ===
     println!("\n--- Load Performance (Zero-Copy mmap) ---");
@@ -154,13 +169,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Memory Sharing Benefits ---");
 
     println!("  Traditional approach (heap-based):");
-    println!("    100 processes × {} KB = {:.1} MB total RAM",
+    println!(
+        "    100 processes × {} KB = {:.1} MB total RAM",
         file_size as f64 / 1024.0,
         (100.0 * file_size as f64) / (1024.0 * 1024.0)
     );
 
     println!("  Memory-mapped approach (this implementation):");
-    println!("    100 processes sharing {} KB = {:.2} MB total RAM",
+    println!(
+        "    100 processes sharing {} KB = {:.2} MB total RAM",
         file_size as f64 / 1024.0,
         file_size as f64 / (1024.0 * 1024.0)
     );
@@ -168,7 +185,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let savings = ((100.0 * file_size as f64) - file_size as f64) / (1024.0 * 1024.0);
     let savings_pct = 99.0;
 
-    println!("  💰 Memory savings: {:.1} MB ({:.0}% reduction!)",
+    println!(
+        "  💰 Memory savings: {:.1} MB ({:.0}% reduction!)",
         savings, savings_pct
     );
 
@@ -201,18 +219,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("  Processed: {} strings", batch_size);
     println!("  Total time: {:.2}ms", batch_time.as_millis());
-    println!("  Average per string: {:.2}µs", batch_time.as_nanos() as f64 / (batch_size as f64 * 1000.0));
-    println!("  Throughput: {:.0} strings/second", batch_size as f64 / batch_time.as_secs_f64());
+    println!(
+        "  Average per string: {:.2}µs",
+        batch_time.as_nanos() as f64 / (batch_size as f64 * 1000.0)
+    );
+    println!(
+        "  Throughput: {:.0} strings/second",
+        batch_size as f64 / batch_time.as_secs_f64()
+    );
     println!("  Total matches: {}", batch_matches);
 
     // === Summary ===
     println!("\n=== Performance Summary ===");
-    println!("✅ Build: {:.2}ms for {} patterns", build_time.as_micros() as f64 / 1000.0, patterns.len());
-    println!("✅ Match: {:.2}µs average per query", (total_time.as_nanos() as f64 / test_strings.len() as f64) / 1000.0);
-    println!("✅ Save: {:.2}ms to file", save_time.as_micros() as f64 / 1000.0);
+    println!(
+        "✅ Build: {:.2}ms for {} patterns",
+        build_time.as_micros() as f64 / 1000.0,
+        patterns.len()
+    );
+    println!(
+        "✅ Match: {:.2}µs average per query",
+        (total_time.as_nanos() as f64 / test_strings.len() as f64) / 1000.0
+    );
+    println!(
+        "✅ Save: {:.2}ms to file",
+        save_time.as_micros() as f64 / 1000.0
+    );
     println!("✅ Load: ~1ms via zero-copy mmap");
     println!("✅ Memory: 99% savings in multi-process");
-    println!("✅ Throughput: {:.0} queries/second", batch_size as f64 / batch_time.as_secs_f64());
+    println!(
+        "✅ Throughput: {:.0} queries/second",
+        batch_size as f64 / batch_time.as_secs_f64()
+    );
 
     println!("\n🎉 All tests passed! Ready for production!");
 

@@ -75,16 +75,16 @@ pub mod ac_offset;
 pub mod error;
 pub mod glob;
 pub mod mmap;
-pub mod paraglob_offset;
 pub mod offset_format;
+pub mod paraglob_offset;
 pub mod serialization;
 
 // Public C API
 pub mod c_api;
 
 // Re-exports for Rust consumers
-pub use crate::paraglob_offset::Paraglob;
 pub use crate::error::ParaglobError;
+pub use crate::paraglob_offset::Paraglob;
 
 // Version information
 /// Library version string

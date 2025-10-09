@@ -47,55 +47,55 @@ pub const VERSION: u32 = 1;
 pub struct ParaglobHeader {
     /// Magic bytes: "PARAGLOB"
     pub magic: [u8; 8],
-    
+
     /// Format version (currently 1)
     pub version: u32,
-    
+
     /// Match mode: 0=CaseSensitive, 1=CaseInsensitive
     pub match_mode: u32,
-    
+
     // AC Automaton section
     /// Number of nodes in the AC trie
     pub ac_node_count: u32,
-    
+
     /// Offset to first AC node
     pub ac_nodes_offset: u32,
-    
+
     /// Total size of AC edges data
     pub ac_edges_size: u32,
-    
+
     /// Total size of AC pattern ID arrays
     pub ac_patterns_size: u32,
-    
+
     // Pattern section
     /// Total number of original glob patterns
     pub pattern_count: u32,
-    
+
     /// Offset to pattern entry array
     pub patterns_offset: u32,
-    
+
     /// Offset to pattern strings area
     pub pattern_strings_offset: u32,
-    
+
     /// Total size of pattern strings
     pub pattern_strings_size: u32,
-    
+
     // Meta-word mapping section
     /// Number of meta-word to pattern mappings
     pub meta_word_mapping_count: u32,
-    
+
     /// Offset to meta-word mapping array
     pub meta_word_mappings_offset: u32,
-    
+
     /// Total size of pattern reference arrays
     pub pattern_refs_size: u32,
-    
+
     /// Number of pure wildcard patterns (no literals)
     pub wildcard_count: u32,
-    
+
     /// Total size of the entire serialized buffer (bytes)
     pub total_buffer_size: u32,
-    
+
     /// Reserved for future use
     pub reserved: u32,
 }
@@ -109,31 +109,31 @@ pub struct ParaglobHeader {
 pub struct ACNode {
     /// Unique node ID
     pub node_id: u32,
-    
+
     /// Offset to failure link node (0 = root)
     pub failure_offset: u32,
-    
+
     /// Offset to edge array (0 = no edges)
     pub edges_offset: u32,
-    
+
     /// Number of outgoing edges
     pub edge_count: u16,
-    
+
     /// Reserved for alignment
     pub reserved1: u16,
-    
+
     /// Offset to pattern ID array (0 = no patterns)
     pub patterns_offset: u32,
-    
+
     /// Number of pattern IDs at this node
     pub pattern_count: u16,
-    
+
     /// Is this a terminal/word node?
     pub is_final: u8,
-    
+
     /// Depth from root
     pub depth: u8,
-    
+
     /// Reserved for future use (padding to 32 bytes)
     pub reserved2: [u32; 2],
 }
@@ -146,10 +146,10 @@ pub struct ACNode {
 pub struct ACEdge {
     /// Input character (0-255)
     pub character: u8,
-    
+
     /// Reserved for alignment
     pub reserved: [u8; 3],
-    
+
     /// Offset to target node
     pub target_offset: u32,
 }
@@ -162,16 +162,16 @@ pub struct ACEdge {
 pub struct PatternEntry {
     /// Pattern ID (matches IDs used in AC automaton)
     pub pattern_id: u32,
-    
+
     /// Pattern type: 0=Literal, 1=Glob
     pub pattern_type: u8,
-    
+
     /// Reserved for alignment
     pub reserved: [u8; 3],
-    
+
     /// Offset to pattern string (null-terminated UTF-8)
     pub pattern_string_offset: u32,
-    
+
     /// Length of pattern string (not including null)
     pub pattern_string_length: u32,
 }
@@ -185,10 +185,10 @@ pub struct PatternEntry {
 pub struct MetaWordMapping {
     /// Meta-word string offset
     pub meta_word_offset: u32,
-    
+
     /// Offset to array of pattern IDs (u32[])
     pub pattern_ids_offset: u32,
-    
+
     /// Number of patterns containing this meta-word
     pub pattern_count: u32,
 }
@@ -202,13 +202,13 @@ pub struct MetaWordMapping {
 pub struct SingleWildcard {
     /// Pattern ID
     pub pattern_id: u32,
-    
+
     /// Offset to pattern string
     pub pattern_string_offset: u32,
 }
 
 // Compile-time size assertions to ensure struct layout
-const _: () = assert!(mem::size_of::<ParaglobHeader>() == 72);  // 8-byte magic + 16 * u32 fields
+const _: () = assert!(mem::size_of::<ParaglobHeader>() == 72); // 8-byte magic + 16 * u32 fields
 const _: () = assert!(mem::size_of::<ACNode>() == 32);
 const _: () = assert!(mem::size_of::<ACEdge>() == 8);
 const _: () = assert!(mem::size_of::<PatternEntry>() == 16);
@@ -244,7 +244,7 @@ impl ParaglobHeader {
             reserved: 0,
         }
     }
-    
+
     /// Validate header magic and version
     pub fn validate(&self) -> Result<(), &'static str> {
         if &self.magic != MAGIC {
@@ -338,21 +338,20 @@ pub unsafe fn read_cstring(buffer: &[u8], offset: usize) -> Result<&str, &'stati
     if offset >= buffer.len() {
         return Err("Offset out of bounds");
     }
-    
+
     // Find null terminator
     let start = offset;
     let mut end = offset;
     while end < buffer.len() && buffer[end] != 0 {
         end += 1;
     }
-    
+
     if end >= buffer.len() {
         return Err("String not null-terminated");
     }
-    
+
     // Convert to str
-    std::str::from_utf8(&buffer[start..end])
-        .map_err(|_| "Invalid UTF-8")
+    std::str::from_utf8(&buffer[start..end]).map_err(|_| "Invalid UTF-8")
 }
 
 #[cfg(test)]
@@ -361,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_header_size() {
-        assert_eq!(mem::size_of::<ParaglobHeader>(), 72);  // 8-byte magic + 16 * u32
+        assert_eq!(mem::size_of::<ParaglobHeader>(), 72); // 8-byte magic + 16 * u32
         assert_eq!(mem::align_of::<ParaglobHeader>(), 4);
     }
 
@@ -387,10 +386,10 @@ mod tests {
     fn test_header_validation() {
         let mut header = ParaglobHeader::new();
         assert!(header.validate().is_ok());
-        
+
         header.magic = *b"INVALID!";
         assert!(header.validate().is_err());
-        
+
         header.magic = *MAGIC;
         header.version = 999;
         assert!(header.validate().is_err());
@@ -398,15 +397,15 @@ mod tests {
 
     #[test]
     fn test_read_struct() {
-        let mut buffer = vec![0u8; 72];  // Correct header size
+        let mut buffer = vec![0u8; 72]; // Correct header size
         let header = ParaglobHeader::new();
-        
+
         // Write header to buffer
         unsafe {
             let ptr = buffer.as_mut_ptr() as *mut ParaglobHeader;
             ptr.write(header);
         }
-        
+
         // Read it back
         let read_header: ParaglobHeader = unsafe { read_struct(&buffer, 0) };
         assert_eq!(read_header.magic, *MAGIC);
@@ -416,14 +415,14 @@ mod tests {
     #[test]
     fn test_read_cstring() {
         let buffer = b"hello\0world\0\0";
-        
+
         unsafe {
             let s1 = read_cstring(buffer, 0).unwrap();
             assert_eq!(s1, "hello");
-            
+
             let s2 = read_cstring(buffer, 6).unwrap();
             assert_eq!(s2, "world");
-            
+
             let s3 = read_cstring(buffer, 12).unwrap();
             assert_eq!(s3, "");
         }

@@ -27,11 +27,11 @@
 
 use crate::offset_format::{ParaglobHeader, MAGIC, VERSION};
 use memmap2::Mmap;
+use std::fmt;
 use std::fs::File;
 use std::io;
-use std::path::Path;
-use std::fmt;
 use std::mem;
+use std::path::Path;
 
 /// Validate a Paraglob header from a buffer
 fn validate_paraglob_header(buffer: &[u8]) -> Result<&ParaglobHeader, String> {
@@ -93,7 +93,11 @@ impl fmt::Display for MmapError {
         match self {
             MmapError::Io(e) => write!(f, "I/O error: {}", e),
             MmapError::FileTooSmall { size, required } => {
-                write!(f, "File too small: {} bytes (need at least {})", size, required)
+                write!(
+                    f,
+                    "File too small: {} bytes (need at least {})",
+                    size, required
+                )
             }
             MmapError::InvalidParaglobHeader(msg) => write!(f, "Invalid Paraglob header: {}", msg),
         }
@@ -205,7 +209,6 @@ impl MmapFile {
         &self.mmap[..]
     }
 
-
     /// Get a slice at a specific offset with bounds checking.
     ///
     /// Returns `None` if the offset + length would exceed the file size.
@@ -257,15 +260,15 @@ mod tests {
     fn test_invalid_magic() {
         // Create a header with wrong magic bytes
         let mut header = ParaglobHeader::new();
-        header.magic = *b"XXXXXXXX";  // Invalid magic
+        header.magic = *b"XXXXXXXX"; // Invalid magic
         header.total_buffer_size = std::mem::size_of::<ParaglobHeader>() as u32;
-        
+
         let mut data = vec![0u8; std::mem::size_of::<ParaglobHeader>()];
         unsafe {
             let ptr = data.as_mut_ptr() as *mut ParaglobHeader;
             ptr.write(header);
         }
-        
+
         let file = create_test_file(&data);
         let result = MmapFile::open(file.path());
         assert!(matches!(result, Err(MmapError::InvalidParaglobHeader(_))));
@@ -275,14 +278,14 @@ mod tests {
     fn test_valid_paraglob_header() {
         let mut header = ParaglobHeader::new();
         header.total_buffer_size = std::mem::size_of::<ParaglobHeader>() as u32;
-        
+
         // Serialize header to bytes
         let mut data = vec![0u8; std::mem::size_of::<ParaglobHeader>()];
         unsafe {
             let ptr = data.as_mut_ptr() as *mut ParaglobHeader;
             ptr.write(header);
         }
-        
+
         let file = create_test_file(&data);
         let mmap = MmapFile::open(file.path()).expect("Failed to open valid Paraglob file");
         assert_eq!(mmap.size(), data.len());
@@ -295,26 +298,26 @@ mod tests {
         let payload = vec![1, 2, 3, 4, 5, 6, 7, 8];
         let header_size = std::mem::size_of::<ParaglobHeader>();
         let total_size = header_size + payload.len();
-        
+
         // Create valid Paraglob header
         let mut header = ParaglobHeader::new();
         header.total_buffer_size = total_size as u32;
-        
+
         let mut data = vec![0u8; header_size];
         unsafe {
             let ptr = data.as_mut_ptr() as *mut ParaglobHeader;
             ptr.write(header);
         }
         data.extend_from_slice(&payload);
-        
+
         let file = create_test_file(&data);
         let mmap = MmapFile::open(file.path()).unwrap();
-        
+
         // Valid slice
         let offset = header_size;
         let slice = mmap.get_slice(offset, 4).unwrap();
         assert_eq!(slice, &[1, 2, 3, 4]);
-        
+
         // Out of bounds
         assert!(mmap.get_slice(mmap.size(), 1).is_none());
         assert!(mmap.get_slice(0, mmap.size() + 1).is_none());

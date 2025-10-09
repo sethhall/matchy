@@ -30,7 +30,14 @@ fn generate_patterns(count: usize, pattern_type: &str) -> Vec<String> {
 
 fn generate_text(size: usize, match_rate: &str) -> String {
     let words = vec![
-        "hello", "world", "test", "file", "literal", "data", "sample", "benchmark",
+        "hello",
+        "world",
+        "test",
+        "file",
+        "literal",
+        "data",
+        "sample",
+        "benchmark",
     ];
 
     match match_rate {
@@ -124,10 +131,7 @@ fn bench_match(c: &mut Criterion) {
 
                 group.throughput(Throughput::Bytes(text.len() as u64));
                 group.bench_with_input(
-                    BenchmarkId::new(
-                        format!("p{}_t{}", pattern_count, text_size),
-                        match_rate,
-                    ),
+                    BenchmarkId::new(format!("p{}_t{}", pattern_count, text_size), match_rate),
                     &text,
                     |b, text| {
                         b.iter(|| {

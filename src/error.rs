@@ -9,22 +9,22 @@ pub type Result<T> = std::result::Result<T, ParaglobError>;
 pub enum ParaglobError {
     /// Pattern-related errors
     InvalidPattern(String),
-    
+
     /// I/O errors
     Io(String),
-    
+
     /// Memory mapping errors
     Mmap(String),
-    
+
     /// Format/parsing errors
     Format(String),
-    
+
     /// Validation errors
     Validation(String),
-    
+
     /// Serialization/deserialization errors
     SerializationError(String),
-    
+
     /// General errors
     Other(String),
 }

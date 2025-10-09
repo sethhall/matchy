@@ -2,9 +2,9 @@
 //!
 //! This module provides a stable C ABI for use from C and C++ programs.
 
-use crate::mmap::{MmapFile, MmapError};
-use crate::paraglob_offset::Paraglob;
 use crate::glob::MatchMode as GlobMatchMode;
+use crate::mmap::{MmapError, MmapFile};
+use crate::paraglob_offset::Paraglob;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::path::Path;
@@ -160,9 +160,7 @@ impl From<MmapError> for paraglob_error_t {
 /// }
 /// ```
 #[no_mangle]
-pub unsafe extern "C" fn paraglob_open_mmap(
-    filename: *const c_char,
-) -> *mut paraglob_db {
+pub unsafe extern "C" fn paraglob_open_mmap(filename: *const c_char) -> *mut paraglob_db {
     // Validate input
     if filename.is_null() {
         return std::ptr::null_mut();
@@ -185,7 +183,7 @@ pub unsafe extern "C" fn paraglob_open_mmap(
     // SAFETY: We're extending the lifetime to 'static, which is safe because
     // we're keeping the MmapFile alive in the same structure
     let static_slice: &'static [u8] = std::mem::transmute(slice);
-    
+
     let paraglob = match Paraglob::from_mmap(static_slice, GlobMatchMode::CaseSensitive) {
         Ok(p) => p,
         Err(_) => return std::ptr::null_mut(),
@@ -232,10 +230,7 @@ pub unsafe extern "C" fn paraglob_open_mmap(
 /// // Now you can free data
 /// ```
 #[no_mangle]
-pub unsafe extern "C" fn paraglob_open_buffer(
-    buffer: *const u8,
-    size: usize,
-) -> *mut paraglob_db {
+pub unsafe extern "C" fn paraglob_open_buffer(buffer: *const u8, size: usize) -> *mut paraglob_db {
     // Validate input
     if buffer.is_null() || size == 0 {
         return std::ptr::null_mut();
@@ -352,7 +347,7 @@ pub unsafe extern "C" fn paraglob_find_all(
     // Allocate result array using malloc (so it can be freed with free())
     let size = matches.len() * std::mem::size_of::<libc::c_int>();
     let ptr = libc::malloc(size) as *mut libc::c_int;
-    
+
     if ptr.is_null() {
         *result_count = 0;
         return std::ptr::null_mut();
@@ -445,7 +440,7 @@ pub unsafe extern "C" fn paraglob_version(db: *const paraglob_db) -> u32 {
         return 0;
     }
     let internal = paraglob_db::as_internal(db);
-    
+
     // Get version from the mmap if available, otherwise from paraglob buffer
     match &internal.storage {
         DbStorage::Mmap(mmap) => mmap.paraglob_header().version,
@@ -457,7 +452,12 @@ pub unsafe extern "C" fn paraglob_version(db: *const paraglob_db) -> u32 {
             }
             // Read the version field (at offset 8 after the 8-byte magic)
             let version_bytes = &buffer[8..12];
-            u32::from_ne_bytes([version_bytes[0], version_bytes[1], version_bytes[2], version_bytes[3]])
+            u32::from_ne_bytes([
+                version_bytes[0],
+                version_bytes[1],
+                version_bytes[2],
+                version_bytes[3],
+            ])
         }
     }
 }
@@ -499,7 +499,7 @@ pub unsafe extern "C" fn paraglob_builder_new(
         patterns: Vec::new(),
         case_sensitive: case_sensitive != 0,
     });
-    
+
     paraglob_builder::from_internal(internal)
 }
 
@@ -537,19 +537,19 @@ pub unsafe extern "C" fn paraglob_builder_add(
     if builder.is_null() || pattern.is_null() {
         return paraglob_error_t::PARAGLOB_ERROR_INVALID_PARAM;
     }
-    
+
     // Convert C string to Rust
     let pattern_str = match CStr::from_ptr(pattern).to_str() {
         Ok(s) => s,
         Err(_) => return paraglob_error_t::PARAGLOB_ERROR_INVALID_PARAM,
     };
-    
+
     // Add to patterns (deduplicate)
     let internal = paraglob_builder::as_internal_mut(builder);
     if !internal.patterns.contains(&pattern_str.to_string()) {
         internal.patterns.push(pattern_str.to_string());
     }
-    
+
     paraglob_error_t::PARAGLOB_SUCCESS
 }
 
@@ -575,15 +575,15 @@ pub unsafe extern "C" fn paraglob_builder_add(
 /// paraglob_builder* builder = paraglob_builder_new(1);
 /// paraglob_builder_add(builder, "*.txt");
 /// paraglob_builder_add(builder, "*.log");
-/// 
+///
 /// paraglob_db* db = paraglob_builder_compile(builder);
 /// // builder is now invalid - don't use it
-/// 
+///
 /// if (db == NULL) {
 ///     fprintf(stderr, "Failed to compile patterns\n");
 ///     return 1;
 /// }
-/// 
+///
 /// // Use db...
 /// paraglob_close(db);
 /// ```
@@ -595,36 +595,36 @@ pub unsafe extern "C" fn paraglob_builder_compile(
     if builder.is_null() {
         return std::ptr::null_mut();
     }
-    
+
     // Take ownership of builder
     let internal = paraglob_builder::into_internal(builder);
-    
+
     if internal.patterns.is_empty() {
         return std::ptr::null_mut();
     }
-    
+
     // Convert patterns to &str slice
     let pattern_refs: Vec<&str> = internal.patterns.iter().map(|s| s.as_str()).collect();
-    
+
     // Determine match mode
     let mode = if internal.case_sensitive {
         GlobMatchMode::CaseSensitive
     } else {
         GlobMatchMode::CaseInsensitive
     };
-    
+
     // Build the paraglob
     let paraglob = match Paraglob::build_from_patterns(&pattern_refs, mode) {
         Ok(pg) => pg,
         Err(_) => return std::ptr::null_mut(),
     };
-    
+
     // Create database internal structure
     let db_internal = Box::new(ParaglobDbInternal {
         storage: DbStorage::Buffer,
         paraglob,
     });
-    
+
     paraglob_db::from_internal(db_internal)
 }
 
@@ -679,11 +679,11 @@ pub unsafe extern "C" fn paraglob_builder_free(builder: *mut paraglob_builder) {
 /// paraglob_builder* builder = paraglob_builder_new(1);
 /// paraglob_builder_add(builder, "*.txt");
 /// paraglob_db* db = paraglob_builder_compile(builder);
-/// 
+///
 /// if (paraglob_save(db, "patterns.pgb") != PARAGLOB_SUCCESS) {
 ///     fprintf(stderr, "Failed to save database\n");
 /// }
-/// 
+///
 /// paraglob_close(db);
 /// ```
 #[no_mangle]
@@ -695,33 +695,33 @@ pub unsafe extern "C" fn paraglob_save(
     if db.is_null() || filename.is_null() {
         return paraglob_error_t::PARAGLOB_ERROR_INVALID_PARAM;
     }
-    
+
     // Convert filename to Rust
     let path_str = match CStr::from_ptr(filename).to_str() {
         Ok(s) => s,
         Err(_) => return paraglob_error_t::PARAGLOB_ERROR_INVALID_PARAM,
     };
-    
+
     let internal = paraglob_db::as_internal(db);
-    
+
     // Get buffer from paraglob
     let buffer = internal.paraglob.buffer();
-    
+
     // Write to file
     use std::io::Write;
     let mut file = match std::fs::File::create(path_str) {
         Ok(f) => f,
         Err(_) => return paraglob_error_t::PARAGLOB_ERROR_IO,
     };
-    
+
     if file.write_all(buffer).is_err() {
         return paraglob_error_t::PARAGLOB_ERROR_IO;
     }
-    
+
     if file.sync_all().is_err() {
         return paraglob_error_t::PARAGLOB_ERROR_IO;
     }
-    
+
     paraglob_error_t::PARAGLOB_SUCCESS
 }
 
@@ -767,10 +767,10 @@ pub unsafe extern "C" fn paraglob_get_buffer(
         }
         return std::ptr::null();
     }
-    
+
     let internal = paraglob_db::as_internal(db);
     let buffer = internal.paraglob.buffer();
-    
+
     *size = buffer.len();
     buffer.as_ptr()
 }

@@ -54,13 +54,13 @@ pub enum MatchMode {
 pub enum GlobSegment {
     /// Literal text segment (no wildcards)
     Literal(String),
-    
+
     /// `*` - matches zero or more of any character
     Star,
-    
+
     /// `?` - matches exactly one character
     Question,
-    
+
     /// `[...]` - character class, matches one character from the set
     CharClass {
         /// Characters or ranges to match
@@ -239,7 +239,7 @@ impl GlobPattern {
             GlobSegment::Star => {
                 // `*` matches zero or more characters
                 // Try matching with zero characters first (greedy is handled by trying longest first)
-                
+
                 // Special case: if star is at the end, it matches everything remaining
                 if seg_idx + 1 >= self.segments.len() {
                     return true;
@@ -284,7 +284,7 @@ impl GlobPattern {
 
                 '[' => {
                     flush_literal(&mut literal_buf, &mut segments);
-                    
+
                     // Parse character class
                     let mut negated = false;
                     let mut class_items = Vec::new();
@@ -314,7 +314,11 @@ impl GlobPattern {
                             break;
                         }
 
-                        if class_ch == '-' && prev_char.is_some() && chars.peek().is_some() && chars.peek() != Some(&']') {
+                        if class_ch == '-'
+                            && prev_char.is_some()
+                            && chars.peek().is_some()
+                            && chars.peek() != Some(&']')
+                        {
                             // This is a range
                             expect_range_end = true;
                         } else if expect_range_end {
@@ -322,9 +326,10 @@ impl GlobPattern {
                             let start = prev_char.unwrap();
                             let end = class_ch;
                             if start > end {
-                                return Err(ParaglobError::InvalidPattern(
-                                    format!("Invalid character range: {}-{}", start, end)
-                                ));
+                                return Err(ParaglobError::InvalidPattern(format!(
+                                    "Invalid character range: {}-{}",
+                                    start, end
+                                )));
                             }
                             class_items.push(CharClassItem::Range(start, end));
                             prev_char = None;
@@ -340,7 +345,7 @@ impl GlobPattern {
 
                     if class_items.is_empty() {
                         return Err(ParaglobError::InvalidPattern(
-                            "Empty character class".to_string()
+                            "Empty character class".to_string(),
                         ));
                     }
 
@@ -356,7 +361,7 @@ impl GlobPattern {
                         literal_buf.push(escaped);
                     } else {
                         return Err(ParaglobError::InvalidPattern(
-                            "Trailing backslash in pattern".to_string()
+                            "Trailing backslash in pattern".to_string(),
                         ));
                     }
                 }
