@@ -35,20 +35,27 @@ use std::mem;
 /// Magic bytes identifying Paraglob binary format
 pub const MAGIC: &[u8; 8] = b"PARAGLOB";
 
-/// Current format version
-pub const VERSION: u32 = 1;
+/// Current format version (v2: adds data section support)
+pub const VERSION: u32 = 2;
 
-/// Main header for serialized Paraglob database (72 bytes, 4-byte aligned)
+/// Previous format version (v1: patterns only, no data)
+pub const VERSION_V1: u32 = 1;
+
+/// Main header for serialized Paraglob database (96 bytes, 4-byte aligned)
 ///
 /// This header appears at the start of every serialized Paraglob file.
 /// All offsets are relative to the start of the buffer.
+///
+/// # Version History
+/// - v1 (72 bytes): Original format, patterns only
+/// - v2 (96 bytes): Adds data section support for pattern-associated data
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ParaglobHeader {
     /// Magic bytes: "PARAGLOB"
     pub magic: [u8; 8],
 
-    /// Format version (currently 1)
+    /// Format version (currently 2)
     pub version: u32,
 
     /// Match mode: 0=CaseSensitive, 1=CaseInsensitive
@@ -98,6 +105,30 @@ pub struct ParaglobHeader {
 
     /// Reserved for future use
     pub reserved: u32,
+
+    // ===== v2 ADDITIONS (24 bytes) =====
+    /// Offset to data section (0 = no data section)
+    /// Points to MMDB-encoded data or other serialized data
+    pub data_section_offset: u32,
+
+    /// Size of data section in bytes (0 = no data)
+    pub data_section_size: u32,
+
+    /// Offset to pattern→data mapping table (0 = no mappings)
+    /// Each mapping is a PatternDataMapping struct
+    pub mapping_table_offset: u32,
+
+    /// Number of pattern→data mappings
+    /// Should equal pattern_count if all patterns have data
+    pub mapping_count: u32,
+
+    /// Data type flags:
+    /// - Bit 0: inline data (1) vs external references (0)
+    /// - Bit 1-31: reserved
+    pub data_flags: u32,
+
+    /// Reserved for future v2+ features
+    pub reserved_v2: u32,
 }
 
 /// AC Automaton node (32 bytes, 8-byte aligned)
@@ -207,13 +238,33 @@ pub struct SingleWildcard {
     pub pattern_string_offset: u32,
 }
 
+/// Pattern-to-data mapping entry (12 bytes, 4-byte aligned)
+///
+/// Maps a pattern ID to associated data. Used in v2 format.
+/// The data can be inline (stored in data section) or external
+/// (reference to MMDB data section).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PatternDataMapping {
+    /// Pattern ID this mapping applies to
+    pub pattern_id: u32,
+
+    /// Offset to data in data section (or external offset)
+    /// Interpretation depends on data_flags in header
+    pub data_offset: u32,
+
+    /// Size of data in bytes (0 = use data section's size encoding)
+    pub data_size: u32,
+}
+
 // Compile-time size assertions to ensure struct layout
-const _: () = assert!(mem::size_of::<ParaglobHeader>() == 72); // 8-byte magic + 16 * u32 fields
+const _: () = assert!(mem::size_of::<ParaglobHeader>() == 96); // v2: 8-byte magic + 22 * u32 fields
 const _: () = assert!(mem::size_of::<ACNode>() == 32);
 const _: () = assert!(mem::size_of::<ACEdge>() == 8);
 const _: () = assert!(mem::size_of::<PatternEntry>() == 16);
 const _: () = assert!(mem::size_of::<MetaWordMapping>() == 12);
 const _: () = assert!(mem::size_of::<SingleWildcard>() == 8);
+const _: () = assert!(mem::size_of::<PatternDataMapping>() == 12);
 
 impl Default for ParaglobHeader {
     fn default() -> Self {
@@ -221,8 +272,19 @@ impl Default for ParaglobHeader {
     }
 }
 
+impl PatternDataMapping {
+    /// Create a new pattern-to-data mapping
+    pub fn new(pattern_id: u32, data_offset: u32, data_size: u32) -> Self {
+        Self {
+            pattern_id,
+            data_offset,
+            data_size,
+        }
+    }
+}
+
 impl ParaglobHeader {
-    /// Create a new header with magic and version
+    /// Create a new v2 header with magic and version
     pub fn new() -> Self {
         Self {
             magic: *MAGIC,
@@ -242,6 +304,13 @@ impl ParaglobHeader {
             wildcard_count: 0,
             total_buffer_size: 0,
             reserved: 0,
+            // v2 fields
+            data_section_offset: 0,
+            data_section_size: 0,
+            mapping_table_offset: 0,
+            mapping_count: 0,
+            data_flags: 0,
+            reserved_v2: 0,
         }
     }
 
@@ -250,10 +319,25 @@ impl ParaglobHeader {
         if &self.magic != MAGIC {
             return Err("Invalid magic bytes");
         }
-        if self.version != VERSION {
+        if self.version != VERSION && self.version != VERSION_V1 {
             return Err("Unsupported version");
         }
         Ok(())
+    }
+
+    /// Check if this is a v2 format file (with data section support)
+    pub fn is_v2(&self) -> bool {
+        self.version == VERSION
+    }
+
+    /// Check if this file has a data section
+    pub fn has_data_section(&self) -> bool {
+        self.is_v2() && self.data_section_size > 0
+    }
+
+    /// Check if data is inline (true) or external references (false)
+    pub fn has_inline_data(&self) -> bool {
+        (self.data_flags & 0x1) != 0
     }
 }
 
@@ -360,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_header_size() {
-        assert_eq!(mem::size_of::<ParaglobHeader>(), 72); // 8-byte magic + 16 * u32
+        assert_eq!(mem::size_of::<ParaglobHeader>(), 96); // v2: 8-byte magic + 22 * u32
         assert_eq!(mem::align_of::<ParaglobHeader>(), 4);
     }
 
@@ -386,6 +470,7 @@ mod tests {
     fn test_header_validation() {
         let mut header = ParaglobHeader::new();
         assert!(header.validate().is_ok());
+        assert!(header.is_v2());
 
         header.magic = *b"INVALID!";
         assert!(header.validate().is_err());
@@ -393,11 +478,32 @@ mod tests {
         header.magic = *MAGIC;
         header.version = 999;
         assert!(header.validate().is_err());
+
+        // v1 should still be valid
+        header.version = VERSION_V1;
+        assert!(header.validate().is_ok());
+        assert!(!header.is_v2());
+    }
+
+    #[test]
+    fn test_v2_features() {
+        let mut header = ParaglobHeader::new();
+        assert!(header.is_v2());
+        assert!(!header.has_data_section());
+        assert!(!header.has_inline_data());
+
+        // Add data section
+        header.data_section_size = 1024;
+        assert!(header.has_data_section());
+
+        // Set inline data flag
+        header.data_flags = 0x1;
+        assert!(header.has_inline_data());
     }
 
     #[test]
     fn test_read_struct() {
-        let mut buffer = vec![0u8; 72]; // Correct header size
+        let mut buffer = vec![0u8; 96]; // v2 header size
         let header = ParaglobHeader::new();
 
         // Write header to buffer
@@ -410,6 +516,7 @@ mod tests {
         let read_header: ParaglobHeader = unsafe { read_struct(&buffer, 0) };
         assert_eq!(read_header.magic, *MAGIC);
         assert_eq!(read_header.version, VERSION);
+        assert!(read_header.is_v2());
     }
 
     #[test]

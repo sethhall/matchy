@@ -16,10 +16,12 @@
 //! All matching operations work directly on this buffer using offsets.
 
 use crate::ac_offset::{ACAutomaton, MatchMode as ACMatchMode};
+use crate::data_section::{DataEncoder, DataValue};
 use crate::error::ParaglobError;
 use crate::glob::{GlobPattern, MatchMode as GlobMatchMode};
 use crate::offset_format::{
-    read_cstring, read_struct, ACEdge, ParaglobHeader, PatternEntry, SingleWildcard,
+    read_cstring, read_struct, ACEdge, ParaglobHeader, PatternDataMapping, PatternEntry,
+    SingleWildcard,
 };
 use std::collections::HashMap;
 use std::mem;
@@ -28,19 +30,36 @@ use std::mem;
 #[derive(Debug, Clone)]
 enum PatternType {
     /// Pure literal pattern (no wildcards)
-    Literal { text: String, id: u32 },
+    Literal {
+        text: String,
+        id: u32,
+        data: Option<DataValue>,
+    },
     /// Glob pattern with extracted literals
     Glob {
         pattern: String,
         literals: Vec<String>,
         id: u32,
+        data: Option<DataValue>,
     },
     /// Pure wildcard pattern (no literals to extract)
-    PureWildcard { pattern: String, id: u32 },
+    PureWildcard {
+        pattern: String,
+        id: u32,
+        data: Option<DataValue>,
+    },
 }
 
 impl PatternType {
     fn new(pattern: &str, id: u32) -> Result<Self, ParaglobError> {
+        Self::new_with_data(pattern, id, None)
+    }
+
+    fn new_with_data(
+        pattern: &str,
+        id: u32,
+        data: Option<DataValue>,
+    ) -> Result<Self, ParaglobError> {
         if pattern.is_empty() {
             return Err(ParaglobError::InvalidPattern("Empty pattern".to_string()));
         }
@@ -52,18 +71,21 @@ impl PatternType {
                 Ok(Self::PureWildcard {
                     pattern: pattern.to_string(),
                     id,
+                    data,
                 })
             } else {
                 Ok(Self::Glob {
                     pattern: pattern.to_string(),
                     literals,
                     id,
+                    data,
                 })
             }
         } else {
             Ok(Self::Literal {
                 text: pattern.to_string(),
                 id,
+                data,
             })
         }
     }
@@ -151,28 +173,115 @@ impl PatternType {
             Self::PureWildcard { pattern, .. } => pattern,
         }
     }
+
+    fn data(&self) -> Option<&DataValue> {
+        match self {
+            Self::Literal { data, .. } => data.as_ref(),
+            Self::Glob { data, .. } => data.as_ref(),
+            Self::PureWildcard { data, .. } => data.as_ref(),
+        }
+    }
 }
 
 /// Result type for builder
 type BuildResult = (Vec<u8>, HashMap<u32, Vec<u32>>);
 
-/// Builder for constructing offset-based Paraglob
-struct ParaglobBuilder {
+/// Incremental builder for constructing Paraglob pattern matchers
+///
+/// This builder allows you to add patterns one at a time before
+/// building the final Paraglob instance.
+///
+/// # Example
+/// ```
+/// use paraglob_rs::{ParaglobBuilder, data_section::DataValue};
+/// use paraglob_rs::glob::MatchMode;
+/// use std::collections::HashMap;
+///
+/// let mut builder = ParaglobBuilder::new(MatchMode::CaseSensitive);
+///
+/// // Add patterns incrementally
+/// builder.add_pattern("*.txt").unwrap();
+/// builder.add_pattern("test_*").unwrap();
+///
+/// // Add pattern with associated data
+/// let mut threat_data = HashMap::new();
+/// threat_data.insert("level".to_string(), DataValue::String("high".to_string()));
+/// builder.add_pattern_with_data("*.evil.com", Some(DataValue::Map(threat_data))).unwrap();
+///
+/// // Build the final matcher
+/// let mut pg = builder.build().unwrap();
+/// let matches = pg.find_all("test_file.txt");
+/// ```
+pub struct ParaglobBuilder {
     patterns: Vec<PatternType>,
     mode: ACMatchMode,
     pattern_set: std::collections::HashSet<String>,
 }
 
 impl ParaglobBuilder {
-    fn new(mode: ACMatchMode) -> Self {
+    /// Create a new builder with the specified match mode
+    ///
+    /// # Arguments
+    /// * `mode` - Case sensitivity mode for pattern matching
+    pub fn new(mode: GlobMatchMode) -> Self {
+        let ac_mode = match mode {
+            GlobMatchMode::CaseSensitive => ACMatchMode::CaseSensitive,
+            GlobMatchMode::CaseInsensitive => ACMatchMode::CaseInsensitive,
+        };
         Self {
             patterns: Vec::new(),
-            mode,
+            mode: ac_mode,
             pattern_set: std::collections::HashSet::new(),
         }
     }
 
-    fn add_pattern(&mut self, pattern: &str) -> Result<u32, ParaglobError> {
+    /// Add a pattern without associated data
+    ///
+    /// Returns the pattern ID that can be used later to retrieve data or identify matches.
+    ///
+    /// # Arguments
+    /// * `pattern` - Glob pattern string (e.g., "*.txt", "test_*")
+    ///
+    /// # Returns
+    /// The assigned pattern ID, or an error if the pattern is invalid
+    pub fn add_pattern(&mut self, pattern: &str) -> Result<u32, ParaglobError> {
+        self.add_pattern_with_data(pattern, None)
+    }
+
+    /// Add a pattern with associated data (v2 format)
+    ///
+    /// The data will be stored in the v2 format and can be retrieved later
+    /// using `Paraglob::get_pattern_data()`.
+    ///
+    /// # Arguments
+    /// * `pattern` - Glob pattern string
+    /// * `data` - Optional data to associate with this pattern
+    ///
+    /// # Returns
+    /// The assigned pattern ID
+    ///
+    /// # Example
+    /// ```
+    /// use paraglob_rs::{ParaglobBuilder, data_section::DataValue};
+    /// use paraglob_rs::glob::MatchMode;
+    /// use std::collections::HashMap;
+    ///
+    /// let mut builder = ParaglobBuilder::new(MatchMode::CaseSensitive);
+    ///
+    /// let mut threat_info = HashMap::new();
+    /// threat_info.insert("severity".to_string(), DataValue::String("high".to_string()));
+    /// threat_info.insert("score".to_string(), DataValue::Uint32(95));
+    ///
+    /// let pattern_id = builder.add_pattern_with_data(
+    ///     "*.malware.com",
+    ///     Some(DataValue::Map(threat_info))
+    /// ).unwrap();
+    /// ```
+    pub fn add_pattern_with_data(
+        &mut self,
+        pattern: &str,
+        data: Option<DataValue>,
+    ) -> Result<u32, ParaglobError> {
         // Check for duplicate pattern (match C++ behavior)
         if self.pattern_set.contains(pattern) {
             // Pattern already exists - C++ returns RETURNSTATUS_DUPLICATE_PATTERN
@@ -185,20 +294,62 @@ impl ParaglobBuilder {
         }
 
         let id = self.patterns.len() as u32;
-        let pat_type = PatternType::new(pattern, id)?;
+        let pat_type = PatternType::new_with_data(pattern, id, data)?;
         self.pattern_set.insert(pattern.to_string());
         self.patterns.push(pat_type);
         Ok(id)
     }
 
-    fn build(self) -> Result<BuildResult, ParaglobError> {
+    /// Get the number of patterns currently in the builder
+    pub fn pattern_count(&self) -> usize {
+        self.patterns.len()
+    }
+
+    /// Check if a pattern has already been added
+    pub fn contains_pattern(&self, pattern: &str) -> bool {
+        self.pattern_set.contains(pattern)
+    }
+
+    /// Build the final Paraglob matcher
+    ///
+    /// Consumes the builder and produces a `Paraglob` instance ready for matching.
+    /// This operation builds the Aho-Corasick automaton, encodes data (if any),
+    /// and serializes everything into the optimized binary format.
+    ///
+    /// # Returns
+    /// A `Paraglob` instance, or an error if building fails
+    pub fn build(self) -> Result<Paraglob, ParaglobError> {
+        let mode = match self.mode {
+            ACMatchMode::CaseSensitive => GlobMatchMode::CaseSensitive,
+            ACMatchMode::CaseInsensitive => GlobMatchMode::CaseInsensitive,
+        };
+
+        // Extract pattern data cache BEFORE consuming self
+        let pattern_data_cache: HashMap<u32, DataValue> = self
+            .patterns
+            .iter()
+            .filter_map(|p| p.data().cloned().map(|d| (p.id(), d)))
+            .collect();
+
+        let (buffer, ac_literal_to_patterns) = self.build_internal()?;
+
+        Ok(Paraglob {
+            buffer: BufferStorage::Owned(buffer),
+            mode,
+            glob_cache: HashMap::new(),
+            ac_literal_to_patterns,
+            pattern_data_cache,
+        })
+    }
+
+    fn build_internal(self) -> Result<BuildResult, ParaglobError> {
         // Collect literals for AC automaton
         let mut ac_literals = Vec::new();
         let mut literal_to_patterns: HashMap<String, Vec<u32>> = HashMap::new();
 
         for pat in &self.patterns {
             match pat {
-                PatternType::Literal { text, id } => {
+                PatternType::Literal { text, id, .. } => {
                     ac_literals.push(text.clone());
                     literal_to_patterns
                         .entry(text.clone())
@@ -274,12 +425,42 @@ impl ParaglobBuilder {
         let wildcard_entry_size = mem::size_of::<SingleWildcard>();
         let wildcards_size = pure_wildcards.len() * wildcard_entry_size;
 
+        // Data section (v2 feature)
+        let data_section_start = wildcards_start + wildcards_size;
+        let mut data_encoder = DataEncoder::new();
+        let mut pattern_data_mappings = Vec::new();
+
+        // Encode data for each pattern that has it
+        for pat in &self.patterns {
+            if let Some(data) = pat.data() {
+                let data_offset = data_encoder.encode(data);
+                pattern_data_mappings.push(PatternDataMapping::new(
+                    pat.id(),
+                    data_offset,
+                    0, // size is implicit in encoded data
+                ));
+            }
+        }
+
+        let data_section_bytes = data_encoder.into_bytes();
+        let data_section_size = data_section_bytes.len();
+
+        // Pattern data mappings section (v2)
+        let mappings_start = data_section_start + data_section_size;
+        let mapping_entry_size = mem::size_of::<PatternDataMapping>();
+        let mappings_size = pattern_data_mappings.len() * mapping_entry_size;
+
         // Allocate buffer
-        let total_size =
-            header_size + ac_size + pattern_entries_size + pattern_strings_size + wildcards_size;
+        let total_size = header_size
+            + ac_size
+            + pattern_entries_size
+            + pattern_strings_size
+            + wildcards_size
+            + data_section_size
+            + mappings_size;
         let mut buffer = vec![0u8; total_size];
 
-        // Write header
+        // Write header (v2 if we have data, v1 otherwise)
         let mut header = ParaglobHeader::new();
         header.match_mode = match self.mode {
             ACMatchMode::CaseSensitive => 0,
@@ -295,6 +476,15 @@ impl ParaglobBuilder {
         header.wildcard_count = pure_wildcards.len() as u32;
         header.total_buffer_size = total_size as u32;
         header.reserved = 0;
+
+        // v2 fields (if we have data)
+        if data_section_size > 0 {
+            header.data_section_offset = data_section_start as u32;
+            header.data_section_size = data_section_size as u32;
+            header.mapping_table_offset = mappings_start as u32;
+            header.mapping_count = pattern_data_mappings.len() as u32;
+            header.data_flags = 0x1; // Inline data flag
+        }
 
         unsafe {
             let ptr = buffer.as_mut_ptr() as *mut ParaglobHeader;
@@ -344,6 +534,21 @@ impl ParaglobBuilder {
             }
         }
 
+        // Write data section
+        if data_section_size > 0 {
+            buffer[data_section_start..data_section_start + data_section_size]
+                .copy_from_slice(&data_section_bytes);
+        }
+
+        // Write pattern data mappings
+        for (i, mapping) in pattern_data_mappings.iter().enumerate() {
+            let mapping_offset = mappings_start + i * mapping_entry_size;
+            unsafe {
+                let ptr = buffer.as_mut_ptr().add(mapping_offset) as *mut PatternDataMapping;
+                ptr.write(*mapping);
+            }
+        }
+
         Ok((buffer, ac_literal_to_patterns))
     }
 }
@@ -379,6 +584,8 @@ pub struct Paraglob {
     glob_cache: HashMap<u32, GlobPattern>,
     /// Mapping from AC literal ID to pattern IDs
     ac_literal_to_patterns: HashMap<u32, Vec<u32>>,
+    /// Pattern ID to data mapping (v2 feature)
+    pattern_data_cache: HashMap<u32, DataValue>,
 }
 
 impl Paraglob {
@@ -394,6 +601,7 @@ impl Paraglob {
             mode,
             glob_cache: HashMap::new(),
             ac_literal_to_patterns: HashMap::new(),
+            pattern_data_cache: HashMap::new(),
         }
     }
 
@@ -402,25 +610,50 @@ impl Paraglob {
         patterns: &[&str],
         mode: GlobMatchMode,
     ) -> Result<Self, ParaglobError> {
-        let ac_mode = match mode {
-            GlobMatchMode::CaseSensitive => ACMatchMode::CaseSensitive,
-            GlobMatchMode::CaseInsensitive => ACMatchMode::CaseInsensitive,
-        };
+        Self::build_from_patterns_with_data(patterns, None, mode)
+    }
 
-        let mut builder = ParaglobBuilder::new(ac_mode);
+    /// Build Paraglob from patterns with associated data (v2 format)
+    ///
+    /// # Arguments
+    /// * `patterns` - Array of pattern strings
+    /// * `data` - Optional array of data values (same length as patterns, or None for all)
+    /// * `mode` - Match mode (case sensitive/insensitive)
+    ///
+    /// # Example
+    /// ```
+    /// use paraglob_rs::{Paraglob, data_section::DataValue};
+    /// use paraglob_rs::glob::MatchMode;
+    /// use std::collections::HashMap;
+    ///
+    /// let patterns = vec!["*.evil.com", "malware.*"];
+    /// let mut threat_data = HashMap::new();
+    /// threat_data.insert("threat_level".to_string(), DataValue::String("high".to_string()));
+    /// 
+    /// let data_values = vec![
+    ///     Some(DataValue::Map(threat_data.clone())),
+    ///     Some(DataValue::Map(threat_data)),
+    /// ];
+    ///
+    /// let pg = Paraglob::build_from_patterns_with_data(
+    ///     &patterns,
+    ///     Some(&data_values),
+    ///     MatchMode::CaseSensitive
+    /// ).unwrap();
+    /// ```
+    pub fn build_from_patterns_with_data(
+        patterns: &[&str],
+        data: Option<&[Option<DataValue>]>,
+        mode: GlobMatchMode,
+    ) -> Result<Self, ParaglobError> {
+        let mut builder = ParaglobBuilder::new(mode);
 
-        for pattern in patterns {
-            builder.add_pattern(pattern)?;
+        for (i, pattern) in patterns.iter().enumerate() {
+            let pattern_data = data.and_then(|d| d.get(i).and_then(|v| v.clone()));
+            builder.add_pattern_with_data(pattern, pattern_data)?;
         }
 
-        let (buffer, ac_literal_to_patterns) = builder.build()?;
-
-        Ok(Self {
-            buffer: BufferStorage::Owned(buffer),
-            mode,
-            glob_cache: HashMap::new(),
-            ac_literal_to_patterns,
-        })
+        builder.build()
     }
 
     /// Find all matching pattern IDs
@@ -635,11 +868,19 @@ impl Paraglob {
         // Reconstruct ac_literal_to_patterns mapping
         let ac_literal_to_patterns = Self::reconstruct_literal_mapping(&buffer, &header)?;
 
+        // Load pattern data cache if v2
+        let pattern_data_cache = if header.is_v2() && header.has_data_section() {
+            Self::load_pattern_data_cache(&buffer, &header)?
+        } else {
+            HashMap::new()
+        };
+
         Ok(Self {
             buffer: BufferStorage::Owned(buffer),
             mode,
             glob_cache: HashMap::new(),
             ac_literal_to_patterns,
+            pattern_data_cache,
         })
     }
 
@@ -667,11 +908,19 @@ impl Paraglob {
         // Reconstruct ac_literal_to_patterns mapping
         let ac_literal_to_patterns = Self::reconstruct_literal_mapping(slice, &header)?;
 
+        // Load pattern data cache if v2
+        let pattern_data_cache = if header.is_v2() && header.has_data_section() {
+            Self::load_pattern_data_cache(slice, &header)?
+        } else {
+            HashMap::new()
+        };
+
         Ok(Self {
             buffer: BufferStorage::Borrowed(slice),
             mode,
             glob_cache: HashMap::new(),
             ac_literal_to_patterns,
+            pattern_data_cache,
         })
     }
 
@@ -684,6 +933,24 @@ impl Paraglob {
 
         let header: ParaglobHeader = unsafe { read_struct(buffer, 0) };
         header.pattern_count as usize
+    }
+
+    /// Get data associated with a pattern (v2 feature)
+    ///
+    /// Returns `None` if the pattern has no associated data or if the file is v1.
+    pub fn get_pattern_data(&self, pattern_id: u32) -> Option<&DataValue> {
+        self.pattern_data_cache.get(&pattern_id)
+    }
+
+    /// Check if this Paraglob has data section support (v2 format)
+    pub fn has_data_section(&self) -> bool {
+        let buffer = self.buffer.as_slice();
+        if buffer.len() < mem::size_of::<ParaglobHeader>() {
+            return false;
+        }
+
+        let header: ParaglobHeader = unsafe { read_struct(buffer, 0) };
+        header.is_v2() && header.has_data_section()
     }
 
     /// Reconstruct the AC literal to pattern ID mapping from the buffer
@@ -750,6 +1017,57 @@ impl Paraglob {
         }
 
         Ok(mapping)
+    }
+
+    /// Load pattern data cache from buffer (v2 format)
+    fn load_pattern_data_cache(
+        buffer: &[u8],
+        header: &ParaglobHeader,
+    ) -> Result<HashMap<u32, DataValue>, ParaglobError> {
+        use crate::data_section::DataDecoder;
+
+        let mut cache = HashMap::new();
+
+        if header.mapping_count == 0 {
+            return Ok(cache);
+        }
+
+        // Get data section and mapping table
+        let data_section_start = header.data_section_offset as usize;
+        let data_section_size = header.data_section_size as usize;
+        let mappings_start = header.mapping_table_offset as usize;
+        let mapping_count = header.mapping_count as usize;
+
+        if data_section_start + data_section_size > buffer.len() {
+            return Err(ParaglobError::SerializationError(
+                "Data section out of bounds".to_string(),
+            ));
+        }
+
+        // Create decoder
+        let data_section = &buffer[data_section_start..data_section_start + data_section_size];
+        let decoder = DataDecoder::new(data_section, 0);
+
+        // Load each mapping
+        for i in 0..mapping_count {
+            let mapping_offset = mappings_start + i * mem::size_of::<PatternDataMapping>();
+            if mapping_offset + mem::size_of::<PatternDataMapping>() > buffer.len() {
+                return Err(ParaglobError::SerializationError(
+                    "Mapping table out of bounds".to_string(),
+                ));
+            }
+
+            let mapping: PatternDataMapping = unsafe { read_struct(buffer, mapping_offset) };
+
+            // Decode the data
+            let data_value = decoder
+                .decode(mapping.data_offset)
+                .map_err(|e| ParaglobError::SerializationError(format!("Failed to decode data: {}", e)))?;
+
+            cache.insert(mapping.pattern_id, data_value);
+        }
+
+        Ok(cache)
     }
 }
 
