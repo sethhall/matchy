@@ -770,7 +770,7 @@ mod tests {
         let pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
 
         assert_eq!(pg.pattern_count(), 2);
-        assert!(pg.buffer().len() > 0);
+        assert!(!pg.buffer().is_empty());
     }
 
     #[test]

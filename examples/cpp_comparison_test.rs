@@ -1,9 +1,9 @@
-///! Performance test matching the C++ test_performance.cpp benchmark
-///!
-///! This replicates the exact test from the C++ implementation:
-///! - 10K patterns with 10% match rate
-///! - 20K queries with 10% containing "test"
-///! - Fixed seed for reproducibility
+//! Performance test matching the C++ test_performance.cpp benchmark
+//!
+//! This replicates the exact test from the C++ implementation:
+//! - 10K patterns with 10% match rate
+//! - 20K queries with 10% containing "test"
+//! - Fixed seed for reproducibility
 use paraglob_rs::glob::MatchMode;
 use paraglob_rs::Paraglob;
 use rand::rngs::StdRng;
@@ -16,7 +16,7 @@ fn random_string(length: usize, rng: &mut StdRng) -> String {
 
     (0..length)
         .map(|_| {
-            let idx = rng.gen_range(0..ALPHANUM.len());
+            let idx = rng.random_range(0..ALPHANUM.len());
             ALPHANUM[idx] as char
         })
         .collect()
@@ -26,10 +26,10 @@ fn random_string(length: usize, rng: &mut StdRng) -> String {
 fn generate_patterns(count: usize, rng: &mut StdRng, match_percentage: i32) -> Vec<String> {
     (0..count)
         .map(|_| {
-            let should_match = rng.gen_range(0..100) < match_percentage;
+            let should_match = rng.random_range(0..100) < match_percentage;
 
             if should_match {
-                match rng.gen_range(0..4) {
+                match rng.random_range(0..4) {
                     0 => "*test*".to_string(),
                     1 => format!("*{}*", random_string(3, rng)),
                     2 => format!("test_{}*", random_string(3, rng)),
@@ -46,7 +46,7 @@ fn generate_patterns(count: usize, rng: &mut StdRng, match_percentage: i32) -> V
 fn generate_queries(count: usize, rng: &mut StdRng, match_percentage: i32) -> Vec<String> {
     (0..count)
         .map(|_| {
-            if rng.gen_range(0..100) < match_percentage {
+            if rng.random_range(0..100) < match_percentage {
                 format!("something_test_{}", random_string(5, rng))
             } else {
                 random_string(15, rng)

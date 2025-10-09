@@ -1,4 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use paraglob_rs::glob::MatchMode;
 use paraglob_rs::serialization::{load, save};
 use paraglob_rs::Paraglob;
@@ -29,7 +30,7 @@ fn generate_patterns(count: usize, pattern_type: &str) -> Vec<String> {
 }
 
 fn generate_text(size: usize, match_rate: &str) -> String {
-    let words = vec![
+    let words = [
         "hello",
         "world",
         "test",
