@@ -144,6 +144,25 @@ cargo doc --no-deps --open
 
 The build process automatically generates `include/paraglob_rs.h` for C/C++ integration.
 
+## Features
+
+### Pattern Matching
+- Match thousands of glob patterns simultaneously in O(n) time
+- Support for `*`, `?`, `[abc]` wildcards
+- Zero-copy memory-mapped databases load in <100μs
+- Automatic memory sharing across processes
+
+### Pattern-Associated Data (v2 Format)
+- Associate arbitrary data with patterns (strings, numbers, maps, arrays)
+- MMDB-compatible data encoding for interoperability
+- Automatic data deduplication across patterns
+- Retrieve matched pattern data in addition to pattern IDs
+
+### Memory Efficiency
+- Memory-mapped files with automatic OS-level page sharing
+- 64 processes using same database = same RAM as 1 process
+- No deserialization overhead—direct access to on-disk structures
+
 ## Usage
 
 ### Rust
@@ -164,6 +183,24 @@ paraglob_rs::save(&pg, "patterns.pgb")?;
 
 // Load with zero-copy memory mapping
 let pg = paraglob_rs::load("patterns.pgb")?;
+
+// Build v2 database with associated data
+use paraglob_rs::{PatternType, DataValue};
+
+let mut builder = paraglob_rs::incremental_builder();
+builder.add_pattern(PatternType::new_with_data(
+    "*.malicious.com",
+    DataValue::Map(vec![
+        ("threat_level".to_string(), DataValue::String("high".to_string())),
+        ("category".to_string(), DataValue::String("phishing".to_string())),
+    ])
+))?;
+
+let pg = builder.build()?;
+let matches = pg.find_all("evil.malicious.com")?;
+if let Some(data) = pg.get_pattern_data(matches[0].pattern_id) {
+    println!("Threat data: {:?}", data);
+}
 ```
 
 ### C

@@ -14,10 +14,18 @@ categories = ["text-processing", "algorithms"]
 name = "paraglob_rs"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "paraglob"
+path = "src/bin/paraglob.rs"
+
 [dependencies]
 # Keep minimal initially - add as needed
 libc = "0.2"
 memmap2 = "0.9.8"
+clap = { version = "4.5", features = ["derive", "cargo"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
 
 [dev-dependencies]
 # Testing dependencies
