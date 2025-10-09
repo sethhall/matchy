@@ -42,7 +42,7 @@ This is a **completed** Rust port of the paraglob C++ library. The port successf
 
 ## Performance Characteristics
 
-### Achieved Performance (M1 Mac)
+### Achieved Performance (M4 MacBook Air)
 
 | Metric | Value | Notes |
 |--------|-------|-------|

@@ -4,22 +4,88 @@
 [![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
-Fast multi-pattern glob matching with zero-copy memory-mapped databases. A Rust implementation providing O(n) pattern matching through Aho-Corasick automata, with APIs for Rust, C, and C++.
+Fast multi-pattern glob matching with zero-copy memory-mapped databases. Match thousands of patterns against strings in microseconds with automatic memory sharing across processes.
 
-## Overview
+## Why paraglob-rs?
 
-paraglob-rs enables efficient matching of thousands of glob patterns against arbitrary strings in a single pass. The implementation uses offset-based data structures that can be directly memory-mapped from disk, eliminating deserialization overhead and enabling cross-process memory sharing.
+Imagine you're building a security system that needs to check every incoming request against a threat intelligence feed. Or a log processing pipeline that routes millions of events to different destinations based on their content. Or a web application firewall that blocks suspicious URLs.
 
-**Key characteristics:**
-- O(n) time complexity for matching n input characters, regardless of pattern count
-- Sub-millisecond database loading via memory mapping
-- 99% memory reduction in multi-process scenarios through shared pages
-- Binary format compatible with the original C++ implementation
-- Pure Rust core with stable C FFI and optional C++ wrapper
+The challenge? **You have thousands of patterns to match, and you need answers in microseconds.**
+
+Traditional approaches fall apart at scale:
+- 🐌 Regex libraries check patterns one-by-one: 10,000 patterns = 10,000× slower
+- 🔒 Hash tables only do exact matches—no wildcards for domains like `*.malicious.com`
+- 💾 Loading pattern databases takes hundreds of milliseconds
+- 📈 Running 50 worker processes means loading the same patterns 50 times
+
+paraglob-rs was built to solve these problems.
+
+### Real-World Problems It Solves
+
+**🛡️ Threat Intelligence at Scale**
+
+You maintain feeds of malicious domains (`*.phishing-site.com`), suspicious URL patterns (`http://*/admin/config.php`), and known-bad email senders (`*@spam-domain.org`). Your security layer needs to check every user interaction against 10,000+ threat indicators—without adding latency.
+
+**Problem**: Checking patterns sequentially would take milliseconds per request. Unacceptable.
+
+**Solution**: paraglob-rs compiles all patterns into a single automaton and checks them in one pass. Result: ~20 microseconds per check, even with 50,000 patterns.
+
+---
+
+**📊 Log Routing & Classification**
+
+Your infrastructure generates millions of log lines per minute. Security logs containing `*authentication failed*` or `*/etc/passwd*` go to your SIEM. Performance logs with `*slow query*` or `*timeout*` go to your metrics system. Application errors route to your alerting platform.
+
+**Problem**: You can't afford to scan each log line multiple times, and you can't load the same routing rules into memory for every worker process.
+
+**Solution**: paraglob-rs's memory-mapped databases load in <100 microseconds and share physical memory across all workers. 50 processes use the same RAM as one.
+
+---
+
+**🔥 Multi-Process Memory Efficiency**
+
+You run network monitoring software like Zeek with 24 worker processes, each needing the same threat intelligence patterns. Or an Nginx deployment with 64 worker processes, each enforcing the same access control rules.
+
+**Problem**: Traditional approaches load the pattern database 24 or 64 times. A 100MB pattern set becomes 2.4GB or 6.4GB of RAM.
+
+**Solution**: paraglob-rs uses memory mapping. The operating system automatically shares pages across processes. 64 processes = 100MB of RAM, not 6.4GB. That's **99% memory savings**.
+
+---
+
+**🔐 Web Application Firewall Rules**
+
+You need to block SQL injection attempts (`*' OR '1'='1*`), path traversal (`*/../etc/*`), XSS patterns (`*<script>*`), and thousands of other attack signatures—on every HTTP request, without impacting response times.
+
+**Problem**: You need comprehensive protection, but every millisecond of latency costs you user experience and money.
+
+**Solution**: paraglob-rs processes requests in the hot path with <20 microseconds overhead. Your WAF becomes effectively invisible to users while remaining comprehensive.
+
+---
+
+### What Makes It Fast
+
+paraglob-rs uses the Aho-Corasick algorithm to build a finite automaton that matches all patterns simultaneously:
+
+- **O(n) time complexity**: Scan the input once, match thousands of patterns in parallel. Adding more patterns doesn't slow down matching.
+- **Zero-copy loading**: Memory-mapped databases load in <100 microseconds—no parsing, no deserialization.
+- **Automatic memory sharing**: The OS shares physical memory pages across all processes that map the same file.
+- **1M+ queries/second**: Even with 50,000 patterns (measured on M4 MacBook Air).
+
+## When Should You Use This?
+
+You'll benefit from paraglob-rs if:
+
+✅ You need to match hundreds or thousands of patterns against strings  
+✅ Performance matters—you're in a hot path or high-throughput scenario  
+✅ Your patterns include wildcards (`*`, `?`, `[abc]`) not just exact matches  
+✅ You run multiple processes that need the same pattern sets  
+✅ You need to load pattern databases quickly (initialization time matters)  
+
+Common applications: threat intelligence, log processing, WAF rules, access control, content classification, data routing, network security monitoring.
 
 ## Performance
 
-Measured on Apple M1:
+Measured on M4 MacBook Air:
 
 | Workload | Throughput | Notes |
 |----------|------------|-------|
