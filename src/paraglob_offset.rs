@@ -7,7 +7,7 @@
 //! # Architecture
 //!
 //! The buffer contains:
-//! 1. ParaglobHeader (64 bytes)
+//! 1. ParaglobHeader (72 bytes)
 //! 2. AC automaton data (nodes, edges, pattern IDs)
 //! 3. Pattern entries (metadata for each pattern)
 //! 4. Pattern strings (null-terminated)
@@ -293,6 +293,8 @@ impl ParaglobBuilder {
         header.pattern_strings_offset = pattern_strings_start as u32;
         header.pattern_strings_size = pattern_strings_size as u32;
         header.wildcard_count = pure_wildcards.len() as u32;
+        header.total_buffer_size = total_size as u32;
+        header.reserved = 0;
         
         unsafe {
             let ptr = buffer.as_mut_ptr() as *mut ParaglobHeader;

@@ -71,7 +71,6 @@
 
 // Module declarations
 pub mod ac_offset;
-mod binary;
 /// Error types for Paraglob operations
 pub mod error;
 pub mod glob;

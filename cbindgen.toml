@@ -5,6 +5,7 @@ autogen_warning = "/* WARNING: This file is auto-generated. Manual changes will 
 pragma_once = false
 include_version = true
 namespace = "paraglob_rs"
+cpp_compat = true
 
 # Documentation settings
 documentation = true

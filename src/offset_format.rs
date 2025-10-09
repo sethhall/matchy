@@ -12,7 +12,7 @@
 //! # Layout
 //!
 //! ```text
-//! [Header: ParaglobHeader (64 bytes)]
+//! [Header: ParaglobHeader (72 bytes)]
 //! [AC Nodes: ACNode array]
 //! [AC Edges: ACEdge arrays (variable, referenced by nodes)]
 //! [AC Pattern IDs: u32 arrays (variable, referenced by nodes)]
@@ -38,7 +38,7 @@ pub const MAGIC: &[u8; 8] = b"PARAGLOB";
 /// Current format version
 pub const VERSION: u32 = 1;
 
-/// Main header for serialized Paraglob database (64 bytes, 8-byte aligned)
+/// Main header for serialized Paraglob database (72 bytes, 4-byte aligned)
 ///
 /// This header appears at the start of every serialized Paraglob file.
 /// All offsets are relative to the start of the buffer.
@@ -92,6 +92,12 @@ pub struct ParaglobHeader {
     
     /// Number of pure wildcard patterns (no literals)
     pub wildcard_count: u32,
+    
+    /// Total size of the entire serialized buffer (bytes)
+    pub total_buffer_size: u32,
+    
+    /// Reserved for future use
+    pub reserved: u32,
 }
 
 /// AC Automaton node (32 bytes, 8-byte aligned)
@@ -202,7 +208,7 @@ pub struct SingleWildcard {
 }
 
 // Compile-time size assertions to ensure struct layout
-const _: () = assert!(mem::size_of::<ParaglobHeader>() == 64);
+const _: () = assert!(mem::size_of::<ParaglobHeader>() == 72);  // 8-byte magic + 16 * u32 fields
 const _: () = assert!(mem::size_of::<ACNode>() == 32);
 const _: () = assert!(mem::size_of::<ACEdge>() == 8);
 const _: () = assert!(mem::size_of::<PatternEntry>() == 16);
@@ -234,6 +240,8 @@ impl ParaglobHeader {
             meta_word_mappings_offset: 0,
             pattern_refs_size: 0,
             wildcard_count: 0,
+            total_buffer_size: 0,
+            reserved: 0,
         }
     }
     
@@ -353,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_header_size() {
-        assert_eq!(mem::size_of::<ParaglobHeader>(), 64);
+        assert_eq!(mem::size_of::<ParaglobHeader>(), 72);  // 8-byte magic + 16 * u32
         assert_eq!(mem::align_of::<ParaglobHeader>(), 4);
     }
 
@@ -390,7 +398,7 @@ mod tests {
 
     #[test]
     fn test_read_struct() {
-        let mut buffer = vec![0u8; 64];
+        let mut buffer = vec![0u8; 72];  // Correct header size
         let header = ParaglobHeader::new();
         
         // Write header to buffer
