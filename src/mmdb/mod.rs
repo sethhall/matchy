@@ -18,14 +18,14 @@
 //! MMDB data format is what we already implemented for v2.
 
 pub mod types;
+pub mod format;
 
 // TODO: Implement these modules
-// pub mod format;
 // pub mod tree;
-// pub mod metadata;
 
 // Re-export key types
 pub use types::{IpVersion, MmdbError, RecordSize, METADATA_MARKER};
+pub use format::{MmdbHeader, MmdbMetadata, find_metadata_marker};
 
 // Use DataValue from data_section as our MMDB value type
 pub use crate::data_section::DataValue as MmdbValue;
