@@ -1,5 +1,9 @@
 # paraglob-rs
 
+[![CI](https://github.com/sethhall/paraglob-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/sethhall/paraglob-rs/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+
 Fast multi-pattern glob matching with zero-copy memory-mapped databases. A Rust implementation providing O(n) pattern matching through Aho-Corasick automata, with APIs for Rust, C, and C++.
 
 ## Overview
@@ -179,6 +183,16 @@ cargo test              # Run test suite (79 tests)
 cargo test -- --nocapture  # With output
 cargo bench             # Run benchmarks
 ```
+
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
+
+Before submitting a PR:
+- Run `cargo fmt` and `cargo clippy`
+- Ensure all tests pass with `cargo test`
+- Add tests for new features
+- Update documentation as needed
 
 ## License
 
