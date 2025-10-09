@@ -85,8 +85,21 @@ pub mod serialization;
 pub mod c_api;
 
 // Re-exports for Rust consumers
+pub use crate::data_section::DataValue;
 pub use crate::error::ParaglobError;
+pub use crate::glob::MatchMode;
 pub use crate::paraglob_offset::{Paraglob, ParaglobBuilder};
+pub use crate::serialization::{load, save};
+
+/// Create a new incremental builder with default case-sensitive matching
+pub fn incremental_builder() -> ParaglobBuilder {
+    ParaglobBuilder::new(MatchMode::CaseSensitive)
+}
+
+/// Create a new incremental builder with specified match mode
+pub fn incremental_builder_with_mode(mode: MatchMode) -> ParaglobBuilder {
+    ParaglobBuilder::new(mode)
+}
 
 // Version information
 /// Library version string

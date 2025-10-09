@@ -186,6 +186,21 @@ impl PatternType {
 /// Result type for builder
 type BuildResult = (Vec<u8>, HashMap<u32, Vec<u32>>);
 
+/// Database statistics
+#[derive(Debug, Clone)]
+pub struct Stats {
+    /// Number of patterns in the database
+    pub pattern_count: usize,
+    /// Number of AC automaton nodes
+    pub node_count: usize,
+    /// Number of AC automaton edges
+    pub edge_count: usize,
+    /// Size of data section in bytes (0 for v1)
+    pub data_section_size: usize,
+    /// Number of pattern-data mappings (0 for v1)
+    pub mapping_count: usize,
+}
+
 /// Incremental builder for constructing Paraglob pattern matchers
 ///
 /// This builder allows you to add patterns one at a time before
@@ -951,6 +966,61 @@ impl Paraglob {
 
         let header: ParaglobHeader = unsafe { read_struct(buffer, 0) };
         header.is_v2() && header.has_data_section()
+    }
+
+    /// Get the version of the Paraglob format
+    pub fn version(&self) -> u32 {
+        let buffer = self.buffer.as_slice();
+        if buffer.len() < mem::size_of::<ParaglobHeader>() {
+            return 1;
+        }
+
+        let header: ParaglobHeader = unsafe { read_struct(buffer, 0) };
+        header.version
+    }
+
+    /// Get pattern string by ID
+    pub fn get_pattern(&self, pattern_id: u32) -> Option<String> {
+        let buffer = self.buffer.as_slice();
+        if buffer.len() < mem::size_of::<ParaglobHeader>() {
+            return None;
+        }
+
+        let header: ParaglobHeader = unsafe { read_struct(buffer, 0) };
+        if pattern_id >= header.pattern_count {
+            return None;
+        }
+
+        let patterns_offset = header.patterns_offset as usize;
+        let entry_offset = patterns_offset + (pattern_id as usize) * mem::size_of::<PatternEntry>();
+        let entry: PatternEntry = unsafe { read_struct(buffer, entry_offset) };
+
+        unsafe { read_cstring(buffer, entry.pattern_string_offset as usize).ok() }
+            .map(|s| s.to_string())
+    }
+
+    /// Get database statistics
+    pub fn get_stats(&self) -> Stats {
+        let buffer = self.buffer.as_slice();
+        if buffer.len() < mem::size_of::<ParaglobHeader>() {
+            return Stats {
+                pattern_count: 0,
+                node_count: 0,
+                edge_count: 0,
+                data_section_size: 0,
+                mapping_count: 0,
+            };
+        }
+
+        let header: ParaglobHeader = unsafe { read_struct(buffer, 0) };
+        Stats {
+            pattern_count: header.pattern_count as usize,
+            node_count: header.ac_node_count as usize,
+            // AC edges are embedded in nodes, count estimated from size
+            edge_count: (header.ac_edges_size as usize) / mem::size_of::<ACEdge>(),
+            data_section_size: header.data_section_size as usize,
+            mapping_count: header.mapping_count as usize,
+        }
     }
 
     /// Reconstruct the AC literal to pattern ID mapping from the buffer
