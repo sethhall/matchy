@@ -27,7 +27,7 @@ tempfile = "3.8"
 rand = "0.8"
 
 [build-dependencies]
-cbindgen = "0.26"
+cbindgen = "0.29"
 
 [profile.release]
 opt-level = 3
