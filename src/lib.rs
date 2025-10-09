@@ -80,12 +80,16 @@ pub mod mmap;
 pub mod offset_format;
 pub mod paraglob_offset;
 pub mod serialization;
+/// MMDB reader components (in progress)
+pub mod mmdb;
 
 // Public C API
 pub mod c_api;
 
 // Re-exports for Rust consumers
 pub use crate::data_section::DataValue;
+/// Alias for MMDB value type to avoid duplication
+pub type MmdbValue = DataValue;
 pub use crate::error::ParaglobError;
 pub use crate::glob::MatchMode;
 pub use crate::paraglob_offset::{Paraglob, ParaglobBuilder};
