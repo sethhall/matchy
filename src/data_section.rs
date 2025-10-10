@@ -25,7 +25,7 @@
 //! Uses MMDB encoding: control byte(s) followed by data.
 //! Control byte encodes type (3 bits) and size/payload (5 bits).
 //!
-//! See: https://maxmind.github.io/MaxMind-DB/
+//! See: <https://maxmind.github.io/MaxMind-DB/>
 
 use std::collections::HashMap;
 

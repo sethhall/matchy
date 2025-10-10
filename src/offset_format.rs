@@ -139,9 +139,9 @@ pub struct ParaglobHeader {
 
     // ===== v3 ADDITIONS (8 bytes) =====
     /// Offset to AC literal→pattern mapping table (0 = no mapping, requires reconstruction)
-    /// Points to serialized HashMap<u32, Vec<u32>> for instant loading
-    /// Format: [entry_count: u32] followed by entries of:
-    ///   [literal_id: u32][pattern_count: u32][pattern_id: u32, ...]
+    /// Points to serialized `HashMap<u32, Vec<u32>>` for instant loading
+    /// Format: `[entry_count: u32]` followed by entries of:
+    ///   `[literal_id: u32][pattern_count: u32][pattern_id: u32, ...]`
     pub ac_literal_map_offset: u32,
 
     /// Number of entries in AC literal mapping table

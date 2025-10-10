@@ -150,8 +150,8 @@ impl Database {
                 // Find and load pattern section after MMDB_PATTERN separator
                 let (pattern_matcher, mappings) =
                     if let Some(offset) = Self::find_pattern_section(data) {
-                        let (pg, map) = Self::load_combined_pattern_section(data, offset)
-                            .map_err(|e| {
+                        let (pg, map) =
+                            Self::load_combined_pattern_section(data, offset).map_err(|e| {
                                 DatabaseError::Unsupported(format!(
                                     "Failed to load pattern section: {}",
                                     e
@@ -376,7 +376,7 @@ impl Database {
     }
 
     /// Load combined pattern section from data at given offset
-    /// The format at offset is: [total_size][paraglob_size][PARAGLOB data][pattern_count][data_offsets...]
+    /// The format at offset is: `[total_size][paraglob_size][PARAGLOB data][pattern_count][data_offsets...]`
     /// Returns (Paraglob matcher, HashMap of pattern_id -> data_offset)
     fn load_combined_pattern_section(
         data: &[u8],
