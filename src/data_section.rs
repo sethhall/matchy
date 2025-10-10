@@ -135,51 +135,56 @@ impl DataEncoder {
 
     // Type 1: Pointer
     fn encode_pointer(offset: u32, buffer: &mut Vec<u8>) {
-        let size = if offset < 0x800 {
-            0 // 11 bits
-        } else if offset < 0x80800 {
-            1 // 19 bits
-        } else if offset < 0x8080800 {
-            2 // 27 bits
+        let size = if offset < 2048 {
+            0 // 11 bits (0-2047)
+        } else if offset < 2048 + 524288 {
+            1 // 19 bits (2048-526335)
+        } else if offset < 2048 + 524288 + 134217728 {
+            2 // 27 bits (526336-134744063)
         } else {
             3 // 32 bits
         };
 
-        let ctrl = 0x20 | (size << 3); // Type 1 << 5, size in bits 3-4
-        buffer.push(ctrl);
-
         match size {
             0 => {
-                // 11 bits: next 11 bits contain offset
-                let b0 = ((offset >> 8) & 0x7) as u8;
-                let b1 = (offset & 0xFF) as u8;
-                buffer.push(b0);
-                buffer.push(b1);
+                // 11 bits: 3 bits in control byte (high bits) + 8 bits in next byte (low bits)
+                // Decode reconstructs as: (low_3_bits << 8) | next_byte
+                let high_3_bits = ((offset >> 8) & 0x7) as u8;
+                let low_8_bits = (offset & 0xFF) as u8;
+                let ctrl = 0x20 | high_3_bits; // Type 1, size 0, high 3 bits
+                buffer.push(ctrl);
+                buffer.push(low_8_bits);
             }
             1 => {
-                // 19 bits: next 19 bits contain offset + 2048
-                let adjusted = offset - 0x800;
-                let b0 = ((adjusted >> 16) & 0x7) as u8;
-                let b1 = ((adjusted >> 8) & 0xFF) as u8;
-                let b2 = (adjusted & 0xFF) as u8;
-                buffer.push(b0);
-                buffer.push(b1);
-                buffer.push(b2);
+                // 19 bits: 3 bits in control byte + 16 bits in next 2 bytes, offset by 2048
+                // Decode reconstructs as: 2048 + ((low_3_bits << 16) | (b0 << 8) | b1)
+                let adjusted = offset - 2048;
+                let high_3_bits = ((adjusted >> 16) & 0x7) as u8;
+                let mid_8_bits = ((adjusted >> 8) & 0xFF) as u8;
+                let low_8_bits = (adjusted & 0xFF) as u8;
+                let ctrl = 0x20 | (1 << 3) | high_3_bits; // Type 1, size 1, high 3 bits
+                buffer.push(ctrl);
+                buffer.push(mid_8_bits);
+                buffer.push(low_8_bits);
             }
             2 => {
-                // 27 bits: next 27 bits contain offset + 526336
-                let adjusted = offset - 0x80800;
-                let b0 = ((adjusted >> 24) & 0x7) as u8;
-                let b1 = ((adjusted >> 16) & 0xFF) as u8;
-                let b2 = ((adjusted >> 8) & 0xFF) as u8;
-                let b3 = (adjusted & 0xFF) as u8;
+                // 27 bits: 3 bits in control byte + 24 bits in next 3 bytes, offset by 526336
+                // Decode reconstructs as: 526336 + ((low_3_bits << 24) | (b0 << 16) | (b1 << 8) | b2)
+                let adjusted = offset - 526336;
+                let high_3_bits = ((adjusted >> 24) & 0x7) as u8;
+                let b0 = ((adjusted >> 16) & 0xFF) as u8;
+                let b1 = ((adjusted >> 8) & 0xFF) as u8;
+                let b2 = (adjusted & 0xFF) as u8;
+                let ctrl = 0x20 | (2 << 3) | high_3_bits; // Type 1, size 2, high 3 bits
+                buffer.push(ctrl);
                 buffer.push(b0);
                 buffer.push(b1);
                 buffer.push(b2);
-                buffer.push(b3);
             }
             _ => {
-                // 32 bits: next 32 bits contain offset
+                // 32 bits: payload bits ignored, full 32 bits in next 4 bytes
+                let ctrl = 0x20 | (3 << 3); // Type 1, size 3, payload bits unused
+                buffer.push(ctrl);
                 buffer.extend_from_slice(&offset.to_be_bytes());
             }
         }
@@ -231,33 +236,54 @@ impl DataEncoder {
     }
 
     // Extended types (type 0)
-    
+
     // Type 8: Int32 (extended type 1)
     fn encode_int32(n: i32, buffer: &mut Vec<u8>) {
-        buffer.push(0x00); // Extended type marker
-        buffer.push(0x24); // (8-7)=1, 1<<5=0x20, size=4, 0x20|0x04=0x24
+        buffer.push(0x04); // Type 0 << 5, size 4
+        buffer.push(0x01); // Extended type: 8 - 7 = 1
         buffer.extend_from_slice(&n.to_be_bytes());
     }
 
     // Type 9: Uint64 (extended type 2)
     fn encode_uint64(n: u64, buffer: &mut Vec<u8>) {
-        buffer.push(0x00); // Extended type marker
-        buffer.push(0x48); // (9-7)=2, 2<<5=0x40, size=8, 0x40|0x08=0x48
+        buffer.push(0x08); // Type 0 << 5, size 8
+        buffer.push(0x02); // Extended type: 9 - 7 = 2
         buffer.extend_from_slice(&n.to_be_bytes());
     }
 
     // Type 10: Uint128 (extended type 3)
     fn encode_uint128(n: u128, buffer: &mut Vec<u8>) {
-        buffer.push(0x00); // Extended type marker
-        buffer.push(0x70); // (10-7)=3, 3<<5=0x60, size=16, 0x60|0x10=0x70
+        buffer.push(0x10); // Type 0 << 5, size 16
+        buffer.push(0x03); // Extended type: 10 - 7 = 3
         buffer.extend_from_slice(&n.to_be_bytes());
     }
 
     // Type 11: Array
     fn encode_array(a: &[DataValue], buffer: &mut Vec<u8>) {
-        buffer.push(0x00); // Extended type marker
-        Self::encode_with_size_extended(11, a.len(), buffer);
-        
+        // Extended type encoding:
+        // First byte: control byte with type 0 and size
+        // Second byte: raw extended type number (11 - 7 = 4)
+        let size = a.len();
+
+        // Control byte: type 0 << 5 | size bits
+        if size < 29 {
+            buffer.push(size as u8); // Type 0, size in lower 5 bits
+        } else if size < 29 + 256 {
+            buffer.push(29); // Type 0, size = 29
+            buffer.push((size - 29) as u8);
+        } else if size < 29 + 256 + 65536 {
+            buffer.push(30); // Type 0, size = 30
+            let adjusted = size - 29 - 256;
+            buffer.extend_from_slice(&(adjusted as u16).to_be_bytes());
+        } else {
+            buffer.push(31); // Type 0, size = 31
+            let adjusted = size - 29 - 256 - 65536;
+            buffer.extend_from_slice(&(adjusted as u32).to_be_bytes()[1..]); // 3 bytes
+        }
+
+        // Extended type byte
+        buffer.push(0x04); // 11 - 7 = 4
+
         for value in a {
             Self::encode_to_buffer(value, buffer);
         }
@@ -265,45 +291,25 @@ impl DataEncoder {
 
     // Type 14: Bool (extended type 7)
     fn encode_bool(b: bool, buffer: &mut Vec<u8>) {
-        buffer.push(0x00); // Extended type marker
         if b {
-            buffer.push(0xE1); // (14-7)=7, 7<<5=0xE0, size=1, 0xE0|0x01=0xE1
+            buffer.push(0x01); // Type 0 << 5, size 1
         } else {
-            buffer.push(0xE0); // (14-7)=7, 7<<5=0xE0, size=0, 0xE0|0x00=0xE0
+            buffer.push(0x00); // Type 0 << 5, size 0
         }
+        buffer.push(0x07); // Extended type: 14 - 7 = 7
     }
 
     // Type 15: Float (IEEE 754, 32-bit) (extended type 8)
     fn encode_float(f: f32, buffer: &mut Vec<u8>) {
-        buffer.push(0x00); // Extended type marker
-        buffer.push(0x04); // (15-7)=8, (8%8)<<5=0x00, size=4, 0x00|0x04=0x04
+        buffer.push(0x04); // Type 0 << 5, size 4
+        buffer.push(0x08); // Extended type: 15 - 7 = 8
         buffer.extend_from_slice(&f.to_be_bytes());
     }
 
     /// Encode control byte with size for standard types
     fn encode_with_size(type_id: u8, size: usize, buffer: &mut Vec<u8>) {
         let type_bits = type_id << 5;
-        
-        if size < 29 {
-            buffer.push(type_bits | (size as u8));
-        } else if size < 29 + 256 {
-            buffer.push(type_bits | 29);
-            buffer.push((size - 29) as u8);
-        } else if size < 29 + 256 + 65536 {
-            buffer.push(type_bits | 30);
-            let adjusted = size - 29 - 256;
-            buffer.extend_from_slice(&(adjusted as u16).to_be_bytes());
-        } else {
-            buffer.push(type_bits | 31);
-            let adjusted = size - 29 - 256 - 65536;
-            buffer.extend_from_slice(&(adjusted as u32).to_be_bytes()[1..]); // 3 bytes
-        }
-    }
 
-    /// Encode size for extended types (after 0x00 marker)
-    fn encode_with_size_extended(type_id: u8, size: usize, buffer: &mut Vec<u8>) {
-        let type_bits = (type_id - 7) << 5; // Extended types start at 7
-        
         if size < 29 {
             buffer.push(type_bits | (size as u8));
         } else if size < 29 + 256 {
@@ -376,99 +382,79 @@ impl<'a> DataDecoder<'a> {
             2 => self.decode_string(cursor, payload),
             3 => self.decode_double(cursor),
             4 => self.decode_bytes(cursor, payload),
-            5 => self.decode_uint16(cursor),
-            6 => self.decode_uint32(cursor),
+            5 => self.decode_uint16(cursor, payload),
+            6 => self.decode_uint32(cursor, payload),
             7 => self.decode_map(cursor, payload),
             _ => Err("Invalid type"),
         }
     }
 
-    fn decode_extended(&self, cursor: &mut usize, _payload: u8) -> Result<DataValue, &'static str> {
+    fn decode_extended(
+        &self,
+        cursor: &mut usize,
+        size_from_ctrl: u8,
+    ) -> Result<DataValue, &'static str> {
         if *cursor >= self.buffer.len() {
             return Err("Extended type truncated");
         }
 
-        let ext_byte = self.buffer[*cursor];
+        // The next byte contains the raw extended type number
+        // Actual type = 7 + raw_ext_type (per libmaxminddb)
+        let raw_ext_type = self.buffer[*cursor];
         *cursor += 1;
 
-        let ext_type = (ext_byte >> 5) + 7;  // Add 7 to get actual type
-        let ext_size = ext_byte & 0x1F;
+        let type_id = 7 + raw_ext_type;
 
-        // Handle wrap-around for types >= 15
-        let actual_type = if ext_type <= 14 {
-            ext_type
-        } else {
-            // Type 15: ext_type will be 15 when (ext_byte>>5)+7 = 15
-            // That means ext_byte>>5 = 8, but 8%8=0, so ext_byte>>5 will be 0
-            // So when we see ext_byte>>5 = 0 and we're in extended, it could be type 15
-            // We need to check the size field to differentiate
-            if ext_type == 7 && ext_size == 4 {
-                15  // Float has size 4
-            } else {
-                ext_type
-            }
-        };
-
-        match actual_type {
-            7 => {
-                // Could be extended type 0 (shouldn't happen) or wrapping
-                // Check size to determine
-                if ext_size == 4 {
-                    // This is actually type 15 (Float) wrapping around
-                    self.decode_float(cursor)
-                } else {
-                    Err("Invalid extended type 0")
-                }
-            }
-            8 => self.decode_int32(cursor),       // Extended type 1
-            9 => self.decode_uint64(cursor),      // Extended type 2
-            10 => self.decode_uint128(cursor),    // Extended type 3
-            11 => self.decode_array(cursor, ext_size),  // Extended type 4
-            14 => Ok(DataValue::Bool(ext_size != 0)),   // Extended type 7
-            15 => self.decode_float(cursor),      // Extended type 8
+        match type_id {
+            8 => self.decode_int32(cursor, size_from_ctrl), // Extended type 1
+            9 => self.decode_uint64(cursor, size_from_ctrl), // Extended type 2
+            10 => self.decode_uint128(cursor, size_from_ctrl), // Extended type 3
+            11 => self.decode_array(cursor, size_from_ctrl), // Extended type 4
+            14 => Ok(DataValue::Bool(size_from_ctrl != 0)), // Extended type 7
+            15 => self.decode_float(cursor, size_from_ctrl), // Extended type 8
             _ => Err("Unknown extended type"),
         }
     }
 
     fn decode_pointer(&self, cursor: &mut usize, payload: u8) -> Result<DataValue, &'static str> {
-        let size_bits = (payload >> 3) & 0x3;  // Extract bits 3-4
+        let size_bits = (payload >> 3) & 0x3; // Extract bits 3-4
         let offset = match size_bits {
             0 => {
-                // 11 bits
-                if *cursor + 1 > self.buffer.len() {
+                // 11 bits: 3 bits from payload + 8 bits from next byte
+                if *cursor >= self.buffer.len() {
                     return Err("Pointer data truncated");
                 }
+                let low_3_bits = (payload & 0x7) as u32;
+                let next_byte = self.buffer[*cursor] as u32;
+                *cursor += 1;
+                (low_3_bits << 8) | next_byte
+            }
+            1 => {
+                // 19 bits: 3 bits from payload + 16 bits from next 2 bytes, offset by 2048
+                if *cursor + 1 >= self.buffer.len() {
+                    return Err("Pointer data truncated");
+                }
+                let low_3_bits = (payload & 0x7) as u32;
                 let b0 = self.buffer[*cursor] as u32;
                 let b1 = self.buffer[*cursor + 1] as u32;
                 *cursor += 2;
-                ((b0 & 0x7) << 8) | b1
+                2048 + ((low_3_bits << 16) | (b0 << 8) | b1)
             }
-            1 => {
-                // 19 bits
-                if *cursor + 2 > self.buffer.len() {
+            2 => {
+                // 27 bits: 3 bits from payload + 24 bits from next 3 bytes, offset by 526336
+                if *cursor + 2 >= self.buffer.len() {
                     return Err("Pointer data truncated");
                 }
+                let low_3_bits = (payload & 0x7) as u32;
                 let b0 = self.buffer[*cursor] as u32;
                 let b1 = self.buffer[*cursor + 1] as u32;
                 let b2 = self.buffer[*cursor + 2] as u32;
                 *cursor += 3;
-                0x800 + (((b0 & 0x7) << 16) | (b1 << 8) | b2)
-            }
-            2 => {
-                // 27 bits
-                if *cursor + 3 > self.buffer.len() {
-                    return Err("Pointer data truncated");
-                }
-                let b0 = self.buffer[*cursor] as u32;
-                let b1 = self.buffer[*cursor + 1] as u32;
-                let b2 = self.buffer[*cursor + 2] as u32;
-                let b3 = self.buffer[*cursor + 3] as u32;
-                *cursor += 4;
-                0x80800 + (((b0 & 0x7) << 24) | (b1 << 16) | (b2 << 8) | b3)
+                526336 + ((low_3_bits << 24) | (b0 << 16) | (b1 << 8) | b2)
             }
             3 => {
-                // 32 bits
-                if *cursor + 4 > self.buffer.len() {
+                // 32 bits: payload bits ignored, full 32 bits from next 4 bytes
+                if *cursor + 3 >= self.buffer.len() {
                     return Err("Pointer data truncated");
                 }
                 let mut bytes = [0u8; 4];
@@ -521,28 +507,46 @@ impl<'a> DataDecoder<'a> {
         Ok(DataValue::Bytes(bytes))
     }
 
-    fn decode_uint16(&self, cursor: &mut usize) -> Result<DataValue, &'static str> {
-        if *cursor + 2 > self.buffer.len() {
+    fn decode_uint16(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+        let size = self.decode_size(cursor, size_bits)?;
+
+        if size > 2 {
+            return Err("Uint16 size too large");
+        }
+
+        if *cursor + size > self.buffer.len() {
             return Err("Uint16 data out of bounds");
         }
 
-        let mut bytes = [0u8; 2];
-        bytes.copy_from_slice(&self.buffer[*cursor..*cursor + 2]);
-        *cursor += 2;
+        // Read variable number of bytes and convert to u16
+        let mut value = 0u16;
+        for i in 0..size {
+            value = (value << 8) | (self.buffer[*cursor + i] as u16);
+        }
+        *cursor += size;
 
-        Ok(DataValue::Uint16(u16::from_be_bytes(bytes)))
+        Ok(DataValue::Uint16(value))
     }
 
-    fn decode_uint32(&self, cursor: &mut usize) -> Result<DataValue, &'static str> {
-        if *cursor + 4 > self.buffer.len() {
+    fn decode_uint32(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+        let size = self.decode_size(cursor, size_bits)?;
+
+        if size > 4 {
+            return Err("Uint32 size too large");
+        }
+
+        if *cursor + size > self.buffer.len() {
             return Err("Uint32 data out of bounds");
         }
 
-        let mut bytes = [0u8; 4];
-        bytes.copy_from_slice(&self.buffer[*cursor..*cursor + 4]);
-        *cursor += 4;
+        // Read variable number of bytes and convert to u32
+        let mut value = 0u32;
+        for i in 0..size {
+            value = (value << 8) | (self.buffer[*cursor + i] as u32);
+        }
+        *cursor += size;
 
-        Ok(DataValue::Uint32(u32::from_be_bytes(bytes)))
+        Ok(DataValue::Uint32(value))
     }
 
     fn decode_map(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
@@ -550,9 +554,18 @@ impl<'a> DataDecoder<'a> {
         let mut map = HashMap::new();
 
         for _ in 0..count {
-            let key = match self.decode_at(cursor)? {
+            // Decode key - can be String or Pointer (MMDB uses pointers for deduplication)
+            let key_value = self.decode_at(cursor)?;
+            let key = match key_value {
                 DataValue::String(s) => s,
-                _ => return Err("Map key must be string"),
+                DataValue::Pointer(offset) => {
+                    // Follow pointer to get the actual key string
+                    match self.decode(offset)? {
+                        DataValue::String(s) => s,
+                        _ => return Err("Pointer in map key must point to string"),
+                    }
+                }
+                _ => return Err("Map key must be string or pointer to string"),
             };
 
             let value = self.decode_at(cursor)?;
@@ -562,40 +575,77 @@ impl<'a> DataDecoder<'a> {
         Ok(DataValue::Map(map))
     }
 
-    fn decode_int32(&self, cursor: &mut usize) -> Result<DataValue, &'static str> {
-        if *cursor + 4 > self.buffer.len() {
+    fn decode_int32(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+        let size = self.decode_size(cursor, size_bits)?;
+
+        if size > 4 {
+            return Err("Int32 size too large");
+        }
+
+        if *cursor + size > self.buffer.len() {
             return Err("Int32 data out of bounds");
         }
 
-        let mut bytes = [0u8; 4];
-        bytes.copy_from_slice(&self.buffer[*cursor..*cursor + 4]);
-        *cursor += 4;
+        // Read variable number of bytes and convert to i32 with sign extension
+        let mut value = 0i32;
+        if size > 0 {
+            // Check if the high bit is set (negative number)
+            let is_negative = (self.buffer[*cursor] & 0x80) != 0;
 
-        Ok(DataValue::Int32(i32::from_be_bytes(bytes)))
+            if is_negative {
+                // Start with all 1s for sign extension
+                value = -1;
+            }
+
+            for i in 0..size {
+                value = (value << 8) | (self.buffer[*cursor + i] as i32);
+            }
+        }
+        *cursor += size;
+
+        Ok(DataValue::Int32(value))
     }
 
-    fn decode_uint64(&self, cursor: &mut usize) -> Result<DataValue, &'static str> {
-        if *cursor + 8 > self.buffer.len() {
+    fn decode_uint64(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+        let size = self.decode_size(cursor, size_bits)?;
+
+        if size > 8 {
+            return Err("Uint64 size too large");
+        }
+
+        if *cursor + size > self.buffer.len() {
             return Err("Uint64 data out of bounds");
         }
 
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&self.buffer[*cursor..*cursor + 8]);
-        *cursor += 8;
+        // Read variable number of bytes and convert to u64
+        let mut value = 0u64;
+        for i in 0..size {
+            value = (value << 8) | (self.buffer[*cursor + i] as u64);
+        }
+        *cursor += size;
 
-        Ok(DataValue::Uint64(u64::from_be_bytes(bytes)))
+        Ok(DataValue::Uint64(value))
     }
 
-    fn decode_uint128(&self, cursor: &mut usize) -> Result<DataValue, &'static str> {
-        if *cursor + 16 > self.buffer.len() {
+    fn decode_uint128(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+        let size = self.decode_size(cursor, size_bits)?;
+
+        if size > 16 {
+            return Err("Uint128 size too large");
+        }
+
+        if *cursor + size > self.buffer.len() {
             return Err("Uint128 data out of bounds");
         }
 
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&self.buffer[*cursor..*cursor + 16]);
-        *cursor += 16;
+        // Read variable number of bytes and convert to u128
+        let mut value = 0u128;
+        for i in 0..size {
+            value = (value << 8) | (self.buffer[*cursor + i] as u128);
+        }
+        *cursor += size;
 
-        Ok(DataValue::Uint128(u128::from_be_bytes(bytes)))
+        Ok(DataValue::Uint128(value))
     }
 
     fn decode_array(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
@@ -609,7 +659,12 @@ impl<'a> DataDecoder<'a> {
         Ok(DataValue::Array(array))
     }
 
-    fn decode_float(&self, cursor: &mut usize) -> Result<DataValue, &'static str> {
+    fn decode_float(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+        // Float should always be 4 bytes
+        if size_bits != 4 {
+            return Err("Float must be 4 bytes");
+        }
+
         if *cursor + 4 > self.buffer.len() {
             return Err("Float data out of bounds");
         }
@@ -671,12 +726,12 @@ mod tests {
         let uint64_val = DataValue::Uint64(0x123456789ABCDEF0);
         let uint128_val = DataValue::Uint128(0x0123456789ABCDEF0123456789ABCDEF);
         let int32_val = DataValue::Int32(-42);
-        let double_val = DataValue::Double(3.14159265359);
-        let float_val = DataValue::Float(2.71828);
+        let double_val = DataValue::Double(std::f64::consts::PI);
+        let float_val = DataValue::Float(std::f32::consts::E);
         let bool_val = DataValue::Bool(true);
         let bytes_val = DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]);
 
-        let offsets = vec![
+        let offsets = [
             encoder.encode(&string_val),
             encoder.encode(&uint16_val),
             encoder.encode(&uint32_val),
@@ -693,8 +748,16 @@ mod tests {
         let decoder = DataDecoder::new(&bytes, 0);
 
         let values = vec![
-            string_val, uint16_val, uint32_val, uint64_val, uint128_val,
-            int32_val, double_val, float_val, bool_val, bytes_val,
+            string_val,
+            uint16_val,
+            uint32_val,
+            uint64_val,
+            uint128_val,
+            int32_val,
+            double_val,
+            float_val,
+            bool_val,
+            bytes_val,
         ];
 
         for (offset, expected) in offsets.iter().zip(values.iter()) {
@@ -765,15 +828,21 @@ mod tests {
 
         // Build threat intelligence data structure
         let mut threat_data = HashMap::new();
-        threat_data.insert("threat_level".to_string(), DataValue::String("high".to_string()));
-        threat_data.insert("category".to_string(), DataValue::String("malware".to_string()));
+        threat_data.insert(
+            "threat_level".to_string(),
+            DataValue::String("high".to_string()),
+        );
+        threat_data.insert(
+            "category".to_string(),
+            DataValue::String("malware".to_string()),
+        );
         threat_data.insert("confidence".to_string(), DataValue::Float(0.98));
         threat_data.insert("first_seen".to_string(), DataValue::Uint64(1704067200));
-        
+
         let mut indicators = HashMap::new();
         indicators.insert("ip_count".to_string(), DataValue::Uint32(42));
         indicators.insert("domain_count".to_string(), DataValue::Uint32(15));
-        
+
         threat_data.insert("indicators".to_string(), DataValue::Map(indicators));
         threat_data.insert(
             "tags".to_string(),
@@ -797,11 +866,11 @@ mod tests {
     #[test]
     fn test_large_strings() {
         let mut encoder = DataEncoder::new();
-        
+
         // Test string size encodings
-        let short = "x".repeat(28);  // < 29
+        let short = "x".repeat(28); // < 29
         let medium = "x".repeat(100); // 29..285
-        let long = "x".repeat(1000);  // > 285
+        let long = "x".repeat(1000); // > 285
 
         let offset1 = encoder.encode(&DataValue::String(short.clone()));
         let offset2 = encoder.encode(&DataValue::String(medium.clone()));
@@ -818,13 +887,13 @@ mod tests {
     #[test]
     fn test_pointer_encoding() {
         let mut encoder = DataEncoder::new();
-        
+
         // Test different pointer sizes
         let ptrs = vec![
-            DataValue::Pointer(0x100),        // 11-bit
-            DataValue::Pointer(0x10000),      // 19-bit
-            DataValue::Pointer(0x1000000),    // 27-bit
-            DataValue::Pointer(0xDEADBEEF),   // 32-bit
+            DataValue::Pointer(0x100),      // 11-bit
+            DataValue::Pointer(0x10000),    // 19-bit
+            DataValue::Pointer(0x1000000),  // 27-bit
+            DataValue::Pointer(0xDEADBEEF), // 32-bit
         ];
 
         let offsets: Vec<_> = ptrs.iter().map(|p| encoder.encode(p)).collect();

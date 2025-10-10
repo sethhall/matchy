@@ -264,20 +264,29 @@ fn test_pure_wildcard_patterns() {
 #[test]
 fn test_v2_simple_pattern_with_data() {
     let patterns = vec!["*.evil.com", "malware.*"];
-    
+
     // Build threat data
     let mut threat1 = HashMap::new();
-    threat1.insert("threat_level".to_string(), DataValue::String("high".to_string()));
-    threat1.insert("category".to_string(), DataValue::String("phishing".to_string()));
-    
+    threat1.insert(
+        "threat_level".to_string(),
+        DataValue::String("high".to_string()),
+    );
+    threat1.insert(
+        "category".to_string(),
+        DataValue::String("phishing".to_string()),
+    );
+
     let mut threat2 = HashMap::new();
-    threat2.insert("threat_level".to_string(), DataValue::String("critical".to_string()));
-    threat2.insert("category".to_string(), DataValue::String("malware".to_string()));
-    
-    let data_values = vec![
-        Some(DataValue::Map(threat1)),
-        Some(DataValue::Map(threat2)),
-    ];
+    threat2.insert(
+        "threat_level".to_string(),
+        DataValue::String("critical".to_string()),
+    );
+    threat2.insert(
+        "category".to_string(),
+        DataValue::String("malware".to_string()),
+    );
+
+    let data_values = vec![Some(DataValue::Map(threat1)), Some(DataValue::Map(threat2))];
 
     let pg = Paraglob::build_from_patterns_with_data(
         &patterns,
@@ -324,17 +333,26 @@ fn test_v2_backward_compatibility_v1_format() {
     let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     // Should NOT be v2 format
-    assert!(!pg.has_data_section(), "V1 format should not have data section");
+    assert!(
+        !pg.has_data_section(),
+        "V1 format should not have data section"
+    );
 
     // Trying to get data should return None
-    assert!(pg.get_pattern_data(0).is_none(), "V1 format should have no data");
-    assert!(pg.get_pattern_data(1).is_none(), "V1 format should have no data");
+    assert!(
+        pg.get_pattern_data(0).is_none(),
+        "V1 format should have no data"
+    );
+    assert!(
+        pg.get_pattern_data(1).is_none(),
+        "V1 format should have no data"
+    );
 }
 
 #[test]
 fn test_v2_data_deduplication() {
     let patterns = vec!["pattern1", "pattern2", "pattern3"];
-    
+
     // All patterns get the SAME data
     let same_data = DataValue::String("shared_value".to_string());
     let data_values = vec![
@@ -367,11 +385,11 @@ fn test_v2_data_deduplication() {
 #[test]
 fn test_v2_roundtrip_serialization() {
     let patterns = vec!["*.evil.com", "malware.*", "test*"];
-    
+
     let mut threat_data = HashMap::new();
     threat_data.insert("score".to_string(), DataValue::Uint32(95));
     threat_data.insert("active".to_string(), DataValue::Bool(true));
-    
+
     let data_values = vec![
         Some(DataValue::Map(threat_data.clone())),
         Some(DataValue::Map(threat_data)),
@@ -395,8 +413,12 @@ fn test_v2_roundtrip_serialization() {
     assert!(pg2.has_data_section(), "Deserialized should be v2 format");
 
     // Verify data preserved
-    let data0 = pg2.get_pattern_data(0).expect("Pattern 0 data should survive roundtrip");
-    let data2 = pg2.get_pattern_data(2).expect("Pattern 2 data should survive roundtrip");
+    let data0 = pg2
+        .get_pattern_data(0)
+        .expect("Pattern 0 data should survive roundtrip");
+    let data2 = pg2
+        .get_pattern_data(2)
+        .expect("Pattern 2 data should survive roundtrip");
 
     if let DataValue::Map(m) = data0 {
         assert_eq!(m.get("score"), Some(&DataValue::Uint32(95)));
@@ -412,7 +434,7 @@ fn test_v2_roundtrip_serialization() {
 fn test_v2_partial_data_coverage() {
     // Not all patterns need data
     let patterns = vec!["pattern1", "pattern2", "pattern3"];
-    
+
     let data_values = vec![
         Some(DataValue::String("has_data".to_string())),
         None, // No data for pattern2
@@ -430,20 +452,29 @@ fn test_v2_partial_data_coverage() {
     assert!(pg.has_data_section());
 
     // Check individual patterns
-    assert!(pg.get_pattern_data(0).is_some(), "Pattern 0 should have data");
-    assert!(pg.get_pattern_data(1).is_none(), "Pattern 1 should NOT have data");
-    assert!(pg.get_pattern_data(2).is_some(), "Pattern 2 should have data");
+    assert!(
+        pg.get_pattern_data(0).is_some(),
+        "Pattern 0 should have data"
+    );
+    assert!(
+        pg.get_pattern_data(1).is_none(),
+        "Pattern 1 should NOT have data"
+    );
+    assert!(
+        pg.get_pattern_data(2).is_some(),
+        "Pattern 2 should have data"
+    );
 }
 
 #[test]
 fn test_v2_complex_nested_data() {
     let patterns = vec!["threat.*"];
-    
+
     // Build complex nested structure
     let mut indicators = HashMap::new();
     indicators.insert("ip_count".to_string(), DataValue::Uint32(42));
     indicators.insert("domain_count".to_string(), DataValue::Uint32(15));
-    
+
     let mut threat_data = HashMap::new();
     threat_data.insert("level".to_string(), DataValue::String("high".to_string()));
     threat_data.insert("confidence".to_string(), DataValue::Float(0.95));
@@ -457,7 +488,7 @@ fn test_v2_complex_nested_data() {
         ]),
     );
     threat_data.insert("active".to_string(), DataValue::Bool(true));
-    
+
     let data_values = vec![Some(DataValue::Map(threat_data))];
 
     let pg = Paraglob::build_from_patterns_with_data(
@@ -469,18 +500,18 @@ fn test_v2_complex_nested_data() {
 
     // Retrieve and verify complex structure
     let data = pg.get_pattern_data(0).expect("Should have data");
-    
+
     if let DataValue::Map(m) = data {
         assert_eq!(m.get("level"), Some(&DataValue::String("high".to_string())));
         assert_eq!(m.get("active"), Some(&DataValue::Bool(true)));
-        
+
         // Check nested map
         if let Some(DataValue::Map(ind)) = m.get("indicators") {
             assert_eq!(ind.get("ip_count"), Some(&DataValue::Uint32(42)));
         } else {
             panic!("Expected nested indicators map");
         }
-        
+
         // Check array
         if let Some(DataValue::Array(tags)) = m.get("tags") {
             assert_eq!(tags.len(), 2);
@@ -496,16 +527,22 @@ fn test_v2_complex_nested_data() {
 #[test]
 fn test_v2_matching_with_data_retrieval() {
     let patterns = vec!["*.evil.com", "malware.*", "test*"];
-    
+
     let mut data1 = HashMap::new();
-    data1.insert("id".to_string(), DataValue::String("THREAT-001".to_string()));
-    
+    data1.insert(
+        "id".to_string(),
+        DataValue::String("THREAT-001".to_string()),
+    );
+
     let mut data2 = HashMap::new();
-    data2.insert("id".to_string(), DataValue::String("THREAT-002".to_string()));
-    
+    data2.insert(
+        "id".to_string(),
+        DataValue::String("THREAT-002".to_string()),
+    );
+
     let mut data3 = HashMap::new();
     data3.insert("id".to_string(), DataValue::String("TEST-001".to_string()));
-    
+
     let data_values = vec![
         Some(DataValue::Map(data1)),
         Some(DataValue::Map(data2)),
@@ -526,8 +563,12 @@ fn test_v2_matching_with_data_retrieval() {
     // Retrieve data for matched patterns
     for &pattern_id in &matches {
         let data = pg.get_pattern_data(pattern_id);
-        assert!(data.is_some(), "Matched pattern {} should have data", pattern_id);
-        
+        assert!(
+            data.is_some(),
+            "Matched pattern {} should have data",
+            pattern_id
+        );
+
         // Verify it's a map with an ID
         if let Some(DataValue::Map(m)) = data {
             assert!(m.contains_key("id"), "Data should have id field");
@@ -538,20 +579,29 @@ fn test_v2_matching_with_data_retrieval() {
 #[test]
 fn test_v2_all_mmdb_data_types() {
     let patterns = vec!["test"];
-    
+
     // Build data with all MMDB types
     let mut data = HashMap::new();
     data.insert("string".to_string(), DataValue::String("hello".to_string()));
     data.insert("uint16".to_string(), DataValue::Uint16(12345));
     data.insert("uint32".to_string(), DataValue::Uint32(0xDEADBEEF));
     data.insert("uint64".to_string(), DataValue::Uint64(0x123456789ABCDEF0));
-    data.insert("uint128".to_string(), DataValue::Uint128(0x0123456789ABCDEF0123456789ABCDEF));
+    data.insert(
+        "uint128".to_string(),
+        DataValue::Uint128(0x0123456789ABCDEF0123456789ABCDEF),
+    );
     data.insert("int32".to_string(), DataValue::Int32(-42));
-    data.insert("double".to_string(), DataValue::Double(3.14159));
-    data.insert("float".to_string(), DataValue::Float(2.71828));
+    data.insert(
+        "double".to_string(),
+        DataValue::Double(std::f64::consts::PI),
+    );
+    data.insert("float".to_string(), DataValue::Float(std::f32::consts::E));
     data.insert("bool_true".to_string(), DataValue::Bool(true));
     data.insert("bool_false".to_string(), DataValue::Bool(false));
-    data.insert("bytes".to_string(), DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+    data.insert(
+        "bytes".to_string(),
+        DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+    );
     data.insert(
         "array".to_string(),
         DataValue::Array(vec![
@@ -559,7 +609,7 @@ fn test_v2_all_mmdb_data_types() {
             DataValue::Uint32(1),
         ]),
     );
-    
+
     let data_values = vec![Some(DataValue::Map(data))];
 
     let pg = Paraglob::build_from_patterns_with_data(
@@ -574,9 +624,12 @@ fn test_v2_all_mmdb_data_types() {
     let pg2 = from_bytes(&bytes, MatchMode::CaseSensitive).unwrap();
 
     let data = pg2.get_pattern_data(0).expect("Should have data");
-    
+
     if let DataValue::Map(m) = data {
-        assert_eq!(m.get("string"), Some(&DataValue::String("hello".to_string())));
+        assert_eq!(
+            m.get("string"),
+            Some(&DataValue::String("hello".to_string()))
+        );
         assert_eq!(m.get("uint16"), Some(&DataValue::Uint16(12345)));
         assert_eq!(m.get("uint32"), Some(&DataValue::Uint32(0xDEADBEEF)));
         assert_eq!(m.get("int32"), Some(&DataValue::Int32(-42)));
@@ -584,7 +637,7 @@ fn test_v2_all_mmdb_data_types() {
         assert_eq!(m.get("bool_false"), Some(&DataValue::Bool(false)));
         // Float comparison with tolerance
         if let Some(DataValue::Float(f)) = m.get("float") {
-            assert!((f - 2.71828).abs() < 0.0001);
+            assert!((f - std::f32::consts::E).abs() < 0.0001);
         }
     } else {
         panic!("Expected Map data");
@@ -629,7 +682,9 @@ fn test_v2_incremental_builder() {
     assert!(matches2.contains(&id3));
 
     // Verify data retrieval
-    let data = pg.get_pattern_data(id3).expect("Pattern 3 should have data");
+    let data = pg
+        .get_pattern_data(id3)
+        .expect("Pattern 3 should have data");
     if let DataValue::Map(m) = data {
         assert_eq!(m.get("level"), Some(&DataValue::String("high".to_string())));
         assert_eq!(m.get("score"), Some(&DataValue::Uint32(95)));
@@ -654,7 +709,7 @@ fn test_v2_incremental_builder_duplicate_handling() {
 
     let mut pg = builder.build().unwrap();
     let matches = pg.find_all("file.txt");
-    
+
     // Should only match once
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0], id1);

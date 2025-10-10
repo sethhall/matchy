@@ -17,15 +17,11 @@
 //! Data decoding reuses `crate::data_section::DataDecoder` since
 //! MMDB data format is what we already implemented for v2.
 
-pub mod types;
 pub mod format;
-
-// TODO: Implement these modules
-// pub mod tree;
+pub mod tree;
+pub mod types;
 
 // Re-export key types
-pub use types::{IpVersion, MmdbError, RecordSize, METADATA_MARKER};
-pub use format::{MmdbHeader, MmdbMetadata, find_metadata_marker};
-
-// Use DataValue from data_section as our MMDB value type
-pub use crate::data_section::DataValue as MmdbValue;
+pub use format::{find_metadata_marker, MmdbHeader, MmdbMetadata};
+pub use tree::SearchTree;
+pub use types::MmdbError;

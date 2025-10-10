@@ -47,7 +47,10 @@ fn main() {
     let phishing_id = builder
         .add_pattern_with_data("*.phishing.com", Some(DataValue::Map(phishing_data)))
         .unwrap();
-    println!("Added pattern '*.phishing.com' with threat data, ID: {}", phishing_id);
+    println!(
+        "Added pattern '*.phishing.com' with threat data, ID: {}",
+        phishing_id
+    );
 
     // Build malware data
     let mut malware_data = HashMap::new();
@@ -72,7 +75,10 @@ fn main() {
     let malware_id = builder
         .add_pattern_with_data("malware-*", Some(DataValue::Map(malware_data)))
         .unwrap();
-    println!("Added pattern 'malware-*' with threat data, ID: {}", malware_id);
+    println!(
+        "Added pattern 'malware-*' with threat data, ID: {}",
+        malware_id
+    );
 
     // Check builder state
     println!("\n--- Builder State ---");
@@ -88,7 +94,14 @@ fn main() {
     let mut pg = builder.build().unwrap();
 
     println!("✓ Matcher built successfully!");
-    println!("  Format: v{}", if pg.has_data_section() { "2 (with data)" } else { "1 (patterns only)" });
+    println!(
+        "  Format: v{}",
+        if pg.has_data_section() {
+            "2 (with data)"
+        } else {
+            "1 (patterns only)"
+        }
+    );
 
     // Test matching
     println!("\n=== Testing Pattern Matching ===\n");

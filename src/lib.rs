@@ -73,25 +73,39 @@
 pub mod ac_offset;
 /// Data section encoding/decoding for v2 format
 pub mod data_section;
+/// Unified database API
+pub mod database;
 /// Error types for Paraglob operations
 pub mod error;
 pub mod glob;
+/// IP tree builder for MMDB format
+pub mod ip_tree_builder;
+/// MISP JSON threat intelligence importer
+pub mod misp_importer;
 pub mod mmap;
+/// MMDB format implementation (internal)
+mod mmdb;
+/// Unified MMDB builder
+pub mod mmdb_builder;
 pub mod offset_format;
 pub mod paraglob_offset;
 pub mod serialization;
-/// MMDB reader components (in progress)
-pub mod mmdb;
 
 // Public C API
 pub mod c_api;
 
 // Re-exports for Rust consumers
+
+/// Unified database for IP and pattern lookups
+pub use crate::database::{Database, DatabaseError, QueryResult};
+
+/// Data value type for database entries
 pub use crate::data_section::DataValue;
-/// Alias for MMDB value type to avoid duplication
-pub type MmdbValue = DataValue;
+
 pub use crate::error::ParaglobError;
 pub use crate::glob::MatchMode;
+/// Unified MMDB database builder (IP + patterns)
+pub use crate::mmdb_builder::MmdbBuilder;
 pub use crate::paraglob_offset::{Paraglob, ParaglobBuilder};
 pub use crate::serialization::{load, save};
 

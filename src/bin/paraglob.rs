@@ -52,19 +52,31 @@ enum Commands {
         verbose: bool,
     },
 
-    /// Build a pattern database from patterns
+    /// Build a unified database from patterns and/or IP addresses
     Build {
-        /// Input file containing patterns (one per line)
-        #[arg(value_name = "INPUT")]
-        input: PathBuf,
+        /// Input files containing patterns, IP addresses, or MISP JSON (can specify multiple)
+        #[arg(value_name = "INPUT", required = true)]
+        inputs: Vec<PathBuf>,
 
-        /// Output database file (.pgb)
+        /// Output database file (.mmdb extension recommended)
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
 
-        /// Input format: text (default) or json (for patterns with data)
+        /// Input format: text, json, or misp (for MISP JSON threat intel files)
         #[arg(short, long, default_value = "text")]
         format: String,
+
+        /// Database type name (e.g., "MyCompany-ThreatIntel")
+        #[arg(short = 't', long)]
+        database_type: Option<String>,
+
+        /// Description text (can be specified multiple times with --desc-lang)
+        #[arg(short = 'd', long)]
+        description: Option<String>,
+
+        /// Language code for description (default: "en")
+        #[arg(long, default_value = "en")]
+        desc_lang: String,
 
         /// Verbose output during build
         #[arg(short, long)]
@@ -88,72 +100,143 @@ fn main() -> Result<()> {
             verbose,
         } => cmd_inspect(database, json, verbose),
         Commands::Build {
-            input,
+            inputs,
             output,
             format,
+            database_type,
+            description,
+            desc_lang,
             verbose,
-        } => cmd_build(input, output, format, verbose),
+        } => cmd_build(
+            inputs,
+            output,
+            format,
+            database_type,
+            description,
+            desc_lang,
+            verbose,
+        ),
     }
 }
 
 fn cmd_query(database: PathBuf, query: String, json_output: bool, show_data: bool) -> Result<()> {
-    // Load the database with case-sensitive mode (default)
-    let mut pg_mmap = paraglob_rs::load(&database, paraglob_rs::MatchMode::CaseSensitive)
-        .with_context(|| format!("Failed to load database: {}", database.display()))?;
-    let pg = pg_mmap.paraglob_mut();
+    use paraglob_rs::{Database, QueryResult};
 
-    // Perform the query
-    let matches = pg.find_all(&query);
+    // Load database using unified API (supports IP, pattern, and combined formats)
+    let db = Database::open(database.to_str().unwrap())
+        .with_context(|| format!("Failed to load database: {}", database.display()))?;
+
+    // Perform the query (auto-detects IP vs pattern)
+    let result = db
+        .lookup(&query)
+        .with_context(|| format!("Query failed for: {}", query))?;
 
     if json_output {
         // JSON output
-        let mut results = Vec::new();
-        for &pattern_id in &matches {
-            let pattern = pg
-                .get_pattern(pattern_id)
-                .ok_or_else(|| anyhow::anyhow!("Invalid pattern ID: {}", pattern_id))?;
+        match result {
+            Some(QueryResult::Pattern { pattern_ids, data }) => {
+                let mut results = Vec::new();
+                for (i, &pattern_id) in pattern_ids.iter().enumerate() {
+                    let mut entry = json!({
+                        "pattern_id": pattern_id,
+                        "type": "pattern",
+                    });
 
-            let mut entry = json!({
-                "pattern_id": pattern_id,
-                "pattern": pattern,
-            });
+                    if show_data {
+                        if let Some(Some(ref d)) = data.get(i) {
+                            entry["data"] = data_value_to_json(d);
+                        }
+                    }
 
-            if show_data {
-                if let Some(data) = pg.get_pattern_data(pattern_id) {
-                    entry["data"] = data_value_to_json(&data);
+                    results.push(entry);
                 }
+
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "query": query,
+                        "type": "pattern",
+                        "match_count": results.len(),
+                        "matches": results,
+                    }))?
+                );
             }
-
-            results.push(entry);
-        }
-
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "query": query,
-            "match_count": results.len(),
-            "matches": results,
-        }))?);
-    } else {
-        // Human-readable output
-        if matches.is_empty() {
-            println!("No matches found for: {}", query);
-        } else {
-            println!("Found {} match(es) for: {}\n", matches.len(), query);
-            for &pattern_id in &matches {
-                let pattern = pg
-                    .get_pattern(pattern_id)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid pattern ID: {}", pattern_id))?;
-
-                println!("  Pattern ID: {}", pattern_id);
-                println!("  Pattern:    {}", pattern);
+            Some(QueryResult::Ip { data, prefix_len }) => {
+                let mut result = json!({
+                    "query": query,
+                    "type": "ip",
+                    "prefix_len": prefix_len,
+                });
 
                 if show_data {
-                    if let Some(data) = pg.get_pattern_data(pattern_id) {
-                        println!("  Data:       {}", format_data_value(&data, "              "));
-                    } else {
-                        println!("  Data:       (none)");
+                    result["data"] = data_value_to_json(&data);
+                }
+
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            Some(QueryResult::NotFound) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "query": query,
+                        "found": false,
+                    }))?
+                );
+            }
+            None => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "query": query,
+                        "error": "No result",
+                    }))?
+                );
+            }
+        }
+    } else {
+        // Human-readable output
+        match result {
+            Some(QueryResult::Pattern { pattern_ids, data }) => {
+                if pattern_ids.is_empty() {
+                    println!("No matches found for: {}", query);
+                } else {
+                    println!(
+                        "Found {} pattern match(es) for: {}\n",
+                        pattern_ids.len(),
+                        query
+                    );
+                    for (i, &pattern_id) in pattern_ids.iter().enumerate() {
+                        println!("  Pattern ID: {}", pattern_id);
+
+                        if show_data {
+                            if let Some(Some(ref d)) = data.get(i) {
+                                println!(
+                                    "  Data:       {}",
+                                    format_data_value(d, "              ")
+                                );
+                            } else {
+                                println!("  Data:       (none)");
+                            }
+                        }
+                        println!();
                     }
                 }
-                println!();
+            }
+            Some(QueryResult::Ip { data, prefix_len }) => {
+                println!("IP address found: {}\n", query);
+                println!("  Prefix:     /{}", prefix_len);
+                if show_data {
+                    println!(
+                        "  Data:       {}",
+                        format_data_value(&data, "              ")
+                    );
+                }
+            }
+            Some(QueryResult::NotFound) => {
+                println!("Not found: {}", query);
+            }
+            None => {
+                println!("No result for: {}", query);
             }
         }
     }
@@ -162,58 +245,91 @@ fn cmd_query(database: PathBuf, query: String, json_output: bool, show_data: boo
 }
 
 fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()> {
-    // Load the database with case-sensitive mode (default)
-    let mut pg_mmap = paraglob_rs::load(&database, paraglob_rs::MatchMode::CaseSensitive)
-        .with_context(|| format!("Failed to load database: {}", database.display()))?;
-    let pg = pg_mmap.paraglob_mut();
+    use paraglob_rs::Database;
 
-    let stats = pg.get_stats();
-    let version = pg.version();
-    let has_data = pg.has_data_section();
+    // Load database using unified API
+    let db = Database::open(database.to_str().unwrap())
+        .with_context(|| format!("Failed to load database: {}", database.display()))?;
+
+    let format_str = db.format();
+    let has_ip = db.has_ip_data();
+    let has_pattern = db.has_pattern_data();
+    let metadata = db.metadata();
 
     if json_output {
-        let mut metadata = json!({
+        let mut output = json!({
             "file": database.display().to_string(),
-            "version": version,
-            "has_data_section": has_data,
-            "pattern_count": stats.pattern_count,
-            "node_count": stats.node_count,
-            "edge_count": stats.edge_count,
+            "format": format_str,
+            "has_ip_data": has_ip,
+            "has_pattern_data": has_pattern,
         });
 
-        if has_data {
-            metadata["data_section_size"] = json!(stats.data_section_size);
-            metadata["mapping_count"] = json!(stats.mapping_count);
+        if let Some(meta) = metadata {
+            output["metadata"] = data_value_to_json(&meta);
         }
 
-        println!("{}", serde_json::to_string_pretty(&metadata)?);
+        println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("Database: {}", database.display());
-        println!("Version:  v{}", version);
-        println!("Format:   {}", if has_data { "v2 (with data)" } else { "v1 (patterns only)" });
+        println!("Format:   {}", format_str);
         println!();
-        println!("Statistics:");
-        println!("  Patterns:     {}", stats.pattern_count);
-        println!("  Nodes:        {}", stats.node_count);
-        println!("  Edges:        {}", stats.edge_count);
+        println!("Capabilities:");
+        println!("  IP lookups:      {}", if has_ip { "✓" } else { "✗" });
+        println!("  Pattern lookups: {}", if has_pattern { "✓" } else { "✗" });
 
-        if has_data {
-            println!("  Data section: {} bytes", stats.data_section_size);
-            println!("  Mappings:     {}", stats.mapping_count);
-        }
+        if let Some(meta) = metadata {
+            if let DataValue::Map(map) = &meta {
+                println!();
+                println!("Metadata:");
 
-        if verbose {
-            println!();
-            println!("Patterns:");
-            for i in 0..stats.pattern_count {
-                if let Some(pattern) = pg.get_pattern(i as u32) {
-                    print!("  [{:4}] {}", i, pattern);
-                    if has_data {
-                        if let Some(data) = pg.get_pattern_data(i as u32) {
-                            print!(" => {}", format_data_value(&data, ""));
+                // Show database_type if present
+                if let Some(DataValue::String(db_type)) = map.get("database_type") {
+                    println!("  Database type:   {}", db_type);
+                }
+
+                // Show description if present
+                if let Some(DataValue::Map(desc_map)) = map.get("description") {
+                    println!("  Description:");
+                    for (lang, desc_value) in desc_map {
+                        if let DataValue::String(desc) = desc_value {
+                            println!("    {}: {}", lang, desc);
                         }
                     }
+                }
+
+                // Show build epoch if present
+                if let Some(build_epoch) = map.get("build_epoch") {
+                    if let Some(epoch) = extract_uint_from_datavalue(build_epoch) {
+                        let timestamp_str = format_unix_timestamp(epoch);
+                        println!("  Build time:      {} ({})", timestamp_str, epoch);
+                    }
+                }
+
+                // Show IP version if present
+                if let Some(ip_version) = map.get("ip_version") {
+                    if let Some(ver) = extract_uint_from_datavalue(ip_version) {
+                        println!("  IP version:      IPv{}", ver);
+                    }
+                }
+
+                // Show node count if present
+                if let Some(node_count) = map.get("node_count") {
+                    if let Some(count) = extract_uint_from_datavalue(node_count) {
+                        println!("  Node count:      {}", count);
+                    }
+                }
+
+                // Show record size if present
+                if let Some(record_size) = map.get("record_size") {
+                    if let Some(size) = extract_uint_from_datavalue(record_size) {
+                        println!("  Record size:     {} bits", size);
+                    }
+                }
+
+                if verbose {
                     println!();
+                    println!("Full metadata:");
+                    println!("{}", format_data_value(&meta, "  "));
                 }
             }
         }
@@ -222,92 +338,185 @@ fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()
     Ok(())
 }
 
-fn cmd_build(input: PathBuf, output: PathBuf, format: String, verbose: bool) -> Result<()> {
+fn cmd_build(
+    inputs: Vec<PathBuf>,
+    output: PathBuf,
+    format: String,
+    database_type: Option<String>,
+    description: Option<String>,
+    desc_lang: String,
+    verbose: bool,
+) -> Result<()> {
+    use paraglob_rs::glob::MatchMode;
+    use paraglob_rs::mmdb_builder::MmdbBuilder;
+
     if verbose {
-        println!("Building pattern database...");
-        println!("  Input:  {}", input.display());
+        println!("Building unified MMDB database (IP + patterns)...");
+        println!("  Input files: {}", inputs.len());
+        for input in &inputs {
+            println!("    - {}", input.display());
+        }
         println!("  Output: {}", output.display());
         println!("  Format: {}", format);
         println!();
     }
 
-    let mut builder = paraglob_rs::incremental_builder();
+    let mut builder = MmdbBuilder::new(MatchMode::CaseSensitive);
+
+    // Apply metadata if provided
+    if let Some(db_type) = database_type {
+        builder = builder.with_database_type(db_type);
+    }
+
+    if let Some(desc) = description {
+        builder = builder.with_description(desc_lang, desc);
+    }
 
     match format.as_str() {
         "text" => {
-            // Read patterns from text file (one per line)
-            let file = fs::File::open(&input)
-                .with_context(|| format!("Failed to open input file: {}", input.display()))?;
-            let reader = io::BufReader::new(file);
+            // Read entries from text file(s) (one per line)
+            // Auto-detects IP addresses/CIDRs vs patterns
+            let mut total_count = 0;
 
-            let mut count = 0;
-            for line in reader.lines() {
-                let line = line?;
-                let pattern = line.trim();
-                if !pattern.is_empty() && !pattern.starts_with('#') {
-                    builder.add_pattern(pattern)?;
-                    count += 1;
-                    if verbose && count % 1000 == 0 {
-                        println!("  Added {} patterns...", count);
+            for input in &inputs {
+                if verbose && inputs.len() > 1 {
+                    println!("  Reading: {}...", input.display());
+                }
+
+                let file = fs::File::open(input)
+                    .with_context(|| format!("Failed to open input file: {}", input.display()))?;
+                let reader = io::BufReader::new(file);
+
+                let mut count = 0;
+                for line in reader.lines() {
+                    let line = line?;
+                    let entry = line.trim();
+                    if !entry.is_empty() && !entry.starts_with('#') {
+                        // Auto-detection: builder will determine if it's IP or pattern
+                        builder.add_entry(entry, HashMap::new())?;
+                        count += 1;
+                        total_count += 1;
+                        if verbose && total_count % 1000 == 0 {
+                            println!("    Added {} entries...", total_count);
+                        }
                     }
+                }
+
+                if verbose && inputs.len() > 1 {
+                    println!("    {} entries from this file", count);
                 }
             }
 
             if verbose {
-                println!("  Total: {} patterns", count);
+                println!("  Total: {} entries", total_count);
             }
         }
         "json" => {
-            // Read patterns with data from JSON file
-            let content = fs::read_to_string(&input)
-                .with_context(|| format!("Failed to read JSON file: {}", input.display()))?;
-            let patterns: Vec<serde_json::Value> = serde_json::from_str(&content)
-                .context("Failed to parse JSON")?;
+            // Read entries with data from JSON file(s)
+            // Format: [{"key": "192.168.0.0/16" or "*.example.com", "data": {...}}]
+            let mut total_entries = 0;
 
-            for (i, item) in patterns.iter().enumerate() {
-                let pattern_str = item
-                    .get("pattern")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'pattern' field at index {}", i))?;
+            for input in &inputs {
+                if verbose && inputs.len() > 1 {
+                    println!("  Reading: {}...", input.display());
+                }
 
-                if let Some(data_json) = item.get("data") {
-                    let data = json_to_data_value(data_json)?;
-                    builder.add_pattern_with_data(pattern_str, Some(data))?;
-                } else {
-                    builder.add_pattern(pattern_str)?;
-                };
-                if verbose && (i + 1) % 1000 == 0 {
-                    println!("  Added {} patterns...", i + 1);
+                let content = fs::read_to_string(input)
+                    .with_context(|| format!("Failed to read JSON file: {}", input.display()))?;
+                let entries: Vec<serde_json::Value> =
+                    serde_json::from_str(&content).context("Failed to parse JSON")?;
+
+                for (i, item) in entries.iter().enumerate() {
+                    let key = item
+                        .get("key")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("Missing 'key' field at index {}", i))?;
+
+                    let data = if let Some(data_json) = item.get("data") {
+                        json_to_data_map(data_json)?
+                    } else {
+                        HashMap::new()
+                    };
+
+                    builder.add_entry(key, data)?;
+                    total_entries += 1;
+
+                    if verbose && total_entries % 1000 == 0 {
+                        println!("    Added {} entries...", total_entries);
+                    }
+                }
+
+                if verbose && inputs.len() > 1 {
+                    println!("    {} entries from this file", entries.len());
                 }
             }
 
             if verbose {
-                println!("  Total: {} patterns", patterns.len());
+                println!("  Total: {} entries", total_entries);
+            }
+        }
+        "misp" => {
+            // Read MISP JSON threat intelligence file(s)
+            use paraglob_rs::misp_importer::MispImporter;
+
+            if verbose {
+                println!("  Loading MISP JSON files...");
+            }
+
+            // Convert Vec<PathBuf> to Vec<&Path> for from_files
+            let input_refs: Vec<&PathBuf> = inputs.iter().collect();
+            let importer =
+                MispImporter::from_files(&input_refs).context("Failed to load MISP JSON files")?;
+
+            if verbose {
+                let stats = importer.stats();
+                println!("  Events:          {}", stats.total_events);
+                println!("  Attributes:      {}", stats.total_attributes);
+                println!("  Objects:         {}", stats.total_objects);
+                println!();
+                println!("  Building MISP database...");
+            }
+
+            // Build the database using MISP importer
+            // This will populate the builder with all indicators and metadata
+            builder = importer
+                .build_database(MatchMode::CaseSensitive)
+                .context("Failed to build MISP database")?;
+
+            if verbose {
+                let stats = builder.stats();
+                println!("  Total indicators: {}", stats.total_entries);
             }
         }
         _ => {
-            anyhow::bail!("Unknown format: {}. Use 'text' or 'json'", format);
+            anyhow::bail!("Unknown format: {}. Use 'text', 'json', or 'misp'", format);
         }
     }
 
+    // Show statistics
+    let stats = builder.stats();
     if verbose {
-        println!("\nBuilding automaton...");
+        println!("\nStatistics:");
+        println!("  Total entries:   {}", stats.total_entries);
+        println!("  IP entries:      {}", stats.ip_entries);
+        println!("  Pattern entries: {}", stats.pattern_entries);
+        println!("\nBuilding database...");
     }
 
-    let pg = builder.build()?;
+    let database_bytes = builder.build().context("Failed to build database")?;
 
     if verbose {
         println!("Saving to disk...");
     }
 
-    paraglob_rs::save(&pg, &output)
+    fs::write(&output, &database_bytes)
         .with_context(|| format!("Failed to save database: {}", output.display()))?;
 
     if verbose {
-        let file_size = fs::metadata(&output)?.len();
-        println!("\nSuccess!");
-        println!("  Database size: {} bytes", file_size);
+        println!("\n✓ Success!");
+        println!("  Database size: {} bytes", database_bytes.len());
         println!("  Output:        {}", output.display());
+        println!("  Format:        MMDB (extended with patterns)");
     }
 
     Ok(())
@@ -338,6 +547,16 @@ fn data_value_to_json(data: &DataValue) -> serde_json::Value {
             json!(items.iter().map(data_value_to_json).collect::<Vec<_>>())
         }
         DataValue::Pointer(_) => json!("<pointer>"),
+    }
+}
+
+fn json_to_data_map(json: &serde_json::Value) -> Result<HashMap<String, DataValue>> {
+    match json {
+        serde_json::Value::Object(obj) => obj
+            .iter()
+            .map(|(k, v)| Ok((k.clone(), json_to_data_value(v)?)))
+            .collect::<Result<HashMap<_, _>>>(),
+        _ => anyhow::bail!("Expected JSON object for data field"),
     }
 }
 
@@ -372,6 +591,82 @@ fn json_to_data_value(json: &serde_json::Value) -> Result<DataValue> {
             Ok(DataValue::Map(entries))
         }
     }
+}
+
+fn extract_uint_from_datavalue(data: &DataValue) -> Option<u64> {
+    match data {
+        DataValue::Uint16(u) => Some(*u as u64),
+        DataValue::Uint32(u) => Some(*u as u64),
+        DataValue::Uint64(u) => Some(*u),
+        _ => None,
+    }
+}
+
+fn format_unix_timestamp(timestamp: u64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let duration = Duration::from_secs(timestamp);
+    let datetime = UNIX_EPOCH + duration;
+
+    // Convert to a formatted string using the system's local time
+    // We'll format it manually since we don't have external dependencies
+    match datetime.duration_since(UNIX_EPOCH) {
+        Ok(d) => {
+            let total_secs = d.as_secs();
+            let days = total_secs / 86400;
+            let remaining = total_secs % 86400;
+            let hours = remaining / 3600;
+            let remaining = remaining % 3600;
+            let minutes = remaining / 60;
+            let seconds = remaining % 60;
+
+            // Calculate date from days since epoch (1970-01-01)
+            let (year, month, day) = days_to_ymd(days);
+
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+                year, month, day, hours, minutes, seconds
+            )
+        }
+        Err(_) => format!("Invalid timestamp: {}", timestamp),
+    }
+}
+
+// Convert days since Unix epoch to year/month/day
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    let mut year = 1970;
+    let mut remaining_days = days;
+
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    let days_in_months = if is_leap_year(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1;
+    for &days_in_month in &days_in_months {
+        if remaining_days < days_in_month {
+            break;
+        }
+        remaining_days -= days_in_month;
+        month += 1;
+    }
+
+    let day = remaining_days + 1;
+    (year, month, day)
+}
+
+fn is_leap_year(year: u64) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 fn format_data_value(data: &DataValue, indent: &str) -> String {
