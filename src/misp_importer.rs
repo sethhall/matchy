@@ -34,8 +34,8 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use paraglob_rs::misp_importer::MispImporter;
-//! use paraglob_rs::glob::MatchMode;
+//! use matchy::misp_importer::MispImporter;
+//! use matchy::glob::MatchMode;
 //! use std::fs;
 //!
 //! // Load MISP JSON file

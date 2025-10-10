@@ -25,7 +25,7 @@ What actually happened instead.
 ## Code Example
 ```rust
 // Minimal code example that reproduces the issue
-use paraglob_rs::Paraglob;
+use matchy::Paraglob;
 
 let patterns = vec!["*.txt"];
 // ... your code here
@@ -34,7 +34,7 @@ let patterns = vec!["*.txt"];
 ## Environment
 - **OS**: [e.g., Ubuntu 22.04, macOS 14, Windows 11]
 - **Rust version**: [output of `rustc --version`]
-- **paraglob-rs version**: [e.g., 0.1.0]
+- **matchy version**: [e.g., 0.1.0]
 - **Installation method**: [cargo, git clone, etc.]
 
 ## Additional Context

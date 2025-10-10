@@ -1,4 +1,4 @@
-/// Error types for the paraglob-rs library
+/// Error types for the matchy library
 use std::fmt;
 
 /// Result type alias for paraglob operations

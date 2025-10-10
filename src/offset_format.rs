@@ -12,7 +12,7 @@
 //! # Layout
 //!
 //! ```text
-//! [Header: ParaglobHeader (72 bytes)]
+//! [Header: ParaglobHeader (v3: 104 bytes)]
 //! [AC Nodes: ACNode array]
 //! [AC Edges: ACEdge arrays (variable, referenced by nodes)]
 //! [AC Pattern IDs: u32 arrays (variable, referenced by nodes)]
@@ -21,6 +21,9 @@
 //! [Meta-word mappings: MetaWordMapping array]
 //! [Pattern reference arrays: u32 arrays]
 //! [Single wildcards: SingleWildcard array]
+//! [Data section: optional (v2+)]
+//! [Data mappings: optional (v2+)]
+//! [AC Literal Mapping: optional (v3+)]
 //! ```
 //!
 //! # Design Principles
@@ -35,13 +38,16 @@ use std::mem;
 /// Magic bytes identifying Paraglob binary format
 pub const MAGIC: &[u8; 8] = b"PARAGLOB";
 
-/// Current format version (v2: adds data section support)
-pub const VERSION: u32 = 2;
+/// Current format version (v3: adds AC literal mapping for zero-copy loading)
+pub const VERSION: u32 = 3;
+
+/// Previous format version (v2: adds data section support)
+pub const VERSION_V2: u32 = 2;
 
 /// Previous format version (v1: patterns only, no data)
 pub const VERSION_V1: u32 = 1;
 
-/// Main header for serialized Paraglob database (96 bytes, 4-byte aligned)
+/// Main header for serialized Paraglob database (104 bytes, 4-byte aligned)
 ///
 /// This header appears at the start of every serialized Paraglob file.
 /// All offsets are relative to the start of the buffer.
@@ -49,6 +55,7 @@ pub const VERSION_V1: u32 = 1;
 /// # Version History
 /// - v1 (72 bytes): Original format, patterns only
 /// - v2 (96 bytes): Adds data section support for pattern-associated data
+/// - v3 (104 bytes): Adds AC literal mapping for O(1) zero-copy loading
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ParaglobHeader {
@@ -129,6 +136,17 @@ pub struct ParaglobHeader {
 
     /// Reserved for future v2+ features
     pub reserved_v2: u32,
+
+    // ===== v3 ADDITIONS (8 bytes) =====
+    /// Offset to AC literal→pattern mapping table (0 = no mapping, requires reconstruction)
+    /// Points to serialized HashMap<u32, Vec<u32>> for instant loading
+    /// Format: [entry_count: u32] followed by entries of:
+    ///   [literal_id: u32][pattern_count: u32][pattern_id: u32, ...]
+    pub ac_literal_map_offset: u32,
+
+    /// Number of entries in AC literal mapping table
+    /// 0 = v1/v2 file, requires reconstruct_literal_mapping()
+    pub ac_literal_map_count: u32,
 }
 
 /// AC Automaton node (32 bytes, 8-byte aligned)
@@ -258,7 +276,7 @@ pub struct PatternDataMapping {
 }
 
 // Compile-time size assertions to ensure struct layout
-const _: () = assert!(mem::size_of::<ParaglobHeader>() == 96); // v2: 8-byte magic + 22 * u32 fields
+const _: () = assert!(mem::size_of::<ParaglobHeader>() == 104); // v3: 8-byte magic + 24 * u32 fields
 const _: () = assert!(mem::size_of::<ACNode>() == 32);
 const _: () = assert!(mem::size_of::<ACEdge>() == 8);
 const _: () = assert!(mem::size_of::<PatternEntry>() == 16);
@@ -284,7 +302,7 @@ impl PatternDataMapping {
 }
 
 impl ParaglobHeader {
-    /// Create a new v2 header with magic and version
+    /// Create a new v3 header with magic and version
     pub fn new() -> Self {
         Self {
             magic: *MAGIC,
@@ -311,6 +329,9 @@ impl ParaglobHeader {
             mapping_count: 0,
             data_flags: 0,
             reserved_v2: 0,
+            // v3 fields
+            ac_literal_map_offset: 0,
+            ac_literal_map_count: 0,
         }
     }
 
@@ -319,20 +340,20 @@ impl ParaglobHeader {
         if &self.magic != MAGIC {
             return Err("Invalid magic bytes");
         }
-        if self.version != VERSION && self.version != VERSION_V1 {
-            return Err("Unsupported version");
+        if self.version != VERSION {
+            return Err("Unsupported version - only v3 format supported");
         }
         Ok(())
     }
 
-    /// Check if this is a v2 format file (with data section support)
-    pub fn is_v2(&self) -> bool {
-        self.version == VERSION
-    }
-
     /// Check if this file has a data section
     pub fn has_data_section(&self) -> bool {
-        self.is_v2() && self.data_section_size > 0
+        self.data_section_size > 0
+    }
+
+    /// Check if this file has a pre-built AC literal mapping (v3+)
+    pub fn has_ac_literal_mapping(&self) -> bool {
+        self.ac_literal_map_count > 0 && self.ac_literal_map_offset > 0
     }
 
     /// Check if data is inline (true) or external references (false)
@@ -444,7 +465,7 @@ mod tests {
 
     #[test]
     fn test_header_size() {
-        assert_eq!(mem::size_of::<ParaglobHeader>(), 96); // v2: 8-byte magic + 22 * u32
+        assert_eq!(mem::size_of::<ParaglobHeader>(), 104); // v3: 8-byte magic + 24 * u32
         assert_eq!(mem::align_of::<ParaglobHeader>(), 4);
     }
 
@@ -470,7 +491,7 @@ mod tests {
     fn test_header_validation() {
         let mut header = ParaglobHeader::new();
         assert!(header.validate().is_ok());
-        assert!(header.is_v2());
+        assert_eq!(header.version, VERSION);
 
         header.magic = *b"INVALID!";
         assert!(header.validate().is_err());
@@ -479,18 +500,24 @@ mod tests {
         header.version = 999;
         assert!(header.validate().is_err());
 
-        // v1 should still be valid
+        // Only v3 is valid
         header.version = VERSION_V1;
+        assert!(header.validate().is_err());
+
+        header.version = VERSION_V2;
+        assert!(header.validate().is_err());
+
+        header.version = VERSION;
         assert!(header.validate().is_ok());
-        assert!(!header.is_v2());
     }
 
     #[test]
-    fn test_v2_features() {
+    fn test_v3_features() {
         let mut header = ParaglobHeader::new();
-        assert!(header.is_v2());
+        assert_eq!(header.version, VERSION);
         assert!(!header.has_data_section());
         assert!(!header.has_inline_data());
+        assert!(!header.has_ac_literal_mapping());
 
         // Add data section
         header.data_section_size = 1024;
@@ -499,11 +526,16 @@ mod tests {
         // Set inline data flag
         header.data_flags = 0x1;
         assert!(header.has_inline_data());
+
+        // Add AC literal mapping
+        header.ac_literal_map_offset = 1000;
+        header.ac_literal_map_count = 50;
+        assert!(header.has_ac_literal_mapping());
     }
 
     #[test]
     fn test_read_struct() {
-        let mut buffer = vec![0u8; 96]; // v2 header size
+        let mut buffer = vec![0u8; 104]; // v3 header size
         let header = ParaglobHeader::new();
 
         // Write header to buffer
@@ -516,7 +548,7 @@ mod tests {
         let read_header: ParaglobHeader = unsafe { read_struct(&buffer, 0) };
         assert_eq!(read_header.magic, *MAGIC);
         assert_eq!(read_header.version, VERSION);
-        assert!(read_header.is_v2());
+        assert_eq!(read_header.version, 3);
     }
 
     #[test]

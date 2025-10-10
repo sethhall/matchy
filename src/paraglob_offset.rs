@@ -204,8 +204,8 @@ pub struct Stats {
 ///
 /// # Example
 /// ```
-/// use paraglob_rs::{ParaglobBuilder, data_section::DataValue};
-/// use paraglob_rs::glob::MatchMode;
+/// use matchy::{ParaglobBuilder, data_section::DataValue};
+/// use matchy::glob::MatchMode;
 /// use std::collections::HashMap;
 ///
 /// let mut builder = ParaglobBuilder::new(MatchMode::CaseSensitive);
@@ -273,8 +273,8 @@ impl ParaglobBuilder {
     ///
     /// # Example
     /// ```
-    /// use paraglob_rs::{ParaglobBuilder, data_section::DataValue};
-    /// use paraglob_rs::glob::MatchMode;
+    /// use matchy::{ParaglobBuilder, data_section::DataValue};
+    /// use matchy::glob::MatchMode;
     /// use std::collections::HashMap;
     ///
     /// let mut builder = ParaglobBuilder::new(MatchMode::CaseSensitive);
@@ -461,6 +461,10 @@ impl ParaglobBuilder {
         let mapping_entry_size = mem::size_of::<PatternDataMapping>();
         let mappings_size = pattern_data_mappings.len() * mapping_entry_size;
 
+        // AC literal mapping section (v3)
+        let ac_literal_map_start = mappings_start + mappings_size;
+        let ac_literal_map_size = calculate_ac_literal_map_size(&ac_literal_to_patterns);
+
         // Allocate buffer
         let total_size = header_size
             + ac_size
@@ -468,7 +472,8 @@ impl ParaglobBuilder {
             + pattern_strings_size
             + wildcards_size
             + data_section_size
-            + mappings_size;
+            + mappings_size
+            + ac_literal_map_size;
         let mut buffer = vec![0u8; total_size];
 
         // Write header (v2 if we have data, v1 otherwise)
@@ -496,6 +501,10 @@ impl ParaglobBuilder {
             header.mapping_count = pattern_data_mappings.len() as u32;
             header.data_flags = 0x1; // Inline data flag
         }
+
+        // v3 fields (AC literal mapping - always present)
+        header.ac_literal_map_offset = ac_literal_map_start as u32;
+        header.ac_literal_map_count = ac_literal_to_patterns.len() as u32;
 
         unsafe {
             let ptr = buffer.as_mut_ptr() as *mut ParaglobHeader;
@@ -560,7 +569,97 @@ impl ParaglobBuilder {
             }
         }
 
+        // Write AC literal mapping (v3)
+        serialize_ac_literal_mapping(&ac_literal_to_patterns, &mut buffer, ac_literal_map_start);
+
         Ok((buffer, ac_literal_to_patterns))
+    }
+}
+
+/// Calculate the size needed for AC literal mapping serialization
+fn calculate_ac_literal_map_size(ac_literal_to_patterns: &HashMap<u32, Vec<u32>>) -> usize {
+    let mut size = 0;
+    for pattern_ids in ac_literal_to_patterns.values() {
+        size += 4; // literal_id
+        size += 4; // pattern_count
+        size += pattern_ids.len() * 4; // pattern_ids array
+    }
+    size
+}
+
+/// Calculate AC literal mapping size by reading the buffer
+fn calculate_ac_literal_map_size_from_header(
+    buffer: &[u8],
+    header: &ParaglobHeader,
+) -> Result<usize, ParaglobError> {
+    let mut size = 0;
+    let mut offset = header.ac_literal_map_offset as usize;
+
+    for _ in 0..header.ac_literal_map_count {
+        if offset + 8 > buffer.len() {
+            return Err(ParaglobError::SerializationError(
+                "Truncated AC literal mapping".to_string(),
+            ));
+        }
+
+        // Skip literal_id
+        offset += 4;
+
+        // Read pattern_count
+        let pattern_count: u32 = unsafe { read_struct(buffer, offset) };
+        offset += 4;
+
+        // Skip pattern_ids
+        let patterns_size = pattern_count as usize * 4;
+        if offset + patterns_size > buffer.len() {
+            return Err(ParaglobError::SerializationError(
+                "Truncated AC literal mapping patterns".to_string(),
+            ));
+        }
+        offset += patterns_size;
+
+        size += 4 + 4 + patterns_size; // literal_id + pattern_count + patterns
+    }
+
+    Ok(size)
+}
+
+/// Serialize AC literal mapping to buffer
+fn serialize_ac_literal_mapping(
+    ac_literal_to_patterns: &HashMap<u32, Vec<u32>>,
+    buffer: &mut [u8],
+    start_offset: usize,
+) {
+    let mut offset = start_offset;
+
+    // Sort keys for deterministic serialization
+    let mut sorted_entries: Vec<_> = ac_literal_to_patterns.iter().collect();
+    sorted_entries.sort_by_key(|(k, _)| *k);
+
+    for (literal_id, pattern_ids) in sorted_entries {
+        // Write literal_id
+        unsafe {
+            let ptr = buffer.as_mut_ptr().add(offset) as *mut u32;
+            ptr.write(*literal_id);
+        }
+        offset += 4;
+
+        // Write pattern_count
+        let pattern_count = pattern_ids.len() as u32;
+        unsafe {
+            let ptr = buffer.as_mut_ptr().add(offset) as *mut u32;
+            ptr.write(pattern_count);
+        }
+        offset += 4;
+
+        // Write pattern_ids array
+        for pattern_id in pattern_ids {
+            unsafe {
+                let ptr = buffer.as_mut_ptr().add(offset) as *mut u32;
+                ptr.write(*pattern_id);
+            }
+            offset += 4;
+        }
     }
 }
 
@@ -633,8 +732,8 @@ impl Paraglob {
     ///
     /// # Example
     /// ```
-    /// use paraglob_rs::{Paraglob, data_section::DataValue};
-    /// use paraglob_rs::glob::MatchMode;
+    /// use matchy::{Paraglob, data_section::DataValue};
+    /// use matchy::glob::MatchMode;
     /// use std::collections::HashMap;
     ///
     /// let patterns = vec!["*.evil.com", "malware.*"];
@@ -876,11 +975,11 @@ impl Paraglob {
             .validate()
             .map_err(|e| ParaglobError::SerializationError(e.to_string()))?;
 
-        // Reconstruct ac_literal_to_patterns mapping
-        let ac_literal_to_patterns = Self::reconstruct_literal_mapping(&buffer, &header)?;
+        // Load ac_literal_to_patterns mapping (O(1) for v3)
+        let ac_literal_to_patterns = Self::load_ac_literal_mapping(&buffer, &header)?;
 
-        // Load pattern data cache if v2
-        let pattern_data_cache = if header.is_v2() && header.has_data_section() {
+        // Load pattern data cache if has data section
+        let pattern_data_cache = if header.has_data_section() {
             Self::load_pattern_data_cache(&buffer, &header)?
         } else {
             HashMap::new()
@@ -916,11 +1015,11 @@ impl Paraglob {
             .validate()
             .map_err(|e| ParaglobError::SerializationError(e.to_string()))?;
 
-        // Reconstruct ac_literal_to_patterns mapping
-        let ac_literal_to_patterns = Self::reconstruct_literal_mapping(slice, &header)?;
+        // Load ac_literal_to_patterns mapping (O(1) for v3)
+        let ac_literal_to_patterns = Self::load_ac_literal_mapping(slice, &header)?;
 
-        // Load pattern data cache if v2
-        let pattern_data_cache = if header.is_v2() && header.has_data_section() {
+        // Load pattern data cache if has data section
+        let pattern_data_cache = if header.has_data_section() {
             Self::load_pattern_data_cache(slice, &header)?
         } else {
             HashMap::new()
@@ -961,7 +1060,7 @@ impl Paraglob {
         }
 
         let header: ParaglobHeader = unsafe { read_struct(buffer, 0) };
-        header.is_v2() && header.has_data_section()
+        header.has_data_section()
     }
 
     /// Get the version of the Paraglob format
@@ -1019,13 +1118,74 @@ impl Paraglob {
         }
     }
 
-    /// Reconstruct the AC literal to pattern ID mapping from the buffer
+    /// Load AC literal to pattern ID mapping from buffer (v3 format)
     ///
-    /// This is necessary after deserialization because the mapping is not stored
-    /// in the binary format. We reconstruct it by:
-    /// 1. Extracting literals from each pattern
-    /// 2. Building a temporary AC automaton with the same literals in the same order
-    /// 3. Using the temporary AC to determine the mapping
+    /// For v3 files, this is a fast O(1) load from the pre-serialized mapping.
+    /// The mapping enables instant database loading regardless of pattern count.
+    fn load_ac_literal_mapping(
+        buffer: &[u8],
+        header: &ParaglobHeader,
+    ) -> Result<HashMap<u32, Vec<u32>>, ParaglobError> {
+        // v3 files must have AC literal mapping
+        if !header.has_ac_literal_mapping() {
+            return Err(ParaglobError::SerializationError(
+                "v3 file missing AC literal mapping".to_string(),
+            ));
+        }
+
+        let mut map = HashMap::new();
+        let mut offset = header.ac_literal_map_offset as usize;
+        let end_offset = offset + calculate_ac_literal_map_size_from_header(buffer, header)?;
+
+        if end_offset > buffer.len() {
+            return Err(ParaglobError::SerializationError(
+                "AC literal mapping extends past buffer end".to_string(),
+            ));
+        }
+
+        // Read each entry
+        for _ in 0..header.ac_literal_map_count {
+            if offset + 8 > buffer.len() {
+                return Err(ParaglobError::SerializationError(
+                    "Truncated AC literal mapping entry".to_string(),
+                ));
+            }
+
+            // Read literal_id
+            let literal_id: u32 = unsafe { read_struct(buffer, offset) };
+            offset += 4;
+
+            // Read pattern_count
+            let pattern_count: u32 = unsafe { read_struct(buffer, offset) };
+            offset += 4;
+
+            // Read pattern_ids array
+            if offset + (pattern_count as usize * 4) > buffer.len() {
+                return Err(ParaglobError::SerializationError(
+                    "Truncated AC literal mapping pattern IDs".to_string(),
+                ));
+            }
+
+            // Read pattern IDs safely without assuming alignment
+            // (offset may not be 4-byte aligned after variable-sized data)
+            let mut patterns = Vec::with_capacity(pattern_count as usize);
+            for _ in 0..pattern_count {
+                let pattern_id: u32 = unsafe { read_struct(buffer, offset) };
+                patterns.push(pattern_id);
+                offset += 4;
+            }
+
+            map.insert(literal_id, patterns);
+        }
+
+        Ok(map)
+    }
+
+    /// OLD: Reconstruct the AC literal to pattern ID mapping from the buffer
+    ///
+    /// This is the old O(n) reconstruction method. It's kept here for reference
+    /// but should never be called with v3-only support.
+    #[allow(dead_code)]
     fn reconstruct_literal_mapping(
         buffer: &[u8],
         header: &ParaglobHeader,

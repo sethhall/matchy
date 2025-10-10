@@ -64,8 +64,8 @@ impl MmdbBuilder {
     ///
     /// # Example
     /// ```
-    /// use paraglob_rs::mmdb_builder::MmdbBuilder;
-    /// use paraglob_rs::glob::MatchMode;
+    /// use matchy::mmdb_builder::MmdbBuilder;
+    /// use matchy::glob::MatchMode;
     ///
     /// let builder = MmdbBuilder::new(MatchMode::CaseSensitive)
     ///     .with_database_type("MyCompany-ThreatIntel");
@@ -82,8 +82,8 @@ impl MmdbBuilder {
     ///
     /// # Example
     /// ```
-    /// use paraglob_rs::mmdb_builder::MmdbBuilder;
-    /// use paraglob_rs::glob::MatchMode;
+    /// use matchy::mmdb_builder::MmdbBuilder;
+    /// use matchy::glob::MatchMode;
     ///
     /// let builder = MmdbBuilder::new(MatchMode::CaseSensitive)
     ///     .with_description("en", "My custom threat database")

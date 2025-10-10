@@ -5,23 +5,23 @@
 #include <algorithm>
 #include <sstream>
 
-// Use C functions from the paraglob_rs namespace
-using paraglob_rs::paraglob_db;
-using paraglob_rs::paraglob_builder;
-using paraglob_rs::paraglob_error_t;
-using paraglob_rs::paraglob_error_t_PARAGLOB_SUCCESS;
-using paraglob_rs::paraglob_open_mmap;
-using paraglob_rs::paraglob_open_buffer;
-using paraglob_rs::paraglob_close;
-using paraglob_rs::paraglob_find_all;
-using paraglob_rs::paraglob_free_results;
-using paraglob_rs::paraglob_pattern_count;
-using paraglob_rs::paraglob_version;
-using paraglob_rs::paraglob_builder_new;
-using paraglob_rs::paraglob_builder_add;
-using paraglob_rs::paraglob_builder_compile;
-using paraglob_rs::paraglob_builder_free;
-using paraglob_rs::paraglob_save;
+// Use C functions from the matchy namespace
+using matchy::paraglob_db;
+using matchy::paraglob_builder;
+using matchy::paraglob_error_t;
+using matchy::paraglob_error_t_PARAGLOB_SUCCESS;
+using matchy::paraglob_open_mmap;
+using matchy::paraglob_open_buffer;
+using matchy::paraglob_close;
+using matchy::paraglob_find_all;
+using matchy::paraglob_free_results;
+using matchy::paraglob_pattern_count;
+using matchy::paraglob_version;
+using matchy::paraglob_builder_new;
+using matchy::paraglob_builder_add;
+using matchy::paraglob_builder_compile;
+using matchy::paraglob_builder_free;
+using matchy::paraglob_save;
 
 namespace paraglob {
 

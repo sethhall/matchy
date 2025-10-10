@@ -33,7 +33,7 @@ use std::collections::HashMap;
 ///
 /// This enum represents all MMDB data types and can be used
 /// for both standalone .pgb files and MMDB-embedded data.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DataValue {
     /// Pointer to another data item (offset)
     Pointer(u32),

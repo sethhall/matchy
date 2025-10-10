@@ -1,4 +1,4 @@
-use paraglob_rs::{Database, QueryResult};
+use matchy::{Database, QueryResult};
 use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

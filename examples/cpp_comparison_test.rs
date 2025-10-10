@@ -4,8 +4,8 @@
 //! - 10K patterns with 10% match rate
 //! - 20K queries with 10% containing "test"
 //! - Fixed seed for reproducibility
-use paraglob_rs::glob::MatchMode;
-use paraglob_rs::Paraglob;
+use matchy::glob::MatchMode;
+use matchy::Paraglob;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::time::Instant;

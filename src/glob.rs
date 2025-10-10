@@ -16,7 +16,7 @@
 //! # Examples
 //!
 //! ```
-//! use paraglob_rs::glob::{GlobPattern, MatchMode};
+//! use matchy::glob::{GlobPattern, MatchMode};
 //!
 //! // Simple wildcard matching
 //! let pattern = GlobPattern::new("*.txt", MatchMode::CaseSensitive)?;
@@ -34,7 +34,7 @@
 //! let pattern = GlobPattern::new("file[!0-9].txt", MatchMode::CaseSensitive)?;
 //! assert!(pattern.matches("fileA.txt"));
 //! assert!(!pattern.matches("file1.txt"));
-//! # Ok::<(), paraglob_rs::ParaglobError>(())
+//! # Ok::<(), matchy::ParaglobError>(())
 //! ```
 
 use crate::error::ParaglobError;
@@ -105,11 +105,11 @@ impl GlobPattern {
     /// # Examples
     ///
     /// ```
-    /// use paraglob_rs::glob::{GlobPattern, MatchMode};
+    /// use matchy::glob::{GlobPattern, MatchMode};
     ///
     /// let pattern = GlobPattern::new("*.txt", MatchMode::CaseSensitive)?;
     /// assert!(pattern.matches("hello.txt"));
-    /// # Ok::<(), paraglob_rs::ParaglobError>(())
+    /// # Ok::<(), matchy::ParaglobError>(())
     /// ```
     pub fn new(pattern: &str, mode: MatchMode) -> Result<Self, ParaglobError> {
         let segments = Self::parse(pattern, mode)?;
@@ -140,13 +140,13 @@ impl GlobPattern {
     /// # Examples
     ///
     /// ```
-    /// use paraglob_rs::glob::{GlobPattern, MatchMode};
+    /// use matchy::glob::{GlobPattern, MatchMode};
     ///
     /// let pattern = GlobPattern::new("hello*world", MatchMode::CaseSensitive)?;
     /// assert!(pattern.matches("hello world"));
     /// assert!(pattern.matches("hello beautiful world"));
     /// assert!(!pattern.matches("goodbye world"));
-    /// # Ok::<(), paraglob_rs::ParaglobError>(())
+    /// # Ok::<(), matchy::ParaglobError>(())
     /// ```
     pub fn matches(&self, text: &str) -> bool {
         self.matches_impl(text, 0, 0)

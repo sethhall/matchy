@@ -1,87 +1,176 @@
-# paraglob-rs
+# Matchy
 
-[![CI](https://github.com/sethhall/paraglob-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/sethhall/paraglob-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/sethhall/matchy/actions/workflows/ci.yml/badge.svg)](https://github.com/sethhall/matchy/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
-Fast multi-pattern glob matching with zero-copy memory-mapped databases. Match thousands of patterns against strings in microseconds with automatic memory sharing across processes.
+**Fast database for IP address and pattern matching with rich data storage.**
 
-## Why paraglob-rs?
+Match IP addresses, CIDR ranges, and thousands of glob patterns in microseconds. Perfect for threat intelligence, GeoIP, domain categorization, and network security applications.
 
-Imagine you're building a security system that needs to check every incoming request against a threat intelligence feed. Or a log processing pipeline that routes millions of events to different destinations based on their content. Or a web application firewall that blocks suspicious URLs.
+## Why Matchy?
 
-The challenge? **You have thousands of patterns to match, and you need answers in microseconds.**
-
-Traditional approaches fall apart at scale:
-- 🐌 Regex libraries check patterns one-by-one: 10,000 patterns = 10,000× slower
+Traditional IP/domain lookups fall apart at scale:
+- 🐌 Sequential pattern matching: 10,000 patterns = 10,000× slower
 - 🔒 Hash tables only do exact matches—no wildcards for domains like `*.malicious.com`
-- 💾 Loading pattern databases takes hundreds of milliseconds
-- 📈 Running 50 worker processes means loading the same patterns 50 times
+- 💾 Loading databases takes hundreds of milliseconds
+- 📈 Running 50 worker processes means loading the same data 50 times
 
-paraglob-rs was built to solve these problems.
+**Matchy solves these problems with a unified database that supports both IP addresses and patterns.**
 
-### Real-World Problems It Solves
+### Real-World Use Cases
 
-**🛡️ Threat Intelligence at Scale**
+**🛡️ Threat Intelligence**
 
-You maintain feeds of malicious domains (`*.phishing-site.com`), suspicious URL patterns (`http://*/admin/config.php`), and known-bad email senders (`*@spam-domain.org`). Your security layer needs to check every user interaction against 10,000+ threat indicators—without adding latency.
+Query malicious IPs (`1.2.3.4`), suspicious domains (`*.phishing-site.com`), and URL patterns (`http://*/admin/config.php`) from a single database. Check every user interaction against 50,000+ threat indicators in ~20 microseconds.
 
-**Problem**: Checking patterns sequentially would take milliseconds per request. Unacceptable.
+```rust
+// Check both IPs and domains with one database
+db.lookup("1.2.3.4")?;           // IP lookup
+db.lookup("evil.malicious.com")?; // Pattern match
+```
 
-**Solution**: paraglob-rs compiles all patterns into a single automaton and checks them in one pass. Result: ~20 microseconds per check, even with 50,000 patterns.
+**🌍 GeoIP with Custom Data**
 
----
+Drop-in replacement for MaxMind GeoIP databases with custom metadata support. Query IP addresses and get rich JSON-like structured data:
 
-**📊 Log Routing & Classification**
+```rust
+match db.lookup("8.8.8.8")? {
+    Some(QueryResult::Ip { data, prefix_len }) => {
+        // data contains country, city, coordinates, etc.
+        println!("Location: {:?} (/{prefix_len})", data);
+    }
+}
+```
 
-Your infrastructure generates millions of log lines per minute. Security logs containing `*authentication failed*` or `*/etc/passwd*` go to your SIEM. Performance logs with `*slow query*` or `*timeout*` go to your metrics system. Application errors route to your alerting platform.
+**📊 Multi-Process Memory Efficiency**
 
-**Problem**: You can't afford to scan each log line multiple times, and you can't load the same routing rules into memory for every worker process.
+Run 64 worker processes with the same 100MB database? Matchy uses memory mapping so the OS automatically shares pages. **99% memory savings**: 64 processes = 100MB RAM, not 6.4GB.
 
-**Solution**: paraglob-rs's memory-mapped databases load in <100 microseconds and share physical memory across all workers. 50 processes use the same RAM as one.
+**🔥 Instant Loading**
 
----
+Memory-mapped databases load in <100 microseconds regardless of size. No deserialization overhead—direct access to on-disk structures.
 
-**🔥 Multi-Process Memory Efficiency**
+## Key Features
 
-You run network monitoring software like Zeek with 24 worker processes, each needing the same threat intelligence patterns. Or an Nginx deployment with 64 worker processes, each enforcing the same access control rules.
+### Unified Database
+- **IP addresses & CIDR ranges**: Binary search tree for O(log n) lookups
+- **Glob patterns**: Aho-Corasick automaton for O(n) matching
+- **Auto-detection**: One query function handles both types
+- **Rich data**: Store JSON-like structured data with each entry
 
-**Problem**: Traditional approaches load the pattern database 24 or 64 times. A 100MB pattern set becomes 2.4GB or 6.4GB of RAM.
+### Performance
+- **1M+ queries/second** even with 50,000 patterns
+- **<100μs loading time** via memory mapping
+- **Zero-copy**: Direct access to on-disk structures
+- **Memory sharing**: Automatic OS-level page sharing across processes
 
-**Solution**: paraglob-rs uses memory mapping. The operating system automatically shares pages across processes. 64 processes = 100MB of RAM, not 6.4GB. That's **99% memory savings**.
+### Compatibility
+- **libmaxminddb compatible** (planned): Drop-in replacement for existing GeoIP code
+- **C/C++/Rust APIs**: Stable FFI for any language
+- **MMDB format**: Compatible with MaxMind database tools
 
----
+## Quick Start
 
-**🔐 Web Application Firewall Rules**
+### Rust API
 
-You need to block SQL injection attempts (`*' OR '1'='1*`), path traversal (`*/../etc/*`), XSS patterns (`*<script>*`), and thousands of other attack signatures—on every HTTP request, without impacting response times.
+```rust
+use matchy::{Database, DatabaseBuilder, MatchMode, DataValue, QueryResult};
+use std::collections::HashMap;
 
-**Problem**: You need comprehensive protection, but every millisecond of latency costs you user experience and money.
+// Build a database with both IP and pattern entries
+let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
 
-**Solution**: paraglob-rs processes requests in the hot path with <20 microseconds overhead. Your WAF becomes effectively invisible to users while remaining comprehensive.
+// Add IP address with data
+let mut ip_data = HashMap::new();
+ip_data.insert("country".to_string(), DataValue::String("US".to_string()));
+ip_data.insert("threat_level".to_string(), DataValue::String("low".to_string()));
+builder.add_entry("8.8.8.8", ip_data)?;
 
----
+// Add CIDR range
+let mut cidr_data = HashMap::new();
+cidr_data.insert("type".to_string(), DataValue::String("internal".to_string()));
+builder.add_entry("10.0.0.0/8", cidr_data)?;
 
-### What Makes It Fast
+// Add pattern with data
+let mut pattern_data = HashMap::new();
+pattern_data.insert("category".to_string(), DataValue::String("malware".to_string()));
+pattern_data.insert("threat_level".to_string(), DataValue::String("high".to_string()));
+builder.add_entry("*.evil.com", pattern_data)?;
 
-paraglob-rs uses the Aho-Corasick algorithm to build a finite automaton that matches all patterns simultaneously:
+// Build and save
+let database_bytes = builder.build()?;
+std::fs::write("threats.db", &database_bytes)?;
 
-- **O(n) time complexity**: Scan the input once, match thousands of patterns in parallel. Adding more patterns doesn't slow down matching.
-- **Zero-copy loading**: Memory-mapped databases load in <100 microseconds—no parsing, no deserialization.
-- **Automatic memory sharing**: The OS shares physical memory pages across all processes that map the same file.
-- **1M+ queries/second**: Even with 50,000 patterns (measured on M4 MacBook Air).
+// Query the database (auto-detects IP vs pattern)
+let db = Database::open("threats.db")?;
 
-## When Should You Use This?
+// IP lookup
+match db.lookup("8.8.8.8")? {
+    Some(QueryResult::Ip { data, prefix_len }) => {
+        println!("IP found: {:?} (/{prefix_len})", data);
+    }
+    Some(QueryResult::NotFound) => println!("Not found"),
+    None => println!("No IP data in database"),
+}
 
-You'll benefit from paraglob-rs if:
+// Pattern matching
+match db.lookup("malware.evil.com")? {
+    Some(QueryResult::Pattern { pattern_ids, data }) => {
+        println!("Matched {} patterns", pattern_ids.len());
+        for (i, d) in data.iter().enumerate() {
+            if let Some(threat_data) = d {
+                println!("  Pattern {}: {:?}", pattern_ids[i], threat_data);
+            }
+        }
+    }
+    Some(QueryResult::NotFound) => println!("No match"),
+    None => println!("No pattern data in database"),
+}
+```
 
-✅ You need to match hundreds or thousands of patterns against strings  
-✅ Performance matters—you're in a hot path or high-throughput scenario  
-✅ Your patterns include wildcards (`*`, `?`, `[abc]`) not just exact matches  
-✅ You run multiple processes that need the same pattern sets  
-✅ You need to load pattern databases quickly (initialization time matters)  
+### C API
 
-Common applications: threat intelligence, log processing, WAF rules, access control, content classification, data routing, network security monitoring.
+```c
+#include "matchy.h"
+#include <stdio.h>
+
+int main() {
+    // Build database
+    matchy_builder_t *builder = matchy_builder_new();
+    matchy_builder_add(builder, "1.2.3.4", "{\"threat\": \"high\"}");
+    matchy_builder_add(builder, "*.evil.com", "{\"category\": \"malware\"}");
+    matchy_builder_save(builder, "threats.db");
+    matchy_builder_free(builder);
+    
+    // Query database
+    matchy_t *db = matchy_open("threats.db");
+    if (!db) {
+        fprintf(stderr, "Failed to open database\n");
+        return 1;
+    }
+    
+    // Unified query - automatically detects IP vs pattern
+    matchy_result_t result = matchy_query(db, "1.2.3.4");
+    if (result.found && result.data_json) {
+        printf("Found: %s\n", result.data_json);
+        if (result.prefix_len > 0) {
+            printf("CIDR prefix: /%d\n", result.prefix_len);
+        }
+        matchy_free_result(&result);
+    }
+    
+    // Query pattern
+    result = matchy_query(db, "malware.evil.com");
+    if (result.found && result.data_json) {
+        printf("Pattern match: %s\n", result.data_json);
+        matchy_free_result(&result);
+    }
+    
+    matchy_close(db);
+    return 0;
+}
+```
 
 ## Performance
 
@@ -89,37 +178,36 @@ Measured on M4 MacBook Air:
 
 | Workload | Throughput | Notes |
 |----------|------------|-------|
-| Large sets (10K patterns) | 1.4M queries/sec | High-volume filtering |
-| Very large sets (50K patterns) | 1M queries/sec | Extreme scale |
-| Database load time | <100μs | Zero-copy mmap |
-| Build time (42 patterns) | ~0.3ms | Typical application |
+| IP lookups | 1.5M queries/sec | Binary tree search |
+| Pattern matching (10K patterns) | 1.4M queries/sec | Aho-Corasick |
+| Pattern matching (50K patterns) | 1M queries/sec | Extreme scale |
+| Database load time | <150μs | Memory-mapped |
+| Build time (1K entries) | ~4ms | One-time cost |
 
-See [DEVELOPMENT.md](./DEVELOPMENT.md) for detailed benchmarks and implementation notes.
+See [DEVELOPMENT.md](./DEVELOPMENT.md) for detailed benchmarks.
 
 ## Architecture
 
-The library exposes three API layers:
-
 ```mermaid
 flowchart TD
-    App["Application<br/>(C, C++, or Rust)"] --> CPP["C++ Wrapper<br/>(RAII)"] & CAPI["C API<br/>(extern 'C')"] & Rust["Rust API"]
+    App["Application<br/>(C, C++, or Rust)"] --> CPP["C++ Wrapper<br/>(RAII)"] & CAPI["C API<br/>(matchy_*)"] & Rust["Rust API"]
     CPP --> Core
     CAPI --> Core
     Rust --> Core
-    Core["Rust Core"] --> AC["Aho-Corasick automaton"]
-    Core --> Glob["Glob pattern matching"]
-    Core --> Ser["Binary serialization"]
-    Core --> Mmap["Memory mapping"]
+    Core["Rust Core"] --> IPTree["IP Search Tree<br/>(Binary Trie)"]
+    Core --> AC["Aho-Corasick<br/>(Pattern Matching)"]
+    Core --> Data["Data Section<br/>(MMDB Format)"]
+    Core --> Mmap["Memory Mapping"]
     
     style App fill:#e1f5ff
     style Core fill:#fff3e0
+    style IPTree fill:#f5f5f5
     style AC fill:#f5f5f5
-    style Glob fill:#f5f5f5
-    style Ser fill:#f5f5f5
+    style Data fill:#f5f5f5
     style Mmap fill:#f5f5f5
 ```
 
-**Design rationale:** The Rust core provides memory safety and idiomatic error handling. The C API uses opaque handles and integer error codes for FFI stability. The optional C++ wrapper adds RAII semantics for C++ consumers.
+**Hybrid approach**: IP addresses use a binary search tree for O(log n) lookups. Patterns use Aho-Corasick for O(n) simultaneous matching. Both share the same data section with automatic deduplication.
 
 ## Building
 
@@ -142,170 +230,132 @@ cargo bench
 cargo doc --no-deps --open
 ```
 
-The build process automatically generates `include/paraglob_rs.h` for C/C++ integration.
+The build process automatically generates `include/matchy.h` for C/C++ integration.
 
-## Features
+**Build artifacts:**
+- `target/release/libmatchy.dylib` (macOS)
+- `target/release/libmatchy.so` (Linux)
+- `target/release/libmatchy.a` (static library)
+- `include/matchy.h` (C header, auto-generated)
 
-### Pattern Matching
-- Match thousands of glob patterns simultaneously in O(n) time
-- Support for `*`, `?`, `[abc]` wildcards
-- Zero-copy memory-mapped databases load in <100μs
-- Automatic memory sharing across processes
+## API Reference
 
-### Pattern-Associated Data (v2 Format)
-- Associate arbitrary data with patterns (strings, numbers, maps, arrays)
-- MMDB-compatible data encoding for interoperability
-- Automatic data deduplication across patterns
-- Retrieve matched pattern data in addition to pattern IDs
+### C API Functions
 
-### Memory Efficiency
-- Memory-mapped files with automatic OS-level page sharing
-- 64 processes using same database = same RAM as 1 process
-- No deserialization overhead—direct access to on-disk structures
+**Builder API:**
+- `matchy_builder_t* matchy_builder_new()` - Create database builder
+- `int matchy_builder_add(builder, key, json_data)` - Add IP/CIDR/pattern with JSON data
+- `int matchy_builder_set_description(builder, desc)` - Set metadata
+- `int matchy_builder_save(builder, filename)` - Build and save to file
+- `int matchy_builder_build(builder, &buffer, &size)` - Build to memory
+- `void matchy_builder_free(builder)` - Free builder
 
-## Usage
+**Query API:**
+- `matchy_t* matchy_open(filename)` - Open database (memory-mapped)
+- `matchy_t* matchy_open_buffer(buffer, size)` - Open from memory buffer
+- `void matchy_close(db)` - Close database
+- `matchy_result_t matchy_query(db, query)` - **Unified query** (auto-detects IP vs pattern)
+- `void matchy_free_result(&result)` - Free query result
+- `const char* matchy_version()` - Get library version
 
-### Rust
+**Error Codes:**
+- `MATCHY_SUCCESS` (0) - Success
+- `MATCHY_ERROR_FILE_NOT_FOUND` (-1) - File not found
+- `MATCHY_ERROR_INVALID_FORMAT` (-2) - Invalid database format
+- `MATCHY_ERROR_INVALID_PARAM` (-5) - Invalid parameter
+- `MATCHY_ERROR_IO` (-6) - I/O error
 
-```rust
-use paraglob_rs::{Database, QueryResult};
-use paraglob_rs::data_section::DataValue;
-use paraglob_rs::mmdb_builder::MmdbBuilder;
-use paraglob_rs::glob::MatchMode;
-use std::collections::HashMap;
+### Rust API
 
-// Build a combined IP + Pattern database with associated data
-let mut builder = MmdbBuilder::new(MatchMode::CaseSensitive);
+**Core Types:**
+- `Database` - Unified database for queries
+- `DatabaseBuilder` - Build databases (alias for `MmdbBuilder`)
+- `QueryResult` - Result enum (IP/Pattern/NotFound)
+- `DataValue` - Rich data type (String/Int/Map/Array/etc.)
 
-// Add IP address with data
-let mut ip_data = HashMap::new();
-ip_data.insert("country".to_string(), DataValue::String("US".to_string()));
-ip_data.insert("city".to_string(), DataValue::String("Mountain View".to_string()));
-builder.add_entry("8.8.8.8", ip_data)?;
+See [API documentation](https://docs.rs/matchy) for complete reference.
 
-// Add pattern with data
-let mut pattern_data = HashMap::new();
-pattern_data.insert("threat_level".to_string(), DataValue::String("high".to_string()));
-pattern_data.insert("category".to_string(), DataValue::String("phishing".to_string()));
-builder.add_entry("*.malicious.com", pattern_data)?;
-
-// Build and save database
-let database_bytes = builder.build()?;
-std::fs::write("database.mmdb", &database_bytes)?;
-
-// Query the database (auto-detects IP vs pattern)
-let db = Database::open("database.mmdb")?;
-
-matches db.lookup("8.8.8.8")? {
-    Some(QueryResult::Ip { data, prefix_len }) => {
-        println!("IP found: {:?} (/{prefix_len})", data);
-    }
-    Some(QueryResult::Pattern { pattern_ids, data }) => {
-        println!("Pattern matches: {:?}", pattern_ids);
-        for (i, d) in data.iter().enumerate() {
-            if let Some(threat_data) = d {
-                println!("  Pattern {}: {:?}", pattern_ids[i], threat_data);
-            }
-        }
-    }
-    Some(QueryResult::NotFound) => println!("Not found"),
-    None => println!("No result"),
-}
-```
-
-### C
-
-```c
-#include "paraglob_rs.h"
-
-// Memory-map database from disk
-paraglob_db_t* db = paraglob_open_mmap("patterns.pgb");
-if (!db) { /* handle error */ }
-
-// Find matches
-size_t count = 0;
-int* match_ids = paraglob_find_all(db, "test.txt", &count);
-
-// Clean up
-paraglob_free_results(match_ids);
-paraglob_close(db);
-```
-
-### C++
-
-```cpp
-#include "paraglob_rs.hpp"
-
-// RAII wrapper handles lifetime
-paraglob::Paraglob pg({"*.txt", "*.log", "data_*"});
-auto matches = pg.get("data_file.txt");
-```
-
-### Linking
+## Linking
 
 ```bash
-# C/C++ programs
-gcc -o app app.c -L./target/release -lparaglob_rs -lpthread -ldl -lm
-g++ -o app app.cpp -L./target/release -lparaglob_rs -lpthread -ldl -lm
+# C programs
+gcc -o app app.c -L./target/release -lmatchy -lpthread -ldl -lm
+
+# C++ programs
+g++ -o app app.cpp -L./target/release -lmatchy -lpthread -ldl -lm
+
+# Add to rpath (macOS)
+install_name_tool -add_rpath @executable_path/. app
+
+# Add to rpath (Linux)
+export LD_LIBRARY_PATH=./target/release:$LD_LIBRARY_PATH
 ```
 
-## Technical Details
+## Database Format
 
-### Glob Pattern Support
+Matchy uses a hybrid binary format:
 
-Supported glob syntax:
+```
+┌──────────────────────────────────────┐
+│  IP Search Tree (binary trie)        │  ← Fast IP lookups
+├──────────────────────────────────────┤
+│  Data Section (MMDB-compatible)      │  ← Shared rich data
+├──────────────────────────────────────┤
+│  Pattern Matcher (Aho-Corasick)      │  ← Fast pattern matching
+├──────────────────────────────────────┤
+│  Metadata                            │  ← Database info
+└──────────────────────────────────────┘
+```
+
+All structures use file offsets (not pointers) for:
+- Direct memory mapping without deserialization
+- Cross-process page sharing via shared memory
+- Safety validation before dereferencing
+
+## Pattern Syntax
+
+Supported glob patterns:
 - `*` - Match zero or more characters
 - `?` - Match exactly one character  
 - `[abc]` - Match any character in set
 - `[a-z]` - Match any character in range
 - `[!abc]` - Match any character not in set
 
-### Implementation Notes
-
-The core algorithm compiles glob patterns into an Aho-Corasick automaton:
-1. Extract literal prefixes from each pattern
-2. Build AC automaton from literals with failure links
-3. On match, verify full glob pattern against input
-4. Continue automaton traversal after failure links for overlapping matches
-
-All data structures use file offsets instead of pointers, enabling:
-- Direct memory mapping without deserialization
-- Cross-process page sharing via shared memory
-- Validation of all offsets before dereferencing (safety)
-
-### Binary Format
-
-The `.pgb` file format uses `#[repr(C)]` structures for C++ compatibility:
-- Magic bytes: `PARAGLOB`
-- Version header with offsets to node/edge tables
-- Offset-based AC automaton nodes and edges
-- Pattern metadata with type flags (literal vs glob)
-
-Files generated by Rust can be read by C++ and vice versa.
+Examples:
+- `*.evil.com` - Matches `www.evil.com`, `malware.evil.com`
+- `test_*.log` - Matches `test_001.log`, `test_debug.log`
+- `http://*/admin/*` - Matches any URL with `/admin/` path
 
 ## Documentation
 
-- [DEVELOPMENT.md](./DEVELOPMENT.md) - Architecture, benchmarks, and design decisions
-- [examples/README.md](./examples/README.md) - Example programs
+- [API_REDESIGN.md](./API_REDESIGN.md) - Complete API specification
+- [DEVELOPMENT.md](./DEVELOPMENT.md) - Architecture and implementation details
+- [examples/](./examples/) - Example programs
 - API docs: `cargo doc --no-deps --open`
 
 ## Testing
 
 ```bash
-cargo test              # Run test suite (79 tests)
+cargo test              # Run test suite
 cargo test -- --nocapture  # With output
 cargo bench             # Run benchmarks
 ```
 
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
-
-Before submitting a PR:
-- Run `cargo fmt` and `cargo clippy`
+Contributions welcome! Please:
+- Run `cargo fmt` and `cargo clippy` before submitting
 - Ensure all tests pass with `cargo test`
 - Add tests for new features
-- Update documentation as needed
+- Update documentation
+
+## Roadmap
+
+- [ ] libmaxminddb compatibility layer (drop-in replacement)
+- [ ] C++ RAII wrapper for modern C++
+- [ ] Python bindings
+- [ ] Streaming database updates (append-only)
+- [ ] Compression support
 
 ## License
 
@@ -313,4 +363,4 @@ BSD-2-Clause
 
 ## Acknowledgments
 
-Rust port of the original paraglob C++ library with changes for mmap-ing databases.
+Built on the Paraglob pattern matching algorithm with extensions for IP address lookups and rich data storage.

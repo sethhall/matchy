@@ -6,7 +6,7 @@
 //! - Case-sensitive and case-insensitive matching
 //! - Performance characteristics
 
-use paraglob_rs::glob::{GlobPattern, MatchMode};
+use matchy::glob::{GlobPattern, MatchMode};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🌟 Paraglob-rs Glob Pattern Demo\n");

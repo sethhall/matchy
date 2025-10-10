@@ -1,4 +1,4 @@
-# Makefile for paraglob-rs C/C++ API tests
+# Makefile for matchy C/C++ API tests
 
 # Detect OS
 UNAME_S := $(shell uname -s)
@@ -11,13 +11,13 @@ CXXFLAGS = -Wall -Wextra -std=c++17 -I./include -I./src/cpp
 LDFLAGS = -L./target/release
 
 ifeq ($(UNAME_S),Darwin)
-	LDFLAGS += -lparaglob_rs -lc++
+	LDFLAGS += -lmatchy -lc++
 else
-	LDFLAGS += -lparaglob_rs -lstdc++ -lpthread -ldl -lm
+	LDFLAGS += -lmatchy -lstdc++ -lpthread -ldl -lm
 endif
 
 # Rust library
-RUST_LIB = target/release/libparaglob_rs.a
+RUST_LIB = target/release/libmatchy.a
 
 # Test targets
 C_TEST = tests/test_c_api

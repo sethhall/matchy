@@ -1,7 +1,7 @@
-// Test suite for paraglob-rs C API
+// Test suite for matchy C API
 // Compile: make test_c_api
 
-#include "../include/paraglob_rs.h"
+#include "../include/matchy.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

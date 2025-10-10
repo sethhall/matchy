@@ -47,7 +47,7 @@
 #ifndef PARAGLOB_HPP
 #define PARAGLOB_HPP
 
-#include "../paraglob_rs.h"
+#include "../matchy.h"
 
 #include <algorithm>
 #include <memory>
@@ -82,7 +82,7 @@ namespace paraglob {
 class Paraglob {
 private:
     // Opaque handle to Rust implementation (binary mode)
-    paraglob_rs::paraglob_db* db_;
+    matchy::paraglob_db* db_;
     
     // Build mode storage (when constructing from patterns)
     std::vector<std::string> patterns_;

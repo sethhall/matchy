@@ -1,10 +1,10 @@
 # WARP.md
 
-Guidance for working with the paraglob-rs codebase.
+Guidance for working with the matchy codebase.
 
 ## Project Overview
 
-**paraglob-rs** is a production-ready Rust implementation of multi-pattern glob matching using the Aho-Corasick algorithm. It provides zero-copy memory-mapped file support and maintains binary compatibility with the original C++ paraglob library.
+**matchy** is a production-ready Rust implementation of multi-pattern glob matching using the Aho-Corasick algorithm. It provides zero-copy memory-mapped file support and maintains binary compatibility with the original C++ paraglob library.
 
 **Status**: ✅ Production Ready
 - 79/79 tests passing
@@ -43,7 +43,7 @@ cargo build --release
 cargo check
 ```
 
-The release build automatically generates `include/paraglob_rs.h` via cbindgen.
+The release build automatically generates `include/matchy.h` via cbindgen.
 
 ### Testing
 
@@ -114,7 +114,7 @@ cargo doc --open
 gcc -o myapp app.c \
     -I./include \
     -L./target/release \
-    -lparaglob_rs \
+    -lmatchy \
     -lpthread -ldl -lm
 
 # Run with memory checking
@@ -126,7 +126,7 @@ valgrind --leak-check=full --show-leak-kinds=all ./myapp
 ### Project Layout
 
 ```
-paraglob-rs/
+matchy/
 ├── src/                    # Rust source code
 │   ├── lib.rs              # Public API, version constants, module declarations
 │   ├── ac_offset.rs        # Offset-based Aho-Corasick automaton implementation
@@ -151,7 +151,7 @@ paraglob-rs/
 │   ├── production_test.rs    # Production workload simulation
 │   └── cpp_comparison_test.rs # C++ compatibility validation
 ├── include/
-│   └── paraglob_rs.h         # Auto-generated C header (cbindgen)
+│   └── matchy.h         # Auto-generated C header (cbindgen)
 ├── Cargo.toml              # Package metadata, dependencies, build profiles
 ├── build.rs                # Build script (runs cbindgen)
 ├── cbindgen.toml           # cbindgen configuration
@@ -363,7 +363,7 @@ fn to_c_error(err: ParaglobError) -> paraglob_error_t {
 RUST_LOG=debug cargo test -- --nocapture
 
 # With release builds
-RUST_LOG=paraglob_rs=trace cargo run --release
+RUST_LOG=matchy=trace cargo run --release
 ```
 
 ### Inspecting Binary Format

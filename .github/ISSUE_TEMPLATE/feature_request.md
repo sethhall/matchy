@@ -16,7 +16,7 @@ A clear and concise description of what you want to happen.
 ## Example Usage
 ```rust
 // How would you like to use this feature?
-use paraglob_rs::Paraglob;
+use matchy::Paraglob;
 
 // Show example code here
 ```

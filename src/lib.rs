@@ -1,69 +1,76 @@
-//! Paraglob Rust - Fast multi-pattern glob matching
+//! Matchy - Fast Database for IP Address and Pattern Matching
 //!
-//! This library provides efficient glob pattern matching using the Aho-Corasick
-//! algorithm with **zero-copy memory-mapped file support**.
+//! Matchy is a high-performance database library for querying IP addresses, CIDR ranges,
+//! and glob patterns with rich associated data. Perfect for threat intelligence, GeoIP,
+//! domain categorization, and network security applications.
 //!
-//! # Quick Start
+//! # Quick Start - Unified Database
 //!
 //! ```rust
-//! use paraglob_rs::Paraglob;
-//! use paraglob_rs::glob::MatchMode;
+//! use matchy::{Database, DatabaseBuilder, MatchMode, DataValue};
+//! use std::collections::HashMap;
 //!
-//! // Build a matcher from patterns
-//! let patterns = vec!["*.txt", "test_*", "hello"];
-//! let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive)?;
+//! // Build a database with both IP and pattern entries
+//! let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
 //!
-//! // Find matches
-//! let matches = pg.find_all("test_file.txt");
-//! println!("Matched patterns: {:?}", matches);
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
+//! // Add IP address
+//! let mut data = HashMap::new();
+//! data.insert("threat_level".to_string(), DataValue::String("high".to_string()));
+//! builder.add_entry("1.2.3.4", data)?;
 //!
-//! # File-Based Usage (Zero-Copy)
+//! // Add pattern
+//! let mut data = HashMap::new();
+//! data.insert("category".to_string(), DataValue::String("malware".to_string()));
+//! builder.add_entry("*.evil.com", data)?;
 //!
-//! ```rust,no_run
-//! use paraglob_rs::serialization::{save, load};
-//! use paraglob_rs::Paraglob;
-//! use paraglob_rs::glob::MatchMode;
+//! // Build and save
+//! let db_bytes = builder.build()?;
+//! std::fs::write("threats.db", db_bytes)?;
 //!
-//! // Build once and save
-//! let patterns = vec!["*.txt", "*.rs"];
-//! let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive)?;
-//! save(&pg, "patterns.pgb")?;
+//! // Query the database
+//! let db = Database::open("threats.db")?;
 //!
-//! // Load instantly in any process (~1ms, zero-copy)
-//! let mut pg_loaded = load("patterns.pgb", MatchMode::CaseSensitive)?;
-//! let matches = pg_loaded.paraglob_mut().find_all("test.txt");
+//! // Automatic IP detection
+//! if let Some(result) = db.lookup("1.2.3.4")? {
+//!     println!("Found: {:?}", result);
+//! }
+//!
+//! // Automatic pattern matching
+//! if let Some(result) = db.lookup("malware.evil.com")? {
+//!     println!("Matches pattern: {:?}", result);
+//! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! # Key Features
 //!
-//! - **Zero-Copy Loading**: Files load in ~1ms via memory mapping
-//! - **Shared Memory**: Multiple processes share physical RAM (99% savings)
-//! - **Serializable**: Save/load pattern databases to disk
-//! - **C-Compatible**: Stable C API for FFI
-//! - **Fast Matching**: Aho-Corasick algorithm with glob support
+//! - **Unified Queries**: Automatically detects IP addresses vs patterns
+//! - **Rich Data**: Store JSON-like structured data with each entry
+//! - **Zero-Copy Loading**: Memory-mapped files load instantly (~1ms)
+//! - **MMDB Compatible**: Drop-in replacement for libmaxminddb
+//! - **Shared Memory**: Multiple processes share physical RAM
+//! - **C/C++ API**: Stable FFI for any language
+//! - **Fast Lookups**: O(log n) for IPs, O(n) for patterns
 //!
 //! # Architecture
 //!
-//! The library uses an offset-based binary format that can be directly
-//! memory-mapped without deserialization:
+//! Matchy uses a hybrid binary format combining IP tree structures with
+//! pattern matching automata:
 //!
 //! ```text
-//! ┌─────────────────────────────────────┐
-//! │  File Format (offset-based)        │
-//! ├─────────────────────────────────────┤
-//! │  1. Header (magic, version, sizes)  │
-//! │  2. AC Automaton (states, goto)     │
-//! │  3. Pattern Data (globs, literals)  │
-//! │  4. String Table (deduplicated)     │
-//! └─────────────────────────────────────┘
+//! ┌──────────────────────────────────────┐
+//! │  Database File Format                │
+//! ├──────────────────────────────────────┤
+//! │  1. IP Search Tree (binary trie)     │
+//! │  2. Data Section (deduplicated)      │
+//! │  3. Pattern Matcher (Aho-Corasick)   │
+//! │  4. Metadata                         │
+//! └──────────────────────────────────────┘
 //!          ↓ mmap() syscall (~1ms)
-//! ┌─────────────────────────────────────┐
-//! │  Memory (read-only, shared)         │
-//! │  Zero deserialization needed!       │
-//! └─────────────────────────────────────┘
+//! ┌──────────────────────────────────────┐
+//! │  Memory (read-only, shared)          │
+//! │  Ready for queries immediately!      │
+//! └──────────────────────────────────────┘
 //! ```
 
 #![warn(missing_docs)]
@@ -104,20 +111,42 @@ pub use crate::data_section::DataValue;
 
 pub use crate::error::ParaglobError;
 pub use crate::glob::MatchMode;
-/// Unified MMDB database builder (IP + patterns)
-pub use crate::mmdb_builder::MmdbBuilder;
+
+/// Unified database builder for creating databases with IP addresses and patterns
+///
+/// This is the primary API for building databases. It automatically detects whether
+/// entries are IP addresses (including CIDRs) or glob patterns and handles them appropriately.
+///
+/// # Example
+/// ```rust,no_run
+/// use matchy::{DatabaseBuilder, MatchMode};
+/// use std::collections::HashMap;
+/// use matchy::DataValue;
+///
+/// let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+///
+/// // Add IP entries
+/// let mut data = HashMap::new();
+/// data.insert("threat_level".to_string(), DataValue::String("high".to_string()));
+/// builder.add_entry("1.2.3.4", data)?;
+///
+/// // Add pattern entries
+/// let mut data = HashMap::new();
+/// data.insert("category".to_string(), DataValue::String("malware".to_string()));
+/// builder.add_entry("*.evil.com", data)?;
+///
+/// // Build and save
+/// let db_bytes = builder.build()?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub use crate::mmdb_builder::MmdbBuilder as DatabaseBuilder;
+
+// Legacy pattern-only APIs - kept for internal use and backward compatibility
+// These are not the primary public API anymore. Use Database and DatabaseBuilder instead.
+#[doc(hidden)]
 pub use crate::paraglob_offset::{Paraglob, ParaglobBuilder};
+#[doc(hidden)]
 pub use crate::serialization::{load, save};
-
-/// Create a new incremental builder with default case-sensitive matching
-pub fn incremental_builder() -> ParaglobBuilder {
-    ParaglobBuilder::new(MatchMode::CaseSensitive)
-}
-
-/// Create a new incremental builder with specified match mode
-pub fn incremental_builder_with_mode(mode: MatchMode) -> ParaglobBuilder {
-    ParaglobBuilder::new(mode)
-}
 
 // Version information
 /// Library version string

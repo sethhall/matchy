@@ -4,9 +4,9 @@
 //! add patterns with associated data, useful for building threat intelligence
 //! databases or any pattern-matching system that needs to attach metadata.
 
-use paraglob_rs::data_section::DataValue;
-use paraglob_rs::glob::MatchMode;
-use paraglob_rs::ParaglobBuilder;
+use matchy::data_section::DataValue;
+use matchy::glob::MatchMode;
+use matchy::ParaglobBuilder;
 use std::collections::HashMap;
 
 fn main() {
