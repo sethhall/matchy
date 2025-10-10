@@ -1,10 +1,10 @@
-# Contributing to paraglob-rs
+# Contributing to matchy
 
-Thank you for your interest in contributing to paraglob-rs! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to matchy! This document provides guidelines and information for contributors.
 
 ## Code of Conduct
 
-Be respectful and constructive. We're all here to make paraglob-rs better.
+Be respectful and constructive. We're all here to make matchy better.
 
 ## Getting Started
 
@@ -18,8 +18,8 @@ Be respectful and constructive. We're all here to make paraglob-rs better.
 
 ```bash
 # Clone the repository
-git clone https://github.com/sethhall/paraglob-rs.git
-cd paraglob-rs
+git clone https://github.com/sethhall/matchy.git
+cd matchy
 
 # Build the project
 cargo build
@@ -166,7 +166,7 @@ Before submitting a PR, ensure:
 ## Project Structure
 
 ```
-paraglob-rs/
+matchy/
 ├── src/                    # Rust source code
 │   ├── lib.rs              # Public API
 │   ├── ac_offset.rs        # Aho-Corasick automaton

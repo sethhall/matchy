@@ -11,8 +11,10 @@
 use crate::data_section::DataValue;
 use crate::mmdb::{MmdbError, MmdbHeader, SearchTree};
 use crate::paraglob_offset::Paraglob;
+use memmap2::Mmap;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs::File;
 use std::net::IpAddr;
 
 /// Query result from a database lookup
@@ -56,7 +58,7 @@ enum DatabaseFormat {
 /// # Examples
 ///
 /// ```no_run
-/// use paraglob_rs::Database;
+/// use matchy::Database;
 ///
 /// let db = Database::open("threats.db")?;
 ///
@@ -71,8 +73,24 @@ enum DatabaseFormat {
 /// }
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+/// Storage for database data - either owned or memory-mapped
+enum DatabaseStorage {
+    Owned(Vec<u8>),
+    Mmap(Mmap),
+}
+
+impl DatabaseStorage {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            DatabaseStorage::Owned(v) => v.as_slice(),
+            DatabaseStorage::Mmap(m) => &m[..],
+        }
+    }
+}
+
+/// Unified database for IP and pattern lookups
 pub struct Database {
-    data: Vec<u8>,
+    data: DatabaseStorage,
     format: DatabaseFormat,
     ip_header: Option<MmdbHeader>,
     /// Pattern matcher for Combined or PatternOnly databases
@@ -84,43 +102,55 @@ pub struct Database {
 }
 
 impl Database {
-    /// Open a database file
+    /// Open a database file using memory mapping for optimal performance
+    ///
+    /// This uses mmap for zero-copy file access, which is much faster than
+    /// loading the entire file into memory, especially for large databases.
     ///
     /// Automatically detects the database format and initializes
     /// the appropriate lookup structures.
     pub fn open(path: &str) -> Result<Self, DatabaseError> {
-        let data = std::fs::read(path)
-            .map_err(|e| DatabaseError::Io(format!("Failed to read {}: {}", path, e)))?;
+        let file = File::open(path)
+            .map_err(|e| DatabaseError::Io(format!("Failed to open {}: {}", path, e)))?;
 
-        Self::from_bytes(data)
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|e| DatabaseError::Io(format!("Failed to mmap {}: {}", path, e)))?;
+
+        Self::from_storage(DatabaseStorage::Mmap(mmap))
     }
 
-    /// Create database from raw bytes
+    /// Create database from raw bytes (for testing)
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, DatabaseError> {
+        Self::from_storage(DatabaseStorage::Owned(data))
+    }
+
+    /// Internal: Create database from storage
+    fn from_storage(storage: DatabaseStorage) -> Result<Self, DatabaseError> {
+        let data = storage.as_slice();
         // Detect format
-        let format = Self::detect_format(&data)?;
+        let format = Self::detect_format(data)?;
 
         // Parse based on format
         let (ip_header, pattern_matcher, pattern_data_mappings) = match format {
             DatabaseFormat::IpOnly => {
-                let header = MmdbHeader::from_file(&data).map_err(DatabaseError::Format)?;
+                let header = MmdbHeader::from_file(data).map_err(DatabaseError::Format)?;
                 (Some(header), None, None)
             }
             DatabaseFormat::PatternOnly => {
                 // Pattern-only: load from start of file
-                let pg = Self::load_pattern_section(&data, 0).map_err(|e| {
+                let pg = Self::load_pattern_section(data, 0).map_err(|e| {
                     DatabaseError::Unsupported(format!("Failed to load pattern section: {}", e))
                 })?;
                 (None, Some(RefCell::new(pg)), None)
             }
             DatabaseFormat::Combined => {
                 // Parse IP header first
-                let header = MmdbHeader::from_file(&data).map_err(DatabaseError::Format)?;
+                let header = MmdbHeader::from_file(data).map_err(DatabaseError::Format)?;
 
                 // Find and load pattern section after MMDB_PATTERN separator
                 let (pattern_matcher, mappings) =
-                    if let Some(offset) = Self::find_pattern_section(&data) {
-                        let (pg, map) = Self::load_combined_pattern_section(&data, offset)
+                    if let Some(offset) = Self::find_pattern_section(data) {
+                        let (pg, map) = Self::load_combined_pattern_section(data, offset)
                             .map_err(|e| {
                                 DatabaseError::Unsupported(format!(
                                     "Failed to load pattern section: {}",
@@ -136,7 +166,7 @@ impl Database {
         };
 
         Ok(Self {
-            data,
+            data: storage,
             format,
             ip_header,
             pattern_matcher,
@@ -170,7 +200,7 @@ impl Database {
         };
 
         // Traverse tree
-        let tree = SearchTree::new(&self.data, header);
+        let tree = SearchTree::new(self.data.as_slice(), header);
         let tree_result = tree.lookup(addr).map_err(DatabaseError::Format)?;
 
         let tree_result = match tree_result {
@@ -241,7 +271,7 @@ impl Database {
         // Offsets from the tree are relative to the start of the data section (after the 16-byte separator)
         // So we slice the buffer to start at tree_size + 16
         let data_section_start = header.tree_size + 16;
-        let data_section = &self.data[data_section_start..];
+        let data_section = &self.data.as_slice()[data_section_start..];
 
         // Offsets from tree are relative to data_section, which we've sliced
         // So base_offset is 0 (the decoder will resolve pointers relative to the buffer start)
@@ -306,7 +336,7 @@ impl Database {
         }
 
         use crate::mmdb::MmdbMetadata;
-        let metadata = MmdbMetadata::from_file(&self.data).ok()?;
+        let metadata = MmdbMetadata::from_file(self.data.as_slice()).ok()?;
         metadata.as_value().ok()
     }
 

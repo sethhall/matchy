@@ -3,9 +3,9 @@
 //! This demonstrates the POWER of the extended MMDB format:
 //! A single database that can query both IP addresses AND patterns!
 
-use paraglob_rs::data_section::DataValue;
-use paraglob_rs::glob::MatchMode;
-use paraglob_rs::mmdb_builder::MmdbBuilder;
+use matchy::data_section::DataValue;
+use matchy::glob::MatchMode;
+use matchy::mmdb_builder::MmdbBuilder;
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

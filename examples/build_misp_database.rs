@@ -10,10 +10,10 @@
 //!   cargo run --example build_misp_database -- misp-example.json
 //!   cargo run --example build_misp_database -- file1.json file2.json file3.json
 
-use paraglob_rs::data_section::DataValue;
-use paraglob_rs::database::Database;
-use paraglob_rs::glob::MatchMode;
-use paraglob_rs::misp_importer::MispImporter;
+use matchy::data_section::DataValue;
+use matchy::database::Database;
+use matchy::glob::MatchMode;
+use matchy::misp_importer::MispImporter;
 use std::env;
 use std::fs;
 
@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match db.lookup(query)? {
             Some(result) => match result {
-                paraglob_rs::database::QueryResult::Ip { data, .. } => {
+                matchy::database::QueryResult::Ip { data, .. } => {
                     println!(" ✓ MATCH FOUND (IP)");
                     if let DataValue::Map(map) = &data {
                         println!("      Type: {:?}", map.get("type"));
@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                paraglob_rs::database::QueryResult::Pattern { data, .. } => {
+                matchy::database::QueryResult::Pattern { data, .. } => {
                     println!(" ✓ MATCH FOUND (Pattern)");
                     if let Some(Some(DataValue::Map(map))) = data.first() {
                         println!("      Type: {:?}", map.get("type"));
@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                paraglob_rs::database::QueryResult::NotFound => {
+                matchy::database::QueryResult::NotFound => {
                     println!(" ✗ No match");
                 }
             },

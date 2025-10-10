@@ -1,10 +1,10 @@
 //! Production-like test demonstrating real-world usage
 //!
-//! This example shows how paraglob-rs would be used in a production environment
+//! This example shows how matchy would be used in a production environment
 //! with realistic pattern sets and demonstrates the performance characteristics.
-use paraglob_rs::glob::MatchMode;
-use paraglob_rs::serialization::{load, save};
-use paraglob_rs::Paraglob;
+use matchy::glob::MatchMode;
+use matchy::serialization::{load, save};
+use matchy::Paraglob;
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

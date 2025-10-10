@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial release of paraglob-rs
+- Initial release of matchy
 - Rust implementation of multi-pattern glob matching
 - Aho-Corasick automaton with offset-based data structures
 - Zero-copy memory-mapped file support

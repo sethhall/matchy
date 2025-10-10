@@ -18,7 +18,7 @@ fn main() {
         .with_config(config)
         .generate()
         .expect("Unable to generate C bindings")
-        .write_to_file(include_dir.join("paraglob_rs.h"));
+        .write_to_file(include_dir.join("matchy.h"));
 
     // Tell cargo to rerun if these change
     println!("cargo:rerun-if-changed=src/");

@@ -3,10 +3,10 @@
 //! These tests verify end-to-end functionality of the pattern matcher
 //! including edge cases, complex patterns, and real-world scenarios.
 
-use paraglob_rs::data_section::DataValue;
-use paraglob_rs::glob::MatchMode;
-use paraglob_rs::serialization::{from_bytes, to_bytes};
-use paraglob_rs::Paraglob;
+use matchy::data_section::DataValue;
+use matchy::glob::MatchMode;
+use matchy::serialization::{from_bytes, to_bytes};
+use matchy::Paraglob;
 use std::collections::HashMap;
 
 #[test]
@@ -646,7 +646,7 @@ fn test_v2_all_mmdb_data_types() {
 
 #[test]
 fn test_v2_incremental_builder() {
-    use paraglob_rs::ParaglobBuilder;
+    use matchy::ParaglobBuilder;
 
     let mut builder = ParaglobBuilder::new(MatchMode::CaseSensitive);
 
@@ -695,7 +695,7 @@ fn test_v2_incremental_builder() {
 
 #[test]
 fn test_v2_incremental_builder_duplicate_handling() {
-    use paraglob_rs::ParaglobBuilder;
+    use matchy::ParaglobBuilder;
 
     let mut builder = ParaglobBuilder::new(MatchMode::CaseSensitive);
 

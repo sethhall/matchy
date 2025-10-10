@@ -1,4 +1,4 @@
-// Test suite for paraglob-rs C++ API
+// Test suite for matchy C++ API
 // Compile: make test-cpp
 
 #include "paraglob/paraglob.hpp"

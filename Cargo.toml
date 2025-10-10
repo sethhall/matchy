@@ -1,22 +1,22 @@
 [package]
-name = "paraglob-rs"
-version = "0.3.1"
+name = "matchy"
+version = "0.4.0"  # Major rename, bump version
 edition = "2021"
 authors = ["Seth Hall <seth@remor.com>"]
 license = "BSD-2-Clause"
-description = "Fast multi-pattern glob matching using Aho-Corasick (Rust port)"
-repository = "https://github.com/sethhall/paraglob-rs"
+description = "Fast database for IP address and pattern matching with rich data storage"
+repository = "https://github.com/sethhall/matchy"
 readme = "README.md"
-keywords = ["glob", "pattern", "aho-corasick", "mmap", "ffi"]
-categories = ["text-processing", "algorithms"]
+keywords = ["ip", "pattern", "database", "geoip", "matching"]
+categories = ["network-programming", "database", "algorithms"]
 
 [lib]
-name = "paraglob_rs"
+name = "matchy"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "paraglob"
-path = "src/bin/paraglob.rs"
+name = "matchy"
+path = "src/bin/matchy.rs"
 
 [dependencies]
 # Keep minimal initially - add as needed
@@ -52,5 +52,5 @@ debug = true
 inherits = "release"
 
 [[bench]]
-name = "paraglob_bench"
+name = "matchy_bench"
 harness = false

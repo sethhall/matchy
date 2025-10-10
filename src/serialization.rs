@@ -47,9 +47,9 @@ impl MmappedParaglob {
 /// # Example
 ///
 /// ```no_run
-/// use paraglob_rs::paraglob_offset::Paraglob;
-/// use paraglob_rs::glob::MatchMode;
-/// use paraglob_rs::serialization::save;
+/// use matchy::paraglob_offset::Paraglob;
+/// use matchy::glob::MatchMode;
+/// use matchy::serialization::save;
 ///
 /// let patterns = vec!["*.txt", "test_*"];
 /// let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
@@ -76,8 +76,8 @@ pub fn save<P: AsRef<Path>>(paraglob: &Paraglob, path: P) -> Result<(), Paraglob
 /// # Example
 ///
 /// ```no_run
-/// use paraglob_rs::glob::MatchMode;
-/// use paraglob_rs::serialization::load;
+/// use matchy::glob::MatchMode;
+/// use matchy::serialization::load;
 ///
 /// let mut pg = load("patterns.pgb", MatchMode::CaseSensitive).unwrap();
 /// let matches = pg.paraglob_mut().find_all("test.txt");
@@ -111,9 +111,9 @@ pub fn load<P: AsRef<Path>>(
 /// # Example
 ///
 /// ```
-/// use paraglob_rs::paraglob_offset::Paraglob;
-/// use paraglob_rs::glob::MatchMode;
-/// use paraglob_rs::serialization::to_bytes;
+/// use matchy::paraglob_offset::Paraglob;
+/// use matchy::glob::MatchMode;
+/// use matchy::serialization::to_bytes;
 ///
 /// let patterns = vec!["*.txt"];
 /// let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
@@ -133,9 +133,9 @@ pub fn to_bytes(paraglob: &Paraglob) -> Vec<u8> {
 /// # Example
 ///
 /// ```
-/// use paraglob_rs::paraglob_offset::Paraglob;
-/// use paraglob_rs::glob::MatchMode;
-/// use paraglob_rs::serialization::{to_bytes, from_bytes};
+/// use matchy::paraglob_offset::Paraglob;
+/// use matchy::glob::MatchMode;
+/// use matchy::serialization::{to_bytes, from_bytes};
 ///
 /// let patterns = vec!["*.txt"];
 /// let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();

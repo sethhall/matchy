@@ -1,6 +1,6 @@
 # GitHub Project Setup Summary
 
-This document summarizes the GitHub project configuration for paraglob-rs.
+This document summarizes the GitHub project configuration for matchy.
 
 ## Repository Metadata
 

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use paraglob_rs::DataValue;
+use matchy::DataValue;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
@@ -120,7 +120,7 @@ fn main() -> Result<()> {
 }
 
 fn cmd_query(database: PathBuf, query: String, json_output: bool, show_data: bool) -> Result<()> {
-    use paraglob_rs::{Database, QueryResult};
+    use matchy::{Database, QueryResult};
 
     // Load database using unified API (supports IP, pattern, and combined formats)
     let db = Database::open(database.to_str().unwrap())
@@ -245,7 +245,7 @@ fn cmd_query(database: PathBuf, query: String, json_output: bool, show_data: boo
 }
 
 fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()> {
-    use paraglob_rs::Database;
+    use matchy::Database;
 
     // Load database using unified API
     let db = Database::open(database.to_str().unwrap())
@@ -347,8 +347,8 @@ fn cmd_build(
     desc_lang: String,
     verbose: bool,
 ) -> Result<()> {
-    use paraglob_rs::glob::MatchMode;
-    use paraglob_rs::mmdb_builder::MmdbBuilder;
+    use matchy::glob::MatchMode;
+    use matchy::mmdb_builder::MmdbBuilder;
 
     if verbose {
         println!("Building unified MMDB database (IP + patterns)...");
@@ -457,7 +457,7 @@ fn cmd_build(
         }
         "misp" => {
             // Read MISP JSON threat intelligence file(s)
-            use paraglob_rs::misp_importer::MispImporter;
+            use matchy::misp_importer::MispImporter;
 
             if verbose {
                 println!("  Loading MISP JSON files...");
