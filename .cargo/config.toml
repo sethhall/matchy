@@ -1,0 +1,34 @@
+# Cargo configuration for matchy
+#
+# This file defines convenient cargo aliases for running CI checks locally.
+# Usage: cargo <alias-name>
+#
+# Examples:
+#   cargo check-fmt      - Check code formatting
+#   cargo check-clippy   - Run clippy with warnings as errors
+#   cargo check-docs     - Build docs with warnings as errors
+#   cargo test-all       - Run all tests verbosely
+#   cargo test-doc       - Run doc tests
+
+[alias]
+# Individual CI checks (use these for quick iteration)
+check-fmt = "fmt --all -- --check"
+check-clippy = "clippy --all-targets --all-features -- -D warnings"
+check-docs = "doc --no-deps --document-private-items"
+
+# Test commands
+test-all = "test --verbose"
+test-doc = "test --doc"
+test-int = "test --test integration_tests --verbose"
+
+# Convenience aliases
+fmt-fix = "fmt --all"
+clippy-fix = "clippy --all-targets --all-features --fix"
+
+[env]
+# Enable colors in CI output
+CARGO_TERM_COLOR = "always"
+
+[build]
+# Incremental compilation for faster rebuilds
+incremental = true

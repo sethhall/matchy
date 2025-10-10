@@ -25,9 +25,16 @@
 //!
 //! // Build and save
 //! let db_bytes = builder.build()?;
-//! std::fs::write("threats.db", db_bytes)?;
+//! # let tmp_path = std::env::temp_dir().join("matchy_doctest_threats.db");
+//! # std::fs::write(&tmp_path, db_bytes)?;
 //!
 //! // Query the database
+//! # let db = Database::open(tmp_path.to_str().unwrap())?;
+//! # // Cleanup
+//! # let _ = std::fs::remove_file(&tmp_path);
+//! #
+//! # // For documentation purposes, show it as:
+//! # /*
 //! let db = Database::open("threats.db")?;
 //!
 //! // Automatic IP detection
@@ -39,6 +46,7 @@
 //! if let Some(result) = db.lookup("malware.evil.com")? {
 //!     println!("Matches pattern: {:?}", result);
 //! }
+//! # */
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
