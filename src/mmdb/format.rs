@@ -26,8 +26,6 @@ pub struct MmdbHeader {
     pub ip_version: IpVersion,
     /// Size of the search tree in bytes
     pub tree_size: usize,
-    /// Offset where data section begins (after tree)
-    pub data_section_offset: usize,
 }
 
 impl MmdbHeader {
@@ -37,17 +35,18 @@ impl MmdbHeader {
     pub fn from_file(data: &[u8]) -> Result<Self, MmdbError> {
         // Find metadata marker
         let marker_offset = find_metadata_marker(data)?;
-        
+
         // Metadata comes AFTER the marker (verified from libmaxminddb source)
         // The metadata section starts right after the marker bytes
         let metadata_offset = marker_offset + METADATA_MARKER.len();
         let metadata_bytes = &data[metadata_offset..];
-        
+
         // Decode metadata as MMDB data starting at offset 0
         let decoder = DataDecoder::new(metadata_bytes, 0);
-        let metadata_value = decoder.decode(0)
+        let metadata_value = decoder
+            .decode(0)
             .map_err(|e| MmdbError::InvalidMetadata(format!("Failed to decode metadata: {}", e)))?;
-        
+
         // Extract required fields (temporary allocation during parsing)
         let (node_count, record_size_bits, ip_version_num) = match metadata_value {
             DataValue::Map(ref map) => {
@@ -56,31 +55,34 @@ impl MmdbHeader {
                 let ip_version = extract_uint(map, "ip_version")?;
                 (node_count, record_size, ip_version)
             }
-            _ => return Err(MmdbError::InvalidMetadata("Metadata is not a map".to_string())),
+            _ => {
+                return Err(MmdbError::InvalidMetadata(
+                    "Metadata is not a map".to_string(),
+                ))
+            }
         };
-        
+
         let record_size = RecordSize::from_bits(record_size_bits)?;
-        
+
         let ip_version = match ip_version_num {
             4 => IpVersion::V4,
             6 => IpVersion::V6,
-            _ => return Err(MmdbError::InvalidMetadata(
-                format!("Invalid IP version: {}", ip_version_num)
-            )),
+            _ => {
+                return Err(MmdbError::InvalidMetadata(format!(
+                    "Invalid IP version: {}",
+                    ip_version_num
+                )))
+            }
         };
-        
+
         // Calculate tree size
         let tree_size = (node_count as usize) * record_size.node_bytes();
-        
-        // Data section starts right after the tree
-        let data_section_offset = tree_size;
-        
+
         Ok(MmdbHeader {
             node_count: node_count as u32,
             record_size,
             ip_version,
             tree_size,
-            data_section_offset,
         })
     }
 }
@@ -99,41 +101,18 @@ impl<'a> MmdbMetadata<'a> {
     pub fn from_file(data: &'a [u8]) -> Result<Self, MmdbError> {
         let metadata_start = find_metadata_marker(data)?;
         let metadata_offset = metadata_start + METADATA_MARKER.len();
-        
+
         Ok(MmdbMetadata {
             raw_data: data,
             metadata_offset,
         })
     }
-    
-    /// Get database type (allocates string on-demand)
-    pub fn database_type(&self) -> Result<String, MmdbError> {
-        let decoder = DataDecoder::new(&self.raw_data[self.metadata_offset..], 0);
-        let metadata = decoder.decode(0)
-            .map_err(|e| MmdbError::InvalidMetadata(e.to_string()))?;
-        
-        match metadata {
-            DataValue::Map(ref map) => extract_string(map, "database_type"),
-            _ => Err(MmdbError::InvalidMetadata("Metadata is not a map".to_string())),
-        }
-    }
-    
-    /// Get build epoch (no allocation)
-    pub fn build_epoch(&self) -> Result<u64, MmdbError> {
-        let decoder = DataDecoder::new(&self.raw_data[self.metadata_offset..], 0);
-        let metadata = decoder.decode(0)
-            .map_err(|e| MmdbError::InvalidMetadata(e.to_string()))?;
-        
-        match metadata {
-            DataValue::Map(ref map) => extract_uint(map, "build_epoch"),
-            _ => Err(MmdbError::InvalidMetadata("Metadata is not a map".to_string())),
-        }
-    }
-    
+
     /// Get full metadata as DataValue (allocates on-demand)
     pub fn as_value(&self) -> Result<DataValue, MmdbError> {
         let decoder = DataDecoder::new(&self.raw_data[self.metadata_offset..], 0);
-        decoder.decode(0)
+        decoder
+            .decode(0)
             .map_err(|e| MmdbError::InvalidMetadata(e.to_string()))
     }
 }
@@ -146,18 +125,18 @@ impl<'a> MmdbMetadata<'a> {
 /// Note: If there are multiple markers (unlikely but possible), we want the LAST one.
 pub fn find_metadata_marker(data: &[u8]) -> Result<usize, MmdbError> {
     const SEARCH_SIZE: usize = 128 * 1024; // 128KB
-    
+
     if data.len() < METADATA_MARKER.len() {
         return Err(MmdbError::MetadataNotFound);
     }
-    
+
     // Start searching from the end, but only within the last 128KB
     let search_start = if data.len() > SEARCH_SIZE {
         data.len() - SEARCH_SIZE
     } else {
         0
     };
-    
+
     // Search for the marker, keeping track of the LAST occurrence
     // (libmaxminddb does this to handle files with multiple markers)
     let mut last_marker = None;
@@ -166,35 +145,28 @@ pub fn find_metadata_marker(data: &[u8]) -> Result<usize, MmdbError> {
             last_marker = Some(i);
         }
     }
-    
+
     last_marker.ok_or(MmdbError::MetadataNotFound)
 }
 
 // Helper functions to extract values from metadata map (temporary during parsing)
 
-fn extract_uint(map: &std::collections::HashMap<String, DataValue>, key: &str) -> Result<u64, MmdbError> {
+fn extract_uint(
+    map: &std::collections::HashMap<String, DataValue>,
+    key: &str,
+) -> Result<u64, MmdbError> {
     match map.get(key) {
         Some(DataValue::Uint16(n)) => Ok(*n as u64),
         Some(DataValue::Uint32(n)) => Ok(*n as u64),
         Some(DataValue::Uint64(n)) => Ok(*n),
-        Some(_) => Err(MmdbError::InvalidMetadata(
-            format!("Field '{}' is not an unsigned integer", key)
-        )),
-        None => Err(MmdbError::InvalidMetadata(
-            format!("Required field '{}' not found", key)
-        )),
-    }
-}
-
-fn extract_string(map: &std::collections::HashMap<String, DataValue>, key: &str) -> Result<String, MmdbError> {
-    match map.get(key) {
-        Some(DataValue::String(s)) => Ok(s.clone()),
-        Some(_) => Err(MmdbError::InvalidMetadata(
-            format!("Field '{}' is not a string", key)
-        )),
-        None => Err(MmdbError::InvalidMetadata(
-            format!("Required field '{}' not found", key)
-        )),
+        Some(_) => Err(MmdbError::InvalidMetadata(format!(
+            "Field '{}' is not an unsigned integer",
+            key
+        ))),
+        None => Err(MmdbError::InvalidMetadata(format!(
+            "Required field '{}' not found",
+            key
+        ))),
     }
 }
 
@@ -204,74 +176,103 @@ mod tests {
 
     #[test]
     fn test_find_metadata_marker() {
-        let data = include_bytes!("../../tests/data/GeoLite2-Country-Test.mmdb");
+        let data = include_bytes!("../../tests/data/GeoLite2-Country.mmdb");
         let marker_offset = find_metadata_marker(data);
         assert!(marker_offset.is_ok(), "Should find metadata marker");
-        
+
         let offset = marker_offset.unwrap();
         println!("Total file size: {} bytes", data.len());
         println!("Marker found at offset: {}", offset);
-        println!("Marker: {:?}", &data[offset..offset + METADATA_MARKER.len()]);
-        
+        println!(
+            "Marker: {:?}",
+            &data[offset..offset + METADATA_MARKER.len()]
+        );
+
         assert!(offset > 0, "Marker should not be at start of file");
-        assert_eq!(&data[offset..offset + METADATA_MARKER.len()], METADATA_MARKER);
-        
+        assert_eq!(
+            &data[offset..offset + METADATA_MARKER.len()],
+            METADATA_MARKER
+        );
+
         // Check what's around the marker
         let after_marker = offset + METADATA_MARKER.len();
         let before_marker = offset.saturating_sub(20);
-        println!("20 bytes before marker: {:02x?}", &data[before_marker..offset]);
-        println!("Bytes after marker: {} bytes remaining", data.len() - after_marker);
+        println!(
+            "20 bytes before marker: {:02x?}",
+            &data[before_marker..offset]
+        );
+        println!(
+            "Bytes after marker: {} bytes remaining",
+            data.len() - after_marker
+        );
         if data.len() > after_marker {
-            println!("First 20 bytes after marker: {:02x?}", &data[after_marker..after_marker.min(data.len())]);
+            println!(
+                "First 20 bytes after marker: {:02x?}",
+                &data[after_marker..after_marker.min(data.len())]
+            );
         }
     }
 
     #[test]
     fn test_parse_header_minimal() {
-        let data = include_bytes!("../../tests/data/GeoLite2-Country-Test.mmdb");
+        let data = include_bytes!("../../tests/data/GeoLite2-Country.mmdb");
         let header = MmdbHeader::from_file(data);
         if let Err(ref e) = header {
             println!("Error parsing header: {}", e);
         }
         assert!(header.is_ok(), "Should parse header successfully");
-        
+
         let header = header.unwrap();
         assert!(header.node_count > 0, "Should have nodes");
         assert!(header.tree_size > 0, "Tree should have size");
-        assert!(header.data_section_offset > 0, "Data section should have offset");
-        
+
         // Record size should be valid
         match header.record_size {
-            RecordSize::Bits24 | RecordSize::Bits28 | RecordSize::Bits32 => {},
+            RecordSize::Bits24 | RecordSize::Bits28 | RecordSize::Bits32 => {}
         }
-        
+
         // IP version should be valid
         match header.ip_version {
-            IpVersion::V4 | IpVersion::V6 => {},
+            IpVersion::V4 | IpVersion::V6 => {}
         }
-        
+
         println!("Header: {:?}", header);
         println!("Heap usage: ~{} bytes", std::mem::size_of_val(&header));
     }
-    
+
     #[test]
     fn test_metadata_on_demand() {
-        let data = include_bytes!("../../tests/data/GeoLite2-Country-Test.mmdb");
+        let data = include_bytes!("../../tests/data/GeoLite2-Country.mmdb");
         let metadata = MmdbMetadata::from_file(data);
         assert!(metadata.is_ok(), "Should create metadata accessor");
-        
+
         let metadata = metadata.unwrap();
-        
-        // These parse on-demand from mmap
-        let db_type = metadata.database_type();
-        assert!(db_type.is_ok());
-        assert_eq!(db_type.unwrap(), "GeoLite2-Country");
-        
-        let epoch = metadata.build_epoch();
-        assert!(epoch.is_ok());
-        println!("Build epoch: {}", epoch.unwrap());
+
+        // Parse on-demand from mmap using as_value()
+        let metadata_value = metadata.as_value();
+        assert!(metadata_value.is_ok());
+
+        if let DataValue::Map(ref map) = metadata_value.unwrap() {
+            // Check database_type
+            if let Some(DataValue::String(db_type)) = map.get("database_type") {
+                assert_eq!(db_type, "GeoLite2-Country");
+            }
+
+            // Check build_epoch
+            if let Some(epoch_value) = map.get("build_epoch") {
+                let epoch_num = match epoch_value {
+                    DataValue::Uint32(n) => *n as u64,
+                    DataValue::Uint64(n) => *n,
+                    _ => panic!("build_epoch has unexpected type"),
+                };
+                println!("Build epoch: {}", epoch_num);
+                assert!(epoch_num > 0);
+            }
+        } else {
+            panic!("Metadata should be a map");
+        }
     }
-    
+
     #[test]
     fn test_metadata_not_found() {
         let data = b"not a valid mmdb file";

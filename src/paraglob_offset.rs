@@ -51,10 +51,6 @@ enum PatternType {
 }
 
 impl PatternType {
-    fn new(pattern: &str, id: u32) -> Result<Self, ParaglobError> {
-        Self::new_with_data(pattern, id, None)
-    }
-
     fn new_with_data(
         pattern: &str,
         id: u32,
@@ -644,7 +640,7 @@ impl Paraglob {
     /// let patterns = vec!["*.evil.com", "malware.*"];
     /// let mut threat_data = HashMap::new();
     /// threat_data.insert("threat_level".to_string(), DataValue::String("high".to_string()));
-    /// 
+    ///
     /// let data_values = vec![
     ///     Some(DataValue::Map(threat_data.clone())),
     ///     Some(DataValue::Map(threat_data)),
@@ -1130,9 +1126,9 @@ impl Paraglob {
             let mapping: PatternDataMapping = unsafe { read_struct(buffer, mapping_offset) };
 
             // Decode the data
-            let data_value = decoder
-                .decode(mapping.data_offset)
-                .map_err(|e| ParaglobError::SerializationError(format!("Failed to decode data: {}", e)))?;
+            let data_value = decoder.decode(mapping.data_offset).map_err(|e| {
+                ParaglobError::SerializationError(format!("Failed to decode data: {}", e))
+            })?;
 
             cache.insert(mapping.pattern_id, data_value);
         }

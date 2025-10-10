@@ -168,38 +168,48 @@ The build process automatically generates `include/paraglob_rs.h` for C/C++ inte
 ### Rust
 
 ```rust
-use paraglob_rs::Paraglob;
+use paraglob_rs::{Database, QueryResult};
+use paraglob_rs::data_section::DataValue;
+use paraglob_rs::mmdb_builder::MmdbBuilder;
+use paraglob_rs::glob::MatchMode;
+use std::collections::HashMap;
 
-// Build pattern database in memory
-let patterns = vec!["*.txt", "*.log", "data_*"];
-let pg = Paraglob::new(patterns)?;
+// Build a combined IP + Pattern database with associated data
+let mut builder = MmdbBuilder::new(MatchMode::CaseSensitive);
 
-// Find all matching patterns
-let matches = pg.find_all("data_file.txt")?;
-// Returns: ["*.txt", "data_*"]
+// Add IP address with data
+let mut ip_data = HashMap::new();
+ip_data.insert("country".to_string(), DataValue::String("US".to_string()));
+ip_data.insert("city".to_string(), DataValue::String("Mountain View".to_string()));
+builder.add_entry("8.8.8.8", ip_data)?;
 
-// Serialize to disk
-paraglob_rs::save(&pg, "patterns.pgb")?;
+// Add pattern with data
+let mut pattern_data = HashMap::new();
+pattern_data.insert("threat_level".to_string(), DataValue::String("high".to_string()));
+pattern_data.insert("category".to_string(), DataValue::String("phishing".to_string()));
+builder.add_entry("*.malicious.com", pattern_data)?;
 
-// Load with zero-copy memory mapping
-let pg = paraglob_rs::load("patterns.pgb")?;
+// Build and save database
+let database_bytes = builder.build()?;
+std::fs::write("database.mmdb", &database_bytes)?;
 
-// Build v2 database with associated data
-use paraglob_rs::{PatternType, DataValue};
+// Query the database (auto-detects IP vs pattern)
+let db = Database::open("database.mmdb")?;
 
-let mut builder = paraglob_rs::incremental_builder();
-builder.add_pattern(PatternType::new_with_data(
-    "*.malicious.com",
-    DataValue::Map(vec![
-        ("threat_level".to_string(), DataValue::String("high".to_string())),
-        ("category".to_string(), DataValue::String("phishing".to_string())),
-    ])
-))?;
-
-let pg = builder.build()?;
-let matches = pg.find_all("evil.malicious.com")?;
-if let Some(data) = pg.get_pattern_data(matches[0].pattern_id) {
-    println!("Threat data: {:?}", data);
+matches db.lookup("8.8.8.8")? {
+    Some(QueryResult::Ip { data, prefix_len }) => {
+        println!("IP found: {:?} (/{prefix_len})", data);
+    }
+    Some(QueryResult::Pattern { pattern_ids, data }) => {
+        println!("Pattern matches: {:?}", pattern_ids);
+        for (i, d) in data.iter().enumerate() {
+            if let Some(threat_data) = d {
+                println!("  Pattern {}: {:?}", pattern_ids[i], threat_data);
+            }
+        }
+    }
+    Some(QueryResult::NotFound) => println!("Not found"),
+    None => println!("No result"),
 }
 ```
 
