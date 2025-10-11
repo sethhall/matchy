@@ -53,10 +53,12 @@ pub struct matchy_t {
 pub struct matchy_result_t {
     /// Whether a match was found
     pub found: bool,
-    /// JSON string of the result data (null-terminated, caller must free with matchy_free_string)
-    pub data_json: *mut c_char,
     /// Network prefix length (for IP results)
     pub prefix_len: u8,
+    /// Internal pointer to cached DataValue (opaque, for structured data access)
+    pub _data_cache: *mut (),
+    /// Internal database reference (for entry.db population)
+    pub _db_ref: *const matchy_t,
 }
 
 // ============================================================================
@@ -169,14 +171,25 @@ pub unsafe extern "C" fn matchy_builder_add(
         Err(_) => return MATCHY_ERROR_INVALID_PARAM,
     };
 
-    // Parse JSON to HashMap<String, DataValue>
-    let data: HashMap<String, DataValue> = match serde_json::from_str(json_str) {
+    // Parse JSON to DataValue (supports nested structures)
+    let data: DataValue = match serde_json::from_str(json_str) {
         Ok(d) => d,
         Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
     };
 
+    // Wrap in a map if it's not already a map
+    let data_map = match data {
+        DataValue::Map(m) => m,
+        _ => {
+            // Single value - wrap it in a map with "value" key
+            let mut map = HashMap::new();
+            map.insert("value".to_string(), data);
+            map
+        }
+    };
+
     let internal = matchy_builder_t::as_internal_mut(builder);
-    match internal.builder.add_entry(key_str, data) {
+    match internal.builder.add_entry(key_str, data_map) {
         Ok(_) => MATCHY_SUCCESS,
         Err(_) => MATCHY_ERROR_INVALID_FORMAT,
     }
@@ -446,6 +459,10 @@ pub unsafe extern "C" fn matchy_close(db: *mut matchy_t) {
 /// Queries the database with an IP address or pattern. The function automatically
 /// detects the query type and uses the appropriate lookup method.
 ///
+/// Returns structured data as DataValue (cached internally).
+/// Use matchy_result_get_entry() to access structured data,
+/// or matchy_result_to_json() to convert to JSON.
+///
 /// # Parameters
 /// * `db` - Database handle (must not be NULL)
 /// * `query` - IP address or pattern to search (null-terminated C string, must not be NULL)
@@ -462,10 +479,18 @@ pub unsafe extern "C" fn matchy_close(db: *mut matchy_t) {
 /// # Example
 /// ```c
 /// matchy_result_t result = matchy_query(db, "1.2.3.4");
-/// if (result.found && result.data_json) {
-///     printf("Found: %s\n", result.data_json);
-///     matchy_free_result(&result);
+/// if (result.found) {
+///     // Option 1: Get as JSON
+///     char *json = matchy_result_to_json(&result);
+///     printf("Found: %s\n", json);
+///     matchy_free_string(json);
+///     
+///     // Option 2: Access structured data
+///     matchy_entry_s entry;
+///     matchy_result_get_entry(&result, &entry);
+///     // ... use matchy_aget_value()
 /// }
+/// matchy_free_result(&result);
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_query(
@@ -475,8 +500,9 @@ pub unsafe extern "C" fn matchy_query(
     if db.is_null() || query.is_null() {
         return matchy_result_t {
             found: false,
-            data_json: ptr::null_mut(),
             prefix_len: 0,
+            _data_cache: ptr::null_mut(),
+            _db_ref: ptr::null(),
         };
     }
 
@@ -485,8 +511,9 @@ pub unsafe extern "C" fn matchy_query(
         Err(_) => {
             return matchy_result_t {
                 found: false,
-                data_json: ptr::null_mut(),
                 prefix_len: 0,
+                _data_cache: ptr::null_mut(),
+                _db_ref: ptr::null(),
             }
         }
     };
@@ -494,33 +521,15 @@ pub unsafe extern "C" fn matchy_query(
     let internal = matchy_t::as_internal(db);
     match internal.database.lookup(query_str) {
         Ok(Some(QueryResult::Ip { data, prefix_len })) => {
-            // Convert data to JSON string
-            let json_str = match serde_json::to_string(&data) {
-                Ok(s) => s,
-                Err(_) => {
-                    return matchy_result_t {
-                        found: false,
-                        data_json: ptr::null_mut(),
-                        prefix_len: 0,
-                    }
-                }
-            };
-
-            let c_str = match CString::new(json_str) {
-                Ok(s) => s,
-                Err(_) => {
-                    return matchy_result_t {
-                        found: false,
-                        data_json: ptr::null_mut(),
-                        prefix_len: 0,
-                    }
-                }
-            };
+            // Cache the DataValue for structured access
+            let data_cache = Box::new(data);
+            let data_cache_ptr = Box::into_raw(data_cache) as *mut ();
 
             matchy_result_t {
                 found: true,
-                data_json: c_str.into_raw(),
                 prefix_len,
+                _data_cache: data_cache_ptr,
+                _db_ref: db,
             }
         }
         Ok(Some(QueryResult::Pattern {
@@ -529,44 +538,28 @@ pub unsafe extern "C" fn matchy_query(
         })) => {
             // For patterns, return the first match's data
             if let Some(Some(first_data)) = data.first() {
-                let json_str = match serde_json::to_string(&first_data) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        return matchy_result_t {
-                            found: false,
-                            data_json: ptr::null_mut(),
-                            prefix_len: 0,
-                        }
-                    }
-                };
-
-                let c_str = match CString::new(json_str) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        return matchy_result_t {
-                            found: false,
-                            data_json: ptr::null_mut(),
-                            prefix_len: 0,
-                        }
-                    }
-                };
+                let data_cache = Box::new(first_data.clone());
+                let data_cache_ptr = Box::into_raw(data_cache) as *mut ();
 
                 return matchy_result_t {
                     found: true,
-                    data_json: c_str.into_raw(),
                     prefix_len: 0,
+                    _data_cache: data_cache_ptr,
+                    _db_ref: db,
                 };
             }
             matchy_result_t {
                 found: false,
-                data_json: ptr::null_mut(),
                 prefix_len: 0,
+                _data_cache: ptr::null_mut(),
+                _db_ref: ptr::null(),
             }
         }
         _ => matchy_result_t {
             found: false,
-            data_json: ptr::null_mut(),
             prefix_len: 0,
+            _data_cache: ptr::null_mut(),
+            _db_ref: ptr::null(),
         },
     }
 }
@@ -583,9 +576,10 @@ pub unsafe extern "C" fn matchy_query(
 /// * Must not be called twice on the same result
 #[no_mangle]
 pub unsafe extern "C" fn matchy_free_result(result: *mut matchy_result_t) {
-    if !result.is_null() && !(*result).data_json.is_null() {
-        let _ = CString::from_raw((*result).data_json);
-        (*result).data_json = ptr::null_mut();
+    if !result.is_null() && !(*result)._data_cache.is_null() {
+        // Free the cached DataValue
+        let _ = Box::from_raw((*result)._data_cache as *mut DataValue);
+        (*result)._data_cache = ptr::null_mut();
     }
 }
 
@@ -613,4 +607,714 @@ pub unsafe extern "C" fn matchy_free_string(string: *mut c_char) {
 pub extern "C" fn matchy_version() -> *const c_char {
     // Use the version from Cargo.toml, automatically updated at compile time
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
+}
+
+/// Get database format description
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+///
+/// # Returns
+/// * Format string ("IP database", "Pattern database", or "Combined IP+Pattern database")
+/// * Pointer is valid for database lifetime, do not free
+/// * NULL if db is NULL
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+#[no_mangle]
+pub unsafe extern "C" fn matchy_format(db: *const matchy_t) -> *const c_char {
+    if db.is_null() {
+        return ptr::null();
+    }
+
+    let internal = matchy_t::as_internal(db);
+    let format_str = internal.database.format();
+    format_str.as_ptr() as *const c_char
+}
+
+/// Check if database supports IP address lookups
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+///
+/// # Returns
+/// * true if database contains IP data
+/// * false if not or if db is NULL
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+#[no_mangle]
+pub unsafe extern "C" fn matchy_has_ip_data(db: *const matchy_t) -> bool {
+    if db.is_null() {
+        return false;
+    }
+
+    let internal = matchy_t::as_internal(db);
+    internal.database.has_ip_data()
+}
+
+/// Check if database supports pattern matching
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+///
+/// # Returns
+/// * true if database contains pattern data
+/// * false if not or if db is NULL
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+#[no_mangle]
+pub unsafe extern "C" fn matchy_has_pattern_data(db: *const matchy_t) -> bool {
+    if db.is_null() {
+        return false;
+    }
+
+    let internal = matchy_t::as_internal(db);
+    internal.database.has_pattern_data()
+}
+
+/// Get database metadata as JSON string
+///
+/// Returns MMDB metadata if available (for IP or combined databases).
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+///
+/// # Returns
+/// * JSON string containing metadata (caller must free with matchy_free_string)
+/// * NULL if no metadata available or db is NULL
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+#[no_mangle]
+pub unsafe extern "C" fn matchy_metadata(db: *const matchy_t) -> *mut c_char {
+    if db.is_null() {
+        return ptr::null_mut();
+    }
+
+    let internal = matchy_t::as_internal(db);
+    match internal.database.metadata() {
+        Some(metadata) => {
+            // Convert metadata to JSON string
+            match serde_json::to_string(&metadata) {
+                Ok(json_str) => match CString::new(json_str) {
+                    Ok(c_str) => c_str.into_raw(),
+                    Err(_) => ptr::null_mut(),
+                },
+                Err(_) => ptr::null_mut(),
+            }
+        }
+        None => ptr::null_mut(),
+    }
+}
+
+/// Get pattern string by ID
+///
+/// Returns the pattern string for a given pattern ID.
+/// Only works for pattern or combined databases.
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+/// * `pattern_id` - Pattern ID
+///
+/// # Returns
+/// * Pattern string (caller must free with matchy_free_string)
+/// * NULL if pattern ID not found or db has no patterns
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+#[no_mangle]
+pub unsafe extern "C" fn matchy_get_pattern_string(
+    db: *const matchy_t,
+    pattern_id: u32,
+) -> *mut c_char {
+    if db.is_null() {
+        return ptr::null_mut();
+    }
+
+    let internal = matchy_t::as_internal(db);
+
+    // Get pattern string from database
+    if let Some(pattern_str) = internal.database.get_pattern_string(pattern_id) {
+        match CString::new(pattern_str) {
+            Ok(c_str) => return c_str.into_raw(),
+            Err(_) => return ptr::null_mut(),
+        }
+    }
+
+    ptr::null_mut()
+}
+
+/// Get total number of patterns in database
+///
+/// Returns the number of patterns in the database.
+/// Only works for pattern or combined databases.
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+///
+/// # Returns
+/// * Number of patterns (0 if no patterns or db is NULL)
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+#[no_mangle]
+pub unsafe extern "C" fn matchy_pattern_count(db: *const matchy_t) -> usize {
+    if db.is_null() {
+        return 0;
+    }
+
+    let internal = matchy_t::as_internal(db);
+    internal.database.pattern_count()
+}
+
+// ============================================================================
+// ENHANCED API - STRUCTURED DATA ACCESS
+// ============================================================================
+
+/// MMDB data type constants (matching libmaxminddb)
+/// Extended type marker (internal use)
+pub const MATCHY_DATA_TYPE_EXTENDED: u32 = 0;
+/// Pointer type for data section references
+pub const MATCHY_DATA_TYPE_POINTER: u32 = 1;
+/// UTF-8 encoded string
+pub const MATCHY_DATA_TYPE_UTF8_STRING: u32 = 2;
+/// Double precision float (64-bit)
+pub const MATCHY_DATA_TYPE_DOUBLE: u32 = 3;
+/// Byte array / binary data
+pub const MATCHY_DATA_TYPE_BYTES: u32 = 4;
+/// Unsigned 16-bit integer
+pub const MATCHY_DATA_TYPE_UINT16: u32 = 5;
+/// Unsigned 32-bit integer
+pub const MATCHY_DATA_TYPE_UINT32: u32 = 6;
+/// Map/dictionary type
+pub const MATCHY_DATA_TYPE_MAP: u32 = 7;
+/// Signed 32-bit integer
+pub const MATCHY_DATA_TYPE_INT32: u32 = 8;
+/// Unsigned 64-bit integer
+pub const MATCHY_DATA_TYPE_UINT64: u32 = 9;
+/// Unsigned 128-bit integer
+pub const MATCHY_DATA_TYPE_UINT128: u32 = 10;
+/// Array type
+pub const MATCHY_DATA_TYPE_ARRAY: u32 = 11;
+/// Boolean type
+pub const MATCHY_DATA_TYPE_BOOLEAN: u32 = 14;
+/// Single precision float (32-bit)
+pub const MATCHY_DATA_TYPE_FLOAT: u32 = 15;
+
+/// Additional error codes for structured data API
+/// Invalid lookup path specified
+pub const MATCHY_ERROR_LOOKUP_PATH_INVALID: i32 = -7;
+/// No data available at the specified path
+pub const MATCHY_ERROR_NO_DATA: i32 = -8;
+/// Failed to parse data value
+pub const MATCHY_ERROR_DATA_PARSE: i32 = -9;
+
+/// Entry data union (matches MMDB layout for compatibility)
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union matchy_entry_data_value_u {
+    /// Pointer to data section offset
+    pub pointer: u32,
+    /// Null-terminated UTF-8 string pointer
+    pub utf8_string: *const c_char,
+    /// 64-bit floating point value
+    pub double_value: f64,
+    /// Pointer to byte array
+    pub bytes: *const u8,
+    /// 16-bit unsigned integer value
+    pub uint16: u16,
+    /// 32-bit unsigned integer value
+    pub uint32: u32,
+    /// 32-bit signed integer value
+    pub int32: i32,
+    /// 64-bit unsigned integer value
+    pub uint64: u64,
+    /// 128-bit unsigned integer value (as byte array)
+    pub uint128: [u8; 16],
+    /// Boolean value
+    pub boolean: bool,
+    /// 32-bit floating point value
+    pub float_value: f32,
+}
+
+/// Entry data structure (like MMDB_entry_data_s)
+#[repr(C)]
+pub struct matchy_entry_data_t {
+    /// Whether data was found
+    pub has_data: bool,
+    /// Data type (one of MATCHY_DATA_TYPE_* constants)
+    pub type_: u32,
+    /// Actual data value
+    pub value: matchy_entry_data_value_u,
+    /// Size in bytes (for strings, bytes, maps, arrays)
+    pub data_size: u32,
+    /// Internal offset (for debugging)
+    pub offset: u32,
+}
+
+/// Entry handle (like MMDB_entry_s)
+#[repr(C)]
+pub struct matchy_entry_s {
+    /// Database handle
+    pub db: *const matchy_t,
+    /// Cached data pointer (internal)
+    pub data_ptr: *const (),
+}
+
+/// Entry data list node (like MMDB_entry_data_list_s)
+#[repr(C)]
+pub struct matchy_entry_data_list_t {
+    /// The entry data for this node
+    pub entry_data: matchy_entry_data_t,
+    /// Pointer to the next node in the list (NULL if last)
+    pub next: *mut matchy_entry_data_list_t,
+}
+
+impl matchy_entry_data_t {
+    /// Create empty entry data
+    fn empty() -> Self {
+        Self {
+            has_data: false,
+            type_: 0,
+            value: matchy_entry_data_value_u { uint32: 0 },
+            data_size: 0,
+            offset: 0,
+        }
+    }
+
+    /// Convert DataValue to entry_data_t
+    /// Strings are stored in the cache to keep them alive
+    unsafe fn from_data_value(value: &DataValue, string_cache: &mut Vec<CString>) -> Option<Self> {
+        let (type_, data_value, data_size) = match value {
+            DataValue::Pointer(offset) => (
+                MATCHY_DATA_TYPE_POINTER,
+                matchy_entry_data_value_u { pointer: *offset },
+                0,
+            ),
+            DataValue::String(s) => {
+                let c_str = CString::new(s.as_str()).ok()?;
+                let ptr = c_str.as_ptr();
+                string_cache.push(c_str);
+                (
+                    MATCHY_DATA_TYPE_UTF8_STRING,
+                    matchy_entry_data_value_u { utf8_string: ptr },
+                    s.len() as u32,
+                )
+            }
+            DataValue::Double(d) => (
+                MATCHY_DATA_TYPE_DOUBLE,
+                matchy_entry_data_value_u { double_value: *d },
+                8,
+            ),
+            DataValue::Bytes(b) => {
+                let ptr = b.as_ptr();
+                (
+                    MATCHY_DATA_TYPE_BYTES,
+                    matchy_entry_data_value_u { bytes: ptr },
+                    b.len() as u32,
+                )
+            }
+            DataValue::Uint16(n) => (
+                MATCHY_DATA_TYPE_UINT16,
+                matchy_entry_data_value_u { uint16: *n },
+                2,
+            ),
+            DataValue::Uint32(n) => (
+                MATCHY_DATA_TYPE_UINT32,
+                matchy_entry_data_value_u { uint32: *n },
+                4,
+            ),
+            DataValue::Map(m) => (
+                MATCHY_DATA_TYPE_MAP,
+                matchy_entry_data_value_u { uint32: 0 },
+                m.len() as u32,
+            ),
+            DataValue::Int32(n) => (
+                MATCHY_DATA_TYPE_INT32,
+                matchy_entry_data_value_u { int32: *n },
+                4,
+            ),
+            DataValue::Uint64(n) => (
+                MATCHY_DATA_TYPE_UINT64,
+                matchy_entry_data_value_u { uint64: *n },
+                8,
+            ),
+            DataValue::Uint128(n) => {
+                let bytes = n.to_be_bytes();
+                (
+                    MATCHY_DATA_TYPE_UINT128,
+                    matchy_entry_data_value_u { uint128: bytes },
+                    16,
+                )
+            }
+            DataValue::Array(a) => (
+                MATCHY_DATA_TYPE_ARRAY,
+                matchy_entry_data_value_u { uint32: 0 },
+                a.len() as u32,
+            ),
+            DataValue::Bool(b) => (
+                MATCHY_DATA_TYPE_BOOLEAN,
+                matchy_entry_data_value_u { boolean: *b },
+                1,
+            ),
+            DataValue::Float(f) => (
+                MATCHY_DATA_TYPE_FLOAT,
+                matchy_entry_data_value_u { float_value: *f },
+                4,
+            ),
+        };
+
+        Some(Self {
+            has_data: true,
+            type_,
+            value: data_value,
+            data_size,
+            offset: 0,
+        })
+    }
+}
+
+/// Navigate into DataValue using a path of string keys
+fn navigate_path<'a>(mut value: &'a DataValue, path: &[&str]) -> Option<&'a DataValue> {
+    for key in path {
+        match value {
+            DataValue::Map(m) => {
+                value = m.get(*key)?;
+            }
+            DataValue::Array(a) => {
+                // Try to parse key as array index
+                let idx: usize = key.parse().ok()?;
+                value = a.get(idx)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(value)
+}
+
+/// Get entry handle from query result
+///
+/// This extracts the entry handle which can be used for data navigation.
+///
+/// # Parameters
+/// * `result` - Query result (must not be NULL, must have found=true)
+/// * `entry` - Output entry handle (must not be NULL)
+///
+/// # Returns
+/// * MATCHY_SUCCESS on success
+/// * MATCHY_ERROR_NO_DATA if result not found
+/// * MATCHY_ERROR_INVALID_PARAM if parameters invalid
+///
+/// # Safety
+/// * `result` must be valid result from matchy_query
+/// * `entry` must be valid pointer to output struct
+/// * Result must not have been freed
+///
+/// # Example
+/// ```c
+/// matchy_result_t result = matchy_query(db, "8.8.8.8");
+/// if (result.found) {
+///     matchy_entry_s entry;
+///     matchy_result_get_entry(&result, &entry);
+/// }
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_result_get_entry(
+    result: *const matchy_result_t,
+    entry: *mut matchy_entry_s,
+) -> i32 {
+    if result.is_null() || entry.is_null() {
+        return MATCHY_ERROR_INVALID_PARAM;
+    }
+
+    let res = &*result;
+    if !res.found {
+        return MATCHY_ERROR_NO_DATA;
+    }
+
+    // Populate entry with database reference and result pointer
+    (*entry).db = res._db_ref;
+    (*entry).data_ptr = result as *const ();
+
+    MATCHY_SUCCESS
+}
+
+// Note: Full varargs support (matchy_get_value) should be provided as a C macro
+// or wrapper function that calls matchy_aget_value. For now, we provide the
+// array-based version which is more portable.
+
+/// Get value using array of strings for path
+///
+/// Like matchy_get_value but takes an array of strings instead of varargs.
+///
+/// # Parameters
+/// * `entry` - Entry handle
+/// * `entry_data` - Output data
+/// * `path` - NULL-terminated array of string pointers
+///
+/// # Returns
+/// * Same as matchy_get_value
+///
+/// # Safety
+/// * Same as matchy_get_value
+/// * `path` must be NULL-terminated array
+///
+/// # Example
+/// ```c
+/// const char *path[] = {"country", "iso_code", NULL};
+/// matchy_aget_value(&entry, &data, path);
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_aget_value(
+    entry: *const matchy_entry_s,
+    entry_data: *mut matchy_entry_data_t,
+    path: *const *const c_char,
+) -> i32 {
+    if entry.is_null() || entry_data.is_null() || path.is_null() {
+        return MATCHY_ERROR_INVALID_PARAM;
+    }
+
+    // Convert path array to Vec
+    let mut path_vec = Vec::new();
+    let mut i = 0;
+    loop {
+        let ptr = *path.offset(i);
+        if ptr.is_null() {
+            break;
+        }
+        match CStr::from_ptr(ptr).to_str() {
+            Ok(s) => path_vec.push(s),
+            Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+        }
+        i += 1;
+    }
+
+    // Get result and access cached DataValue directly
+    let result_ptr = (*entry).data_ptr as *const matchy_result_t;
+    if result_ptr.is_null() {
+        (*entry_data) = matchy_entry_data_t::empty();
+        return MATCHY_ERROR_NO_DATA;
+    }
+
+    let result = &*result_ptr;
+    if result._data_cache.is_null() {
+        (*entry_data) = matchy_entry_data_t::empty();
+        return MATCHY_ERROR_NO_DATA;
+    }
+
+    // Access the cached DataValue directly - no JSON parsing!
+    let data = &*(result._data_cache as *const DataValue);
+
+    // Navigate
+    let target = match navigate_path(data, &path_vec) {
+        Some(v) => v,
+        None => {
+            (*entry_data) = matchy_entry_data_t::empty();
+            return MATCHY_ERROR_LOOKUP_PATH_INVALID;
+        }
+    };
+
+    // Convert
+    let mut string_cache = Vec::new();
+    match matchy_entry_data_t::from_data_value(target, &mut string_cache) {
+        Some(data) => {
+            (*entry_data) = data;
+            std::mem::forget(string_cache);
+            MATCHY_SUCCESS
+        }
+        None => {
+            (*entry_data) = matchy_entry_data_t::empty();
+            MATCHY_ERROR_DATA_PARSE
+        }
+    }
+}
+
+/// Get full entry data as linked list (tree traversal)
+///
+/// This function traverses the entire data structure and returns it as
+/// a flattened linked list. Maps and arrays are expanded recursively.
+///
+/// # Parameters
+/// * `entry` - Entry handle
+/// * `entry_data_list` - Output list pointer
+///
+/// # Returns
+/// * MATCHY_SUCCESS on success
+/// * Error code on failure
+///
+/// # Safety
+/// * `entry` must be valid
+/// * `entry_data_list` must be valid pointer
+/// * Caller must free result with matchy_free_entry_data_list
+///
+/// # Example
+/// ```c
+/// matchy_entry_data_list_t *list = NULL;
+/// if (matchy_get_entry_data_list(&entry, &list) == MATCHY_SUCCESS) {
+///     for (matchy_entry_data_list_t *p = list; p != NULL; p = p->next) {
+///         // Process p->entry_data
+///     }
+///     matchy_free_entry_data_list(list);
+/// }
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_get_entry_data_list(
+    entry: *const matchy_entry_s,
+    entry_data_list: *mut *mut matchy_entry_data_list_t,
+) -> i32 {
+    if entry.is_null() || entry_data_list.is_null() {
+        return MATCHY_ERROR_INVALID_PARAM;
+    }
+
+    // Get result and access cached DataValue (same as aget_value)
+    let result_ptr = (*entry).data_ptr as *const matchy_result_t;
+    if result_ptr.is_null() {
+        return MATCHY_ERROR_NO_DATA;
+    }
+
+    let result = &*result_ptr;
+    if result._data_cache.is_null() {
+        return MATCHY_ERROR_NO_DATA;
+    }
+
+    let data = &*(result._data_cache as *const DataValue);
+
+    // Build a flat list by traversing the data structure
+    let mut string_cache = Vec::new();
+    let mut list_head: *mut matchy_entry_data_list_t = ptr::null_mut();
+    let mut list_tail: *mut matchy_entry_data_list_t = ptr::null_mut();
+
+    // Helper to add a node to the list
+    let mut add_node = |entry_data: matchy_entry_data_t| {
+        let node = Box::new(matchy_entry_data_list_t {
+            entry_data,
+            next: ptr::null_mut(),
+        });
+        let node_ptr = Box::into_raw(node);
+
+        if list_head.is_null() {
+            list_head = node_ptr;
+            list_tail = node_ptr;
+        } else {
+            (*list_tail).next = node_ptr;
+            list_tail = node_ptr;
+        }
+    };
+
+    // Flatten the data structure recursively
+    fn flatten_data(
+        value: &DataValue,
+        string_cache: &mut Vec<CString>,
+        add_node: &mut impl FnMut(matchy_entry_data_t),
+    ) {
+        // Add the current node
+        if let Some(entry_data) =
+            unsafe { matchy_entry_data_t::from_data_value(value, string_cache) }
+        {
+            add_node(entry_data);
+        }
+
+        // Recursively add children
+        match value {
+            DataValue::Map(m) => {
+                for (_key, val) in m.iter() {
+                    flatten_data(val, string_cache, add_node);
+                }
+            }
+            DataValue::Array(a) => {
+                for val in a.iter() {
+                    flatten_data(val, string_cache, add_node);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    flatten_data(data, &mut string_cache, &mut add_node);
+
+    // Leak the string cache so pointers remain valid
+    std::mem::forget(string_cache);
+
+    *entry_data_list = list_head;
+    MATCHY_SUCCESS
+}
+
+/// Free entry data list
+///
+/// Frees the linked list returned by matchy_get_entry_data_list.
+///
+/// # Parameters
+/// * `list` - List to free (may be NULL)
+///
+/// # Safety
+/// * `list` must be from matchy_get_entry_data_list or NULL
+/// * Must not be freed twice
+#[no_mangle]
+pub unsafe extern "C" fn matchy_free_entry_data_list(list: *mut matchy_entry_data_list_t) {
+    if list.is_null() {
+        return;
+    }
+
+    let mut current = list;
+    while !current.is_null() {
+        let next = (*current).next;
+        let _ = Box::from_raw(current);
+        current = next;
+    }
+}
+
+// ============================================================================
+// CONVENIENCE FUNCTIONS
+// ============================================================================
+
+/// Convert query result data to JSON string
+///
+/// This is a convenience function to convert the structured DataValue
+/// to a JSON string for simple use cases.
+///
+/// # Parameters
+/// * `result` - Query result (must not be NULL, must have found=true)
+///
+/// # Returns
+/// * JSON string (caller must free with matchy_free_string)
+/// * NULL if result is NULL, not found, or conversion fails
+///
+/// # Safety
+/// * `result` must be a valid pointer to a result from matchy_query
+/// * Result must not have been freed
+///
+/// # Example
+/// ```c
+/// matchy_result_t result = matchy_query(db, "8.8.8.8");
+/// if (result.found) {
+///     char *json = matchy_result_to_json(&result);
+///     if (json) {
+///         printf("Data: %s\n", json);
+///         matchy_free_string(json);
+///     }
+/// }
+/// matchy_free_result(&result);
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_result_to_json(result: *const matchy_result_t) -> *mut c_char {
+    if result.is_null() || !(*result).found || (*result)._data_cache.is_null() {
+        return ptr::null_mut();
+    }
+
+    // Get the cached DataValue
+    let data = &*((*result)._data_cache as *const DataValue);
+
+    // Convert to JSON
+    let json_str = match serde_json::to_string(data) {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    // Convert to C string
+    match CString::new(json_str) {
+        Ok(c_str) => c_str.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
 }

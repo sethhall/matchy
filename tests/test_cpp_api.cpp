@@ -1,7 +1,7 @@
 // Test suite for matchy C++ API
 // Compile: make test-cpp
 
-#include "paraglob/paraglob.hpp"
+#include "matchy/matchy.hpp"
 #include <iostream>
 #include <vector>
 #include <string>
@@ -84,11 +84,11 @@ void test_save_load() {
         auto& pg = *pg_ptr;
         ASSERT_EQ(pg.pattern_count(), 3u, "Wrong pattern count after load");
         ASSERT_TRUE(pg.is_compiled(), "Loaded instance should be compiled");
-        ASSERT_EQ(pg.version(), 1u, "Wrong version");
+        ASSERT_EQ(pg.version(), 3u, "Wrong version");
         
-        // Note: C++ wrapper's get() method doesn't work properly in binary mode
-        // because it relies on patterns_ which is empty after loading.
-        // This is a known limitation - use C API directly for full functionality.
+        // Pattern matching should work after loading from binary
+        auto matches = pg.get("README.md");
+        ASSERT_TRUE(matches.size() >= 1, "Should match at least one pattern after load");
     }
     
     std::cout << "  PASS" << std::endl;
@@ -208,7 +208,7 @@ void test_string_representation() {
     std::string repr = pg.str();
     ASSERT_TRUE(repr.find("patterns=") != std::string::npos, "Should contain pattern count");
     ASSERT_TRUE(repr.find("binary_mode=") != std::string::npos, "Should contain binary mode");
-    ASSERT_TRUE(repr.find("version=") != std::string::npos, "Should contain version");
+    ASSERT_TRUE(repr.find("format=") != std::string::npos, "Should contain format");
     
     std::cout << "  PASS" << std::endl;
 }

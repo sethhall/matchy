@@ -47,7 +47,7 @@
 #ifndef PARAGLOB_HPP
 #define PARAGLOB_HPP
 
-#include "../matchy.h"
+#include "matchy/matchy.h"
 
 #include <algorithm>
 #include <memory>
@@ -81,17 +81,20 @@ namespace paraglob {
  */
 class Paraglob {
 private:
-    // Opaque handle to Rust implementation (binary mode)
-    matchy::paraglob_db* db_;
+    // Opaque handle to Rust implementation (loaded from file/buffer)
+    matchy::matchy_t* db_;
+    
+    // Builder handle (when constructing from patterns)
+    matchy::matchy_builder_t* builder_;
+    
+    // Temporary file for compiled database
+    std::string temp_file_;
     
     // Build mode storage (when constructing from patterns)
     std::vector<std::string> patterns_;
     std::vector<uint32_t> pattern_ids_;
     bool is_binary_mode_;
     bool is_compiled_;
-    
-    // Helper: compile patterns to temporary file and load
-    void compile_patterns();
     
     // Helper: get temporary filename for binary compilation
     static std::string get_temp_filename();

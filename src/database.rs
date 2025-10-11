@@ -340,6 +340,30 @@ impl Database {
         metadata.as_value().ok()
     }
 
+    /// Get pattern string by ID
+    ///
+    /// Returns the pattern string for a given pattern ID.
+    /// Returns None if the database has no pattern data or pattern ID is invalid.
+    pub fn get_pattern_string(&self, pattern_id: u32) -> Option<String> {
+        let pg_cell = self.pattern_matcher.as_ref()?;
+        let pg = pg_cell.borrow();
+        pg.get_pattern(pattern_id)
+    }
+
+    /// Get total number of patterns
+    ///
+    /// Returns the number of patterns in the database.
+    /// Returns 0 if the database has no pattern data.
+    pub fn pattern_count(&self) -> usize {
+        match &self.pattern_matcher {
+            Some(pg_cell) => {
+                let pg = pg_cell.borrow();
+                pg.pattern_count()
+            }
+            None => 0,
+        }
+    }
+
     /// Find the pattern section in a combined database
     /// Returns the offset after the MMDB_PATTERN separator
     fn find_pattern_section(data: &[u8]) -> Option<usize> {

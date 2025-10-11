@@ -11,8 +11,7 @@ keywords = ["ip", "pattern", "database", "geoip", "matching"]
 categories = ["network-programming", "database", "algorithms"]
 
 [lib]
-name = "matchy"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [[bin]]
 name = "matchy"
