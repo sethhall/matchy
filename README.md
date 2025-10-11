@@ -55,8 +55,9 @@ Memory-mapped databases load in <100 microseconds regardless of size. No deseria
 
 ### Unified Database
 - **IP addresses & CIDR ranges**: Binary search tree for O(log n) lookups
+- **String literal matching**: Exact string matches for domains, URLs, and any text
 - **Glob patterns**: Aho-Corasick automaton for O(n) matching
-- **Auto-detection**: One query function handles both types
+- **Auto-detection**: One query function handles all types
 - **Rich data**: Store JSON-like structured data with each entry
 
 ### Performance
@@ -174,7 +175,7 @@ int main() {
 
 ## Building Databases
 
-Matchy provides a command-line tool to build databases from various input formats. The tool automatically detects whether entries are IP addresses, CIDR ranges, or glob patterns.
+Matchy provides a command-line tool to build databases from various input formats. The tool automatically detects whether entries are IP addresses, CIDR ranges, exact string literals, or glob patterns.
 
 ### Installation
 
@@ -209,7 +210,7 @@ http://*/admin/config.php
 
 **Build command:**
 ```bash
-matchy build entries.txt -o database.mmdb
+matchy build -o database.mmdb entries.txt
 ```
 
 #### CSV Format (With Metadata)
@@ -228,7 +229,7 @@ http://*/admin/config.php,medium,scanning,2024-11-20,false
 
 **Build command:**
 ```bash
-matchy build threats.csv -o threats.mmdb --format csv
+matchy build -o threats.mmdb --format csv threats.csv
 ```
 
 **Example: `geoip.csv`**
@@ -240,9 +241,10 @@ entry,country,city,latitude,longitude
 ```
 
 ```bash
-matchy build geoip.csv -o geoip.mmdb --format csv \
+matchy build -o geoip.mmdb --format csv \
   --database-type "GeoIP-Lite" \
-  --description "Custom GeoIP database"
+  --description "Custom GeoIP database" \
+  geoip.csv
 ```
 
 #### JSON Format (With Complex Metadata)
@@ -285,16 +287,24 @@ JSON array with entries containing a `key` (IP/CIDR/pattern) and optional `data`
 
 **Build command:**
 ```bash
-matchy build threats.json -o threats.mmdb --format json
+matchy build -o threats.mmdb --format json threats.json
 ```
 
 #### MISP Format (Threat Intelligence)
 
 MISP (Malware Information Sharing Platform) JSON format for threat intelligence feeds. The tool automatically extracts IP addresses, domains, and URLs with their associated threat data.
 
+**Example MISP export files:**
+```bash
+# Files from ~/MISP-data/ directory
+003a6daa-ac91-4718-862b-efc4369a1eee.json
+00993a8e-64c7-4036-8238-ef7f955222b3.json
+014e94ba-9857-49c1-9dc8-a7975a4d530e.json
+```
+
 **Build command:**
 ```bash
-matchy build misp-export.json -o threats.mmdb --format misp
+matchy build -o threats.mmdb --format misp ~/MISP-data/003a6daa-ac91-4718-862b-efc4369a1eee.json
 ```
 
 ### Build Options
@@ -317,13 +327,16 @@ You can specify multiple input files to combine entries:
 
 ```bash
 # Combine multiple text files
-matchy build ips.txt domains.txt urls.txt -o combined.mmdb
+matchy build -o combined.mmdb ips.txt domains.txt urls.txt
 
 # Combine multiple CSV files
-matchy build threats1.csv threats2.csv threats3.csv -o threats.mmdb --format csv
+matchy build -o threats.mmdb --format csv threats1.csv threats2.csv threats3.csv
 
 # Combine multiple JSON files
-matchy build threat1.json threat2.json threat3.json -o threats.mmdb --format json
+matchy build -o threats.mmdb --format json threat1.json threat2.json threat3.json
+
+# Combine multiple MISP exports
+matchy build -o misp-threats.mmdb --format misp ~/MISP-data/*.json
 ```
 
 ### Examples
@@ -331,27 +344,30 @@ matchy build threat1.json threat2.json threat3.json -o threats.mmdb --format jso
 **Simple blocklist (no metadata):**
 ```bash
 # Just match IPs and domains, no data attached
-matchy build blocklist.txt -o blocklist.mmdb
+matchy build -o blocklist.mmdb blocklist.txt
 ```
 
 **Threat intelligence database with metadata:**
 ```bash
-matchy build threats.csv -o threats.mmdb --format csv \
+matchy build -o threats.mmdb --format csv \
   --database-type "ThreatIntel" \
   --description "Combined IP and domain threat indicators" \
-  --verbose
+  --verbose \
+  threats.csv
 ```
 
 **GeoIP-style database:**
 ```bash
-matchy build geoip.csv -o geoip.mmdb --format csv \
+matchy build -o geoip.mmdb --format csv \
   --database-type "GeoIP-Lite" \
-  --description "Custom GeoIP database"
+  --description "Custom GeoIP database" \
+  geoip.csv
 ```
 
 **Build from MISP export:**
 ```bash
-matchy build misp-export.json -o misp-threats.mmdb --format misp --verbose
+matchy build -o misp-threats.mmdb --format misp --verbose \
+  ~/MISP-data/003a6daa-ac91-4718-862b-efc4369a1eee.json
 ```
 
 ### Querying Databases
