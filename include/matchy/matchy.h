@@ -56,6 +56,11 @@ namespace matchy {
 #define VERSION_PATCH 0
 
 /*
+ Current version of the literal hash format
+ */
+#define LITERAL_HASH_VERSION 1
+
+/*
  Current format version (v3: adds AC literal mapping for zero-copy loading)
  */
 #define VERSION 3
@@ -591,7 +596,52 @@ const char *matchy_format(const struct matchy_t *db);
 bool matchy_has_ip_data(const struct matchy_t *db);
 
 /*
- Check if database supports pattern matching
+ Check if database supports string lookups (literals or globs)
+
+ # Parameters
+ * `db` - Database handle (must not be NULL)
+
+ # Returns
+ * true if database contains literal or glob data
+ * false if not or if db is NULL
+
+ # Safety
+ * `db` must be a valid pointer from matchy_open
+ */
+bool matchy_has_string_data(const struct matchy_t *db);
+
+/*
+ Check if database supports literal (exact string) lookups
+
+ # Parameters
+ * `db` - Database handle (must not be NULL)
+
+ # Returns
+ * true if database contains literal hash data
+ * false if not or if db is NULL
+
+ # Safety
+ * `db` must be a valid pointer from matchy_open
+ */
+bool matchy_has_literal_data(const struct matchy_t *db);
+
+/*
+ Check if database supports glob pattern lookups
+
+ # Parameters
+ * `db` - Database handle (must not be NULL)
+
+ # Returns
+ * true if database contains glob pattern data
+ * false if not or if db is NULL
+
+ # Safety
+ * `db` must be a valid pointer from matchy_open
+ */
+bool matchy_has_glob_data(const struct matchy_t *db);
+
+/*
+ Check if database supports pattern matching (deprecated)
 
  # Parameters
  * `db` - Database handle (must not be NULL)
@@ -602,6 +652,9 @@ bool matchy_has_ip_data(const struct matchy_t *db);
 
  # Safety
  * `db` must be a valid pointer from matchy_open
+
+ # Deprecated
+ Use matchy_has_literal_data or matchy_has_glob_data instead
  */
 bool matchy_has_pattern_data(const struct matchy_t *db);
 

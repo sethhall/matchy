@@ -78,7 +78,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nDatabase statistics:");
     println!("  Total entries: {}", stats.total_entries);
     println!("  IP entries: {}", stats.ip_entries);
-    println!("  Pattern entries: {}", stats.pattern_entries);
+    println!("  Literal entries: {}", stats.literal_entries);
+    println!("  Glob entries: {}", stats.glob_entries);
 
     // Build the database
     println!("\nBuilding database...");

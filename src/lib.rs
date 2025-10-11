@@ -95,6 +95,8 @@ pub mod error;
 pub mod glob;
 /// IP tree builder for MMDB format
 pub mod ip_tree_builder;
+/// Literal string hash table for O(1) exact matching
+pub mod literal_hash;
 /// MISP JSON threat intelligence importer
 pub mod misp_importer;
 pub mod mmap;

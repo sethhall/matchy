@@ -172,6 +172,244 @@ int main() {
 }
 ```
 
+## Building Databases
+
+Matchy provides a command-line tool to build databases from various input formats. The tool automatically detects whether entries are IP addresses, CIDR ranges, or glob patterns.
+
+### Installation
+
+```bash
+cargo install --path .
+# Or run directly:
+cargo build --release
+./target/release/matchy --help
+```
+
+### Input Formats
+
+#### Text Format (Simple - No Metadata)
+
+One entry per line. Supports IP addresses, CIDR ranges, and glob patterns. Lines starting with `#` are comments. Perfect for simple blocklists or allowlists.
+
+**Example: `entries.txt`**
+```text
+# IP addresses
+8.8.8.8
+1.1.1.1
+
+# CIDR ranges
+10.0.0.0/8
+192.168.0.0/16
+
+# Glob patterns
+*.malicious.com
+*.phishing-site.com
+http://*/admin/config.php
+```
+
+**Build command:**
+```bash
+matchy build entries.txt -o database.mmdb
+```
+
+#### CSV Format (With Metadata)
+
+CSV file with headers. The first column must be named `entry` (or `key`) and contains the IP/CIDR/pattern. All other columns become metadata fields. Values are automatically typed as numbers, booleans, or strings.
+
+**Example: `threats.csv`**
+```csv
+entry,threat_level,category,first_seen,blocked
+1.2.3.4,high,malware,2025-01-01,true
+10.0.0.0/8,low,internal,2024-12-15,false
+*.evil.com,critical,phishing,2025-01-10,true
+malware.example.com,high,malware,2025-01-05,true
+http://*/admin/config.php,medium,scanning,2024-11-20,false
+```
+
+**Build command:**
+```bash
+matchy build threats.csv -o threats.mmdb --format csv
+```
+
+**Example: `geoip.csv`**
+```csv
+entry,country,city,latitude,longitude
+8.8.8.0/24,US,Mountain View,37.386,-122.084
+1.1.1.0/24,AU,Sydney,-33.868,151.209
+185.199.108.0/22,US,San Francisco,37.774,-122.419
+```
+
+```bash
+matchy build geoip.csv -o geoip.mmdb --format csv \
+  --database-type "GeoIP-Lite" \
+  --description "Custom GeoIP database"
+```
+
+#### JSON Format (With Complex Metadata)
+
+JSON array with entries containing a `key` (IP/CIDR/pattern) and optional `data` (arbitrary JSON object). Use this for nested data structures or arrays.
+
+**Example: `threats.json`**
+```json
+[
+  {
+    "key": "1.2.3.4",
+    "data": {
+      "threat_level": "high",
+      "category": "malware",
+      "first_seen": "2025-01-01",
+      "tags": ["botnet", "ddos"],
+      "attribution": {
+        "actor": "APT28",
+        "confidence": 0.85
+      }
+    }
+  },
+  {
+    "key": "10.0.0.0/8",
+    "data": {
+      "type": "internal",
+      "description": "Private network range"
+    }
+  },
+  {
+    "key": "*.evil.com",
+    "data": {
+      "threat_level": "critical",
+      "category": "phishing",
+      "blocked": true
+    }
+  }
+]
+```
+
+**Build command:**
+```bash
+matchy build threats.json -o threats.mmdb --format json
+```
+
+#### MISP Format (Threat Intelligence)
+
+MISP (Malware Information Sharing Platform) JSON format for threat intelligence feeds. The tool automatically extracts IP addresses, domains, and URLs with their associated threat data.
+
+**Build command:**
+```bash
+matchy build misp-export.json -o threats.mmdb --format misp
+```
+
+### Build Options
+
+```bash
+matchy build [OPTIONS] <INPUT>... -o <OUTPUT>
+
+Options:
+  -o, --output <FILE>          Output database file (.mmdb extension recommended)
+  -f, --format <FORMAT>        Input format: text, csv, json, or misp [default: text]
+  -t, --database-type <TYPE>   Database type name (e.g., "MyCompany-ThreatIntel")
+  -d, --description <TEXT>     Description text
+      --desc-lang <LANG>       Language code for description [default: en]
+  -v, --verbose                Verbose output during build
+```
+
+### Multiple Input Files
+
+You can specify multiple input files to combine entries:
+
+```bash
+# Combine multiple text files
+matchy build ips.txt domains.txt urls.txt -o combined.mmdb
+
+# Combine multiple CSV files
+matchy build threats1.csv threats2.csv threats3.csv -o threats.mmdb --format csv
+
+# Combine multiple JSON files
+matchy build threat1.json threat2.json threat3.json -o threats.mmdb --format json
+```
+
+### Examples
+
+**Simple blocklist (no metadata):**
+```bash
+# Just match IPs and domains, no data attached
+matchy build blocklist.txt -o blocklist.mmdb
+```
+
+**Threat intelligence database with metadata:**
+```bash
+matchy build threats.csv -o threats.mmdb --format csv \
+  --database-type "ThreatIntel" \
+  --description "Combined IP and domain threat indicators" \
+  --verbose
+```
+
+**GeoIP-style database:**
+```bash
+matchy build geoip.csv -o geoip.mmdb --format csv \
+  --database-type "GeoIP-Lite" \
+  --description "Custom GeoIP database"
+```
+
+**Build from MISP export:**
+```bash
+matchy build misp-export.json -o misp-threats.mmdb --format misp --verbose
+```
+
+### Querying Databases
+
+Once built, query your database using the CLI:
+
+```bash
+# Query an IP address
+matchy query threats.mmdb 1.2.3.4
+# Output: [{"threat_level":"high","category":"malware","first_seen":"2025-01-01","blocked":true}]
+
+# Query a domain (pattern matching)
+matchy query threats.mmdb evil.malicious.com
+# Output: [{"threat_level":"critical","category":"phishing","blocked":true}]
+
+# Query with no match returns empty array
+matchy query threats.mmdb benign.example.com
+# Output: []
+
+# Quiet mode (exit code only: 0=found, 1=not found)
+matchy query threats.mmdb 1.2.3.4 --quiet
+echo $?  # 0 if found, 1 if not found
+```
+
+### Inspecting Databases
+
+View database information and statistics:
+
+```bash
+# Human-readable output
+matchy inspect threats.mmdb
+
+# JSON output
+matchy inspect threats.mmdb --json
+
+# Verbose output with full metadata
+matchy inspect threats.mmdb --verbose
+```
+
+**Example output:**
+```
+Database: threats.mmdb
+Format:   Combined IP+String database
+
+Capabilities:
+  IP lookups:      ✓
+    Entries:       1,234
+  String lookups:  ✓
+    Literals:      ✓ (567 strings)
+    Globs:         ✓ (890 patterns)
+
+Metadata:
+  Database type:   ThreatIntel
+  Description:
+    en: Combined IP and domain threat indicators
+  Build time:      2025-01-15 10:30:45 UTC (1736936445)
+```
+
 ## Performance
 
 Measured on M4 MacBook Air:

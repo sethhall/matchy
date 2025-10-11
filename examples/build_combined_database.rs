@@ -113,9 +113,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "  IP entries:       {} (will build MMDB IP tree)",
         stats.ip_entries
     );
+    println!("  Literal entries:  {}", stats.literal_entries);
     println!(
-        "  Pattern entries:  {} (will build Paraglob automaton)",
-        stats.pattern_entries
+        "  Glob entries:     {} (will build Paraglob automaton)",
+        stats.glob_entries
     );
 
     // ========== BUILD ==========
@@ -157,9 +158,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n{}", "=".repeat(80));
     println!("🎉 SUCCESS! You now have a unified threat intelligence database!");
     println!(
-        "   {} IP ranges + {} patterns in {} bytes",
+        "   {} IP ranges + {} literals + {} globs in {} bytes",
         stats.ip_entries,
-        stats.pattern_entries,
+        stats.literal_entries,
+        stats.glob_entries,
         database_bytes.len()
     );
 

@@ -268,7 +268,12 @@ pub unsafe extern "C" fn matchy_builder_save(
     };
 
     let internal = matchy_builder_t::as_internal_mut(builder);
-    let bytes = match internal.builder.build() {
+    // Replace builder with a dummy one to take ownership
+    let builder_to_build = std::mem::replace(
+        &mut internal.builder,
+        MmdbBuilder::new(MatchMode::CaseSensitive),
+    );
+    let bytes = match builder_to_build.build() {
         Ok(b) => b,
         Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
     };
@@ -315,7 +320,12 @@ pub unsafe extern "C" fn matchy_builder_build(
     }
 
     let internal = matchy_builder_t::as_internal_mut(builder);
-    let bytes = match internal.builder.build() {
+    // Replace builder with a dummy one to take ownership
+    let builder_to_build = std::mem::replace(
+        &mut internal.builder,
+        MmdbBuilder::new(MatchMode::CaseSensitive),
+    );
+    let bytes = match builder_to_build.build() {
         Ok(b) => b,
         Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
     };
@@ -653,7 +663,70 @@ pub unsafe extern "C" fn matchy_has_ip_data(db: *const matchy_t) -> bool {
     internal.database.has_ip_data()
 }
 
-/// Check if database supports pattern matching
+/// Check if database supports string lookups (literals or globs)
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+///
+/// # Returns
+/// * true if database contains literal or glob data
+/// * false if not or if db is NULL
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+#[no_mangle]
+pub unsafe extern "C" fn matchy_has_string_data(db: *const matchy_t) -> bool {
+    if db.is_null() {
+        return false;
+    }
+
+    let internal = matchy_t::as_internal(db);
+    internal.database.has_string_data()
+}
+
+/// Check if database supports literal (exact string) lookups
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+///
+/// # Returns
+/// * true if database contains literal hash data
+/// * false if not or if db is NULL
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+#[no_mangle]
+pub unsafe extern "C" fn matchy_has_literal_data(db: *const matchy_t) -> bool {
+    if db.is_null() {
+        return false;
+    }
+
+    let internal = matchy_t::as_internal(db);
+    internal.database.has_literal_data()
+}
+
+/// Check if database supports glob pattern lookups
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+///
+/// # Returns
+/// * true if database contains glob pattern data
+/// * false if not or if db is NULL
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+#[no_mangle]
+pub unsafe extern "C" fn matchy_has_glob_data(db: *const matchy_t) -> bool {
+    if db.is_null() {
+        return false;
+    }
+
+    let internal = matchy_t::as_internal(db);
+    internal.database.has_glob_data()
+}
+
+/// Check if database supports pattern matching (deprecated)
 ///
 /// # Parameters
 /// * `db` - Database handle (must not be NULL)
@@ -664,14 +737,21 @@ pub unsafe extern "C" fn matchy_has_ip_data(db: *const matchy_t) -> bool {
 ///
 /// # Safety
 /// * `db` must be a valid pointer from matchy_open
+///
+/// # Deprecated
+/// Use matchy_has_literal_data or matchy_has_glob_data instead
 #[no_mangle]
+#[deprecated(
+    since = "0.5.0",
+    note = "Use matchy_has_literal_data or matchy_has_glob_data instead"
+)]
 pub unsafe extern "C" fn matchy_has_pattern_data(db: *const matchy_t) -> bool {
     if db.is_null() {
         return false;
     }
 
     let internal = matchy_t::as_internal(db);
-    internal.database.has_pattern_data()
+    internal.database.has_string_data()
 }
 
 /// Get database metadata as JSON string

@@ -29,13 +29,9 @@ enum Commands {
         #[arg(value_name = "QUERY")]
         query: String,
 
-        /// Output results as JSON
+        /// Quiet mode - no output, only exit code (0 = found, 1 = not found)
         #[arg(short, long)]
-        json: bool,
-
-        /// Show associated data for matched patterns (v2 databases)
-        #[arg(short, long)]
-        data: bool,
+        quiet: bool,
     },
 
     /// Inspect a pattern database
@@ -63,7 +59,7 @@ enum Commands {
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
 
-        /// Input format: text, json, or misp (for MISP JSON threat intel files)
+        /// Input format: text, csv, json, or misp (for MISP JSON threat intel files)
         #[arg(short, long, default_value = "text")]
         format: String,
 
@@ -92,9 +88,8 @@ fn main() -> Result<()> {
         Commands::Query {
             database,
             query,
-            json,
-            data,
-        } => cmd_query(database, query, json, data),
+            quiet,
+        } => cmd_query(database, query, quiet),
         Commands::Inspect {
             database,
             json,
@@ -152,7 +147,7 @@ fn format_cidr(ip_str: &str, prefix_len: u8) -> String {
     }
 }
 
-fn cmd_query(database: PathBuf, query: String, json_output: bool, show_data: bool) -> Result<()> {
+fn cmd_query(database: PathBuf, query: String, quiet: bool) -> Result<()> {
     use matchy::{Database, QueryResult};
 
     // Load database using unified API (supports IP, pattern, and combined formats)
@@ -164,125 +159,56 @@ fn cmd_query(database: PathBuf, query: String, json_output: bool, show_data: boo
         .lookup(&query)
         .with_context(|| format!("Query failed for: {}", query))?;
 
-    if json_output {
-        // JSON output
-        match result {
-            Some(QueryResult::Pattern { pattern_ids, data }) => {
+    // Determine if match was found (for exit code)
+    let found = matches!(result, Some(QueryResult::Pattern { ref pattern_ids, .. }) if !pattern_ids.is_empty())
+        || matches!(result, Some(QueryResult::Ip { .. }));
+
+    if quiet {
+        // Quiet mode: no output, just exit code
+        std::process::exit(if found { 0 } else { 1 });
+    }
+
+    // Default: JSON output with data - always return array for consistency
+    match result {
+        Some(QueryResult::Pattern { pattern_ids, data }) => {
+            if pattern_ids.is_empty() {
+                // No matches - return empty array
+                println!("[]");
+            } else {
+                // Build match results - only include data, not internal pattern IDs
                 let mut results = Vec::new();
-                for (i, &pattern_id) in pattern_ids.iter().enumerate() {
-                    let mut entry = json!({
-                        "pattern_id": pattern_id,
-                        "type": "pattern",
-                    });
-
-                    // Add pattern string if available
-                    if let Some(pattern_str) = db.get_pattern_string(pattern_id) {
-                        entry["pattern"] = json!(pattern_str);
+                for (i, &_pattern_id) in pattern_ids.iter().enumerate() {
+                    // Always include data if available
+                    if let Some(Some(ref d)) = data.get(i) {
+                        results.push(data_value_to_json(d));
                     }
-
-                    if show_data {
-                        if let Some(Some(ref d)) = data.get(i) {
-                            entry["data"] = data_value_to_json(d);
-                        }
-                    }
-
-                    results.push(entry);
                 }
 
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "query": query,
-                        "type": "pattern",
-                        "match_count": results.len(),
-                        "matches": results,
-                    }))?
-                );
-            }
-            Some(QueryResult::Ip { data, prefix_len }) => {
-                let cidr = format_cidr(&query, prefix_len);
-                let mut result = json!({
-                    "query": query,
-                    "type": "ip",
-                    "prefix_len": prefix_len,
-                    "cidr": cidr,
-                });
-
-                if show_data {
-                    result["data"] = data_value_to_json(&data);
-                }
-
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            }
-            Some(QueryResult::NotFound) => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "query": query,
-                        "found": false,
-                    }))?
-                );
-            }
-            None => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "query": query,
-                        "error": "No result",
-                    }))?
-                );
+                // Return array of matches (just the data)
+                println!("{}", serde_json::to_string_pretty(&json!(results))?);
             }
         }
-    } else {
-        // Human-readable output
-        match result {
-            Some(QueryResult::Pattern { pattern_ids, data }) => {
-                if pattern_ids.is_empty() {
-                    println!("No matches found for: {}", query);
-                } else {
-                    println!(
-                        "Found {} pattern match(es) for: {}\n",
-                        pattern_ids.len(),
-                        query
-                    );
-                    for (i, &pattern_id) in pattern_ids.iter().enumerate() {
-                        // Show pattern string
-                        if let Some(pattern_str) = db.get_pattern_string(pattern_id) {
-                            println!("  Pattern: {}", pattern_str);
-                        } else {
-                            // Fallback if pattern string not available
-                            println!("  Pattern ID: {}", pattern_id);
-                        }
+        Some(QueryResult::Ip { data, prefix_len }) => {
+            let cidr = format_cidr(&query, prefix_len);
+            let mut result = data_value_to_json(&data);
 
-                        if show_data {
-                            if let Some(Some(ref d)) = data.get(i) {
-                                println!("  Data:    {}", format_data_value(d, "           "));
-                            } else {
-                                println!("  Data:    (none)");
-                            }
-                        }
-                        println!();
-                    }
-                }
+            // Add CIDR info to the data object
+            if let serde_json::Value::Object(ref mut map) = result {
+                map.insert("cidr".to_string(), json!(cidr));
+                map.insert("prefix_len".to_string(), json!(prefix_len));
             }
-            Some(QueryResult::Ip { data, prefix_len }) => {
-                let cidr = format_cidr(&query, prefix_len);
-                println!("IP address found: {}\n", query);
-                println!("  Network:  {}", cidr);
-                if show_data {
-                    println!("  Data:     {}", format_data_value(&data, "            "));
-                }
-            }
-            Some(QueryResult::NotFound) => {
-                println!("Not found: {}", query);
-            }
-            None => {
-                println!("No result for: {}", query);
-            }
+
+            // Return as array with single element
+            println!("{}", serde_json::to_string_pretty(&json!([result]))?);
+        }
+        Some(QueryResult::NotFound) | None => {
+            // Not found - return empty array
+            println!("[]");
         }
     }
 
-    Ok(())
+    // Exit with appropriate code
+    std::process::exit(if found { 0 } else { 1 });
 }
 
 fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()> {
@@ -294,8 +220,12 @@ fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()
 
     let format_str = db.format();
     let has_ip = db.has_ip_data();
-    let has_pattern = db.has_pattern_data();
-    let pattern_count = db.pattern_count();
+    let has_literals = db.has_literal_data();
+    let has_globs = db.has_glob_data();
+    let has_string = has_literals || has_globs;
+    let ip_count = db.ip_count();
+    let literal_count = db.literal_count();
+    let glob_count = db.glob_count();
     let metadata = db.metadata();
 
     if json_output {
@@ -303,8 +233,12 @@ fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()
             "file": database.display().to_string(),
             "format": format_str,
             "has_ip_data": has_ip,
-            "has_pattern_data": has_pattern,
-            "pattern_count": pattern_count,
+            "has_literal_data": has_literals,
+            "has_glob_data": has_globs,
+            "has_string_data": has_string,
+            "ip_count": ip_count,
+            "literal_count": literal_count,
+            "glob_count": glob_count,
         });
 
         if let Some(meta) = metadata {
@@ -314,13 +248,32 @@ fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("Database: {}", database.display());
-        println!("Format:   {}", format_str);
+        // Display format based on actual content
+        let actual_format = if ip_count > 0 && (literal_count > 0 || glob_count > 0) {
+            "Combined IP+String database"
+        } else if ip_count > 0 {
+            "IP database"
+        } else if literal_count > 0 || glob_count > 0 {
+            "String database"
+        } else {
+            "Empty database"
+        };
+        println!("Format:   {}", actual_format);
         println!();
         println!("Capabilities:");
-        println!("  IP lookups:      {}", if has_ip { "✓" } else { "✗" });
-        println!("  Pattern lookups: {}", if has_pattern { "✓" } else { "✗" });
-        if has_pattern {
-            println!("  Pattern count:   {}", pattern_count);
+        // Only show IP lookups as available if there are actual IP entries
+        if ip_count > 0 {
+            println!("  IP lookups:      ✓");
+            println!("    Entries:       {}", ip_count);
+        } else {
+            println!("  IP lookups:      ✗");
+        }
+        println!("  String lookups:  {}", if has_string { "✓" } else { "✗" });
+        if has_literals {
+            println!("    Literals:      ✓ ({} strings)", literal_count);
+        }
+        if has_globs {
+            println!("    Globs:         ✓ ({} patterns)", glob_count);
         }
 
         if let Some(meta) = metadata {
@@ -457,6 +410,91 @@ fn cmd_build(
                 println!("  Total: {} entries", total_count);
             }
         }
+        "csv" => {
+            // Read entries with data from CSV file(s)
+            // First column must be named "entry" (or "key") containing IP/CIDR/pattern
+            // Remaining columns become metadata fields
+            let mut total_entries = 0;
+
+            for input in &inputs {
+                if verbose && inputs.len() > 1 {
+                    println!("  Reading: {}...", input.display());
+                }
+
+                let file = fs::File::open(input)
+                    .with_context(|| format!("Failed to open CSV file: {}", input.display()))?;
+                let mut reader = csv::Reader::from_reader(file);
+
+                // Get headers
+                let headers = reader.headers().context("Failed to read CSV headers")?;
+
+                // Find the entry column (try "entry" or "key")
+                let entry_col = headers
+                    .iter()
+                    .position(|h| h == "entry" || h == "key")
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "CSV must have an 'entry' or 'key' column. Found headers: {}",
+                            headers.iter().collect::<Vec<_>>().join(", ")
+                        )
+                    })?;
+
+                // Get other column names for metadata
+                let data_cols: Vec<(usize, String)> = headers
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != entry_col)
+                    .map(|(i, name)| (i, name.to_string()))
+                    .collect();
+
+                // Process each row
+                for (row_num, result) in reader.records().enumerate() {
+                    let record = result.context("Failed to read CSV record")?;
+
+                    // Get the entry value
+                    let entry = record.get(entry_col).ok_or_else(|| {
+                        anyhow::anyhow!("Missing entry column at row {}", row_num + 2)
+                    })?;
+
+                    // Build data map from other columns
+                    let mut data = HashMap::new();
+                    for (col_idx, col_name) in &data_cols {
+                        if let Some(value) = record.get(*col_idx) {
+                            if !value.is_empty() {
+                                // Try to parse as number, otherwise treat as string
+                                let data_value = if let Ok(i) = value.parse::<i64>() {
+                                    DataValue::Int32(i as i32)
+                                } else if let Ok(u) = value.parse::<u64>() {
+                                    DataValue::Uint64(u)
+                                } else if let Ok(f) = value.parse::<f64>() {
+                                    DataValue::Double(f)
+                                } else if value == "true" || value == "false" {
+                                    DataValue::Bool(value == "true")
+                                } else {
+                                    DataValue::String(value.to_string())
+                                };
+                                data.insert(col_name.clone(), data_value);
+                            }
+                        }
+                    }
+
+                    builder.add_entry(entry, data)?;
+                    total_entries += 1;
+
+                    if verbose && total_entries % 1000 == 0 {
+                        println!("    Added {} entries...", total_entries);
+                    }
+                }
+
+                if verbose && inputs.len() > 1 {
+                    println!("    {} entries from this file", reader.position().line());
+                }
+            }
+
+            if verbose {
+                println!("  Total: {} entries", total_entries);
+            }
+        }
         "json" => {
             // Read entries with data from JSON file(s)
             // Format: [{"key": "192.168.0.0/16" or "*.example.com", "data": {...}}]
@@ -502,32 +540,24 @@ fn cmd_build(
             }
         }
         "misp" => {
-            // Read MISP JSON threat intelligence file(s)
+            // Read MISP JSON threat intelligence file(s) with streaming (low memory)
             use matchy::misp_importer::MispImporter;
 
             if verbose {
-                println!("  Loading MISP JSON files...");
+                println!("  Processing MISP JSON files (streaming mode)...");
             }
 
-            // Convert Vec<PathBuf> to Vec<&Path> for from_files
+            // Convert Vec<PathBuf> to Vec<&Path> for build_from_files
             let input_refs: Vec<&PathBuf> = inputs.iter().collect();
-            let importer =
-                MispImporter::from_files(&input_refs).context("Failed to load MISP JSON files")?;
 
-            if verbose {
-                let stats = importer.stats();
-                println!("  Events:          {}", stats.total_events);
-                println!("  Attributes:      {}", stats.total_attributes);
-                println!("  Objects:         {}", stats.total_objects);
-                println!();
-                println!("  Building MISP database...");
-            }
-
-            // Build the database using MISP importer
-            // This will populate the builder with all indicators and metadata
-            builder = importer
-                .build_database(MatchMode::CaseSensitive)
-                .context("Failed to build MISP database")?;
+            // Use streaming import to process one file at a time
+            // This keeps memory usage low even for very large datasets
+            builder = MispImporter::build_from_files(
+                &input_refs,
+                MatchMode::CaseSensitive,
+                false, // Use full metadata
+            )
+            .context("Failed to process MISP JSON files")?;
 
             if verbose {
                 let stats = builder.stats();
@@ -535,33 +565,44 @@ fn cmd_build(
             }
         }
         _ => {
-            anyhow::bail!("Unknown format: {}. Use 'text', 'json', or 'misp'", format);
+            anyhow::bail!(
+                "Unknown format: {}. Use 'text', 'csv', 'json', or 'misp'",
+                format
+            );
         }
     }
 
-    // Show statistics
+    // Always show statistics
     let stats = builder.stats();
+    println!("\nBuilding database:");
+    println!("  Total entries:   {}", stats.total_entries);
+    println!("  IP entries:      {}", stats.ip_entries);
+    println!("  Literal entries: {}", stats.literal_entries);
+    println!("  Glob entries:    {}", stats.glob_entries);
+
     if verbose {
-        println!("\nStatistics:");
-        println!("  Total entries:   {}", stats.total_entries);
-        println!("  IP entries:      {}", stats.ip_entries);
-        println!("  Pattern entries: {}", stats.pattern_entries);
-        println!("\nBuilding database...");
+        println!("\nSerializing...");
     }
 
     let database_bytes = builder.build().context("Failed to build database")?;
 
     if verbose {
-        println!("Saving to disk...");
+        println!("Writing to disk...");
     }
 
     fs::write(&output, &database_bytes)
         .with_context(|| format!("Failed to save database: {}", output.display()))?;
 
+    // Always show success message
+    println!("\n✓ Database built successfully!");
+    println!("  Output:        {}", output.display());
+    println!(
+        "  Database size: {:.2} MB ({} bytes)",
+        database_bytes.len() as f64 / (1024.0 * 1024.0),
+        database_bytes.len()
+    );
+
     if verbose {
-        println!("\n✓ Success!");
-        println!("  Database size: {} bytes", database_bytes.len());
-        println!("  Output:        {}", output.display());
         println!("  Format:        MMDB (extended with patterns)");
     }
 

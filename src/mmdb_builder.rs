@@ -7,12 +7,13 @@ use crate::data_section::{DataEncoder, DataValue};
 use crate::error::ParaglobError;
 use crate::glob::MatchMode;
 use crate::ip_tree_builder::IpTreeBuilder;
+use crate::literal_hash::LiteralHashBuilder;
 use crate::mmdb::types::RecordSize;
 use crate::paraglob_offset::ParaglobBuilder;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-/// Entry type auto-detected from input
+/// Entry type classification
 #[derive(Debug, Clone)]
 pub enum EntryType {
     /// IP address or CIDR block with prefix length
@@ -22,24 +23,27 @@ pub enum EntryType {
         /// Prefix length (0-32 for IPv4, 0-128 for IPv6)
         prefix_len: u8,
     },
-    /// Glob pattern
-    Pattern(String),
+    /// Literal string (exact match, goes in hash table)
+    Literal(String),
+    /// Glob pattern (wildcard match, goes in Aho-Corasick)
+    Glob(String),
 }
 
-/// Single row of input data
+/// Lightweight entry reference (just entry type + offset, no data)
 #[derive(Debug, Clone)]
-pub struct DataEntry {
-    /// The original key (IP/CIDR or pattern)
-    pub key: String,
-    /// Detected entry type
-    pub entry_type: EntryType,
-    /// Associated data values
-    pub data: HashMap<String, DataValue>,
+struct EntryRef {
+    entry_type: EntryType,
+    data_offset: u32,
 }
 
 /// Unified database builder
 pub struct MmdbBuilder {
-    entries: Vec<DataEntry>,
+    /// Lightweight entry references (key + offset only)
+    entries: Vec<EntryRef>,
+    /// Data encoder for streaming data encoding
+    data_encoder: DataEncoder,
+    /// Deduplication cache (data hash -> offset)
+    data_cache: HashMap<Vec<u8>, u32>,
     match_mode: MatchMode,
     /// Optional custom database type name
     database_type: Option<String>,
@@ -52,6 +56,8 @@ impl MmdbBuilder {
     pub fn new(match_mode: MatchMode) -> Self {
         Self {
             entries: Vec::new(),
+            data_encoder: DataEncoder::new(),
+            data_cache: HashMap::new(),
             match_mode,
             database_type: None,
             description: HashMap::new(),
@@ -99,36 +105,153 @@ impl MmdbBuilder {
     }
 
     /// Add an entry with auto-detection
+    ///
+    /// Automatically detects whether the key is an IP address, literal string, or glob pattern.
+    /// For explicit control, use `add_ip()`, `add_literal()`, or `add_glob()`.
     pub fn add_entry(
         &mut self,
         key: &str,
         data: HashMap<String, DataValue>,
     ) -> Result<(), ParaglobError> {
         let entry_type = Self::detect_entry_type(key)?;
+        let data_offset = self.encode_and_deduplicate_data(data);
 
-        self.entries.push(DataEntry {
-            key: key.to_string(),
+        self.entries.push(EntryRef {
             entry_type,
-            data,
+            data_offset,
         });
 
         Ok(())
     }
 
-    /// Auto-detect if key is an IP/CIDR or pattern
-    fn detect_entry_type(key: &str) -> Result<EntryType, ParaglobError> {
-        // Try parsing as plain IP address first (most conservative)
+    /// Add a literal string pattern (exact match only, no wildcards)
+    ///
+    /// Use this when the string contains characters like '*', '?', or '[' that should be
+    /// matched literally rather than as glob wildcards.
+    ///
+    /// # Example
+    /// ```
+    /// # use matchy::{DatabaseBuilder, MatchMode, DataValue};
+    /// # use std::collections::HashMap;
+    /// let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+    /// let mut data = HashMap::new();
+    /// data.insert("note".to_string(), DataValue::String("literal".to_string()));
+    ///
+    /// // This has '[' but we want to match it literally
+    /// builder.add_literal("file[1].txt", data)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn add_literal(
+        &mut self,
+        pattern: &str,
+        data: HashMap<String, DataValue>,
+    ) -> Result<(), ParaglobError> {
+        let data_offset = self.encode_and_deduplicate_data(data);
+        self.entries.push(EntryRef {
+            entry_type: EntryType::Literal(pattern.to_string()),
+            data_offset,
+        });
+        Ok(())
+    }
+
+    /// Add a glob pattern (with wildcard matching)
+    ///
+    /// Use this to explicitly mark a pattern for glob matching, even if it doesn't
+    /// contain obvious wildcard characters.
+    ///
+    /// # Example
+    /// ```
+    /// # use matchy::{DatabaseBuilder, MatchMode, DataValue};
+    /// # use std::collections::HashMap;
+    /// let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+    /// let mut data = HashMap::new();
+    /// data.insert("category".to_string(), DataValue::String("malware".to_string()));
+    ///
+    /// builder.add_glob("*.evil.com", data)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn add_glob(
+        &mut self,
+        pattern: &str,
+        data: HashMap<String, DataValue>,
+    ) -> Result<(), ParaglobError> {
+        let data_offset = self.encode_and_deduplicate_data(data);
+        self.entries.push(EntryRef {
+            entry_type: EntryType::Glob(pattern.to_string()),
+            data_offset,
+        });
+        Ok(())
+    }
+
+    /// Encode data and deduplicate to save memory
+    fn encode_and_deduplicate_data(&mut self, data: HashMap<String, DataValue>) -> u32 {
+        // Create dedup key
+        let dedup_key = format!("{:?}", data);
+        let dedup_key_bytes = dedup_key.as_bytes().to_vec();
+
+        // Check cache
+        if let Some(&offset) = self.data_cache.get(&dedup_key_bytes) {
+            return offset;
+        }
+
+        // Encode and cache
+        let data_value = DataValue::Map(data);
+        let offset = self.data_encoder.encode(&data_value);
+        self.data_cache.insert(dedup_key_bytes, offset);
+        offset
+    }
+
+    /// Add an IP address or CIDR block
+    ///
+    /// Use this to explicitly mark an entry as an IP address. Will return an error
+    /// if the string is not a valid IP address or CIDR notation.
+    ///
+    /// # Arguments
+    /// * `ip_or_cidr` - IP address or CIDR range (e.g., "192.168.1.0/24")
+    /// * `data` - HashMap of key-value pairs to associate with the IP
+    ///
+    /// # Errors
+    /// Returns an error if the IP address or CIDR format is invalid.
+    ///
+    /// # Example
+    /// ```
+    /// # use matchy::{DatabaseBuilder, MatchMode, DataValue};
+    /// # use std::collections::HashMap;
+    /// let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+    /// let mut data = HashMap::new();
+    /// data.insert("country".to_string(), DataValue::String("US".to_string()));
+    ///
+    /// builder.add_ip("192.168.1.0/24", data)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn add_ip(
+        &mut self,
+        ip_or_cidr: &str,
+        data: HashMap<String, DataValue>,
+    ) -> Result<(), ParaglobError> {
+        let entry_type = Self::parse_ip_entry(ip_or_cidr)?;
+        let data_offset = self.encode_and_deduplicate_data(data);
+
+        self.entries.push(EntryRef {
+            entry_type,
+            data_offset,
+        });
+        Ok(())
+    }
+
+    /// Parse IP address or CIDR (used by add_ip)
+    fn parse_ip_entry(key: &str) -> Result<EntryType, ParaglobError> {
+        // Try parsing as plain IP address first
         if let Ok(addr) = key.parse::<IpAddr>() {
             let prefix_len = if addr.is_ipv4() { 32 } else { 128 };
             return Ok(EntryType::IpAddress { addr, prefix_len });
         }
 
-        // Check for CIDR notation (contains '/' and valid format)
+        // Check for CIDR notation
         if let Some(slash_pos) = key.find('/') {
             let addr_str = &key[..slash_pos];
             let prefix_str = &key[slash_pos + 1..];
 
-            // Only try CIDR parsing if the prefix part looks numeric and address part looks like IP
             if let (Ok(addr), Ok(prefix_len)) =
                 (addr_str.parse::<IpAddr>(), prefix_str.parse::<u8>())
             {
@@ -138,47 +261,61 @@ impl MmdbBuilder {
                     return Ok(EntryType::IpAddress { addr, prefix_len });
                 }
             }
-            // If CIDR parsing fails, fall through to pattern handling
         }
 
-        // Check for glob pattern characters
+        Err(ParaglobError::InvalidPattern(format!(
+            "Invalid IP address or CIDR: {}",
+            key
+        )))
+    }
+
+    /// Auto-detect if key is an IP/CIDR, literal, or glob pattern
+    fn detect_entry_type(key: &str) -> Result<EntryType, ParaglobError> {
+        // Try parsing as IP address first (most specific)
+        if Self::parse_ip_entry(key).is_ok() {
+            return Self::parse_ip_entry(key);
+        }
+
+        // Check for glob pattern characters - but validate they form a valid glob
         if key.contains('*') || key.contains('?') || key.contains('[') {
-            return Ok(EntryType::Pattern(key.to_string()));
+            // Try to actually parse it as a glob to see if it's valid
+            // Use CaseSensitive for validation (mode doesn't matter for syntax checking)
+            if crate::glob::GlobPattern::new(key, crate::glob::MatchMode::CaseSensitive).is_ok() {
+                return Ok(EntryType::Glob(key.to_string()));
+            }
+            // If it contains glob-like chars but isn't a valid glob, treat as literal
         }
 
-        // Otherwise, treat as literal string pattern
-        Ok(EntryType::Pattern(key.to_string()))
+        // Otherwise, treat as literal string
+        Ok(EntryType::Literal(key.to_string()))
     }
 
     /// Build the unified MMDB database
-    pub fn build(&self) -> Result<Vec<u8>, ParaglobError> {
-        // Separate IP and pattern entries
+    pub fn build(mut self) -> Result<Vec<u8>, ParaglobError> {
+        // Data is already encoded - just extract from the builder
+        let data_section = self.data_encoder.into_bytes();
+
+        // Clear cache to free memory
+        self.data_cache.clear();
+
+        // Separate entries by type (using pre-encoded offsets)
         let mut ip_entries = Vec::new();
-        let mut pattern_entries = Vec::new();
+        let mut literal_entries = Vec::new();
+        let mut glob_entries = Vec::new();
 
         for entry in &self.entries {
             match &entry.entry_type {
                 EntryType::IpAddress { addr, prefix_len } => {
-                    ip_entries.push((addr, *prefix_len, &entry.data));
+                    ip_entries.push((*addr, *prefix_len, entry.data_offset));
                 }
-                EntryType::Pattern(pattern) => {
-                    pattern_entries.push((pattern.as_str(), &entry.data));
+                EntryType::Literal(pattern) => {
+                    literal_entries.push((pattern.as_str(), entry.data_offset));
+                }
+                EntryType::Glob(pattern) => {
+                    glob_entries.push((pattern.as_str(), entry.data_offset));
                 }
             }
         }
-
-        // Build data section with all data
-        let mut data_encoder = DataEncoder::new();
-        let mut data_offsets = HashMap::new();
-
-        // Encode data for both IPs and patterns (deduplicated)
-        for entry in &self.entries {
-            let data_value = DataValue::Map(entry.data.clone());
-            let offset = data_encoder.encode(&data_value);
-            data_offsets.insert(entry.key.clone(), offset);
-        }
-
-        let data_section = data_encoder.into_bytes();
 
         // Always build IP tree structure (even if empty) to maintain MMDB format
         // This ensures pattern-only databases still work with the Database API
@@ -195,12 +332,9 @@ impl MmdbBuilder {
                 IpTreeBuilder::new_v4(record_size)
             };
 
-            // Insert all IP entries
-            for entry in &self.entries {
-                if let EntryType::IpAddress { addr, prefix_len } = &entry.entry_type {
-                    let data_offset = data_offsets[&entry.key];
-                    tree_builder.insert(*addr, *prefix_len, data_offset)?;
-                }
+            // Insert all IP entries using pre-encoded offsets
+            for (addr, prefix_len, data_offset) in &ip_entries {
+                tree_builder.insert(*addr, *prefix_len, *data_offset)?;
             }
 
             // Build the tree
@@ -216,15 +350,14 @@ impl MmdbBuilder {
             (tree_bytes, node_cnt, record_size, 4)
         };
 
-        // Build pattern section if we have pattern entries
-        let (has_patterns, pattern_section_bytes) = if !pattern_entries.is_empty() {
+        // Build glob pattern section if we have glob entries (NOT literals)
+        let (has_globs, glob_section_bytes) = if !glob_entries.is_empty() {
             let mut pattern_builder = ParaglobBuilder::new(self.match_mode);
             let mut pattern_data = Vec::new();
 
-            for (pattern, _data) in &pattern_entries {
+            for (pattern, data_offset) in &glob_entries {
                 let pattern_id = pattern_builder.add_pattern(pattern)?;
-                let data_offset = data_offsets[*pattern];
-                pattern_data.push((pattern_id, data_offset));
+                pattern_data.push((pattern_id, *data_offset));
             }
 
             let paraglob = pattern_builder.build()?;
@@ -254,6 +387,22 @@ impl MmdbBuilder {
             section[4..8].copy_from_slice(&paraglob_size.to_le_bytes());
 
             (true, section)
+        } else {
+            (false, Vec::new())
+        };
+
+        // Build literal hash table section for literal_entries
+        let (has_literals, literal_section_bytes) = if !literal_entries.is_empty() {
+            let mut literal_builder = LiteralHashBuilder::new();
+            let mut literal_pattern_data = Vec::new();
+
+            for (next_pattern_id, (literal, data_offset)) in literal_entries.iter().enumerate() {
+                literal_builder.add_pattern(literal.to_string(), next_pattern_id as u32);
+                literal_pattern_data.push((next_pattern_id as u32, *data_offset));
+            }
+
+            let literal_bytes = literal_builder.build(&literal_pattern_data)?;
+            (true, literal_bytes)
         } else {
             (false, Vec::new())
         };
@@ -292,7 +441,7 @@ impl MmdbBuilder {
             );
             // Database type - use custom if provided, otherwise auto-generate
             let db_type = self.database_type.clone().unwrap_or_else(|| {
-                if has_patterns {
+                if has_globs || !literal_entries.is_empty() {
                     if !ip_entries.is_empty() {
                         "Paraglob-Combined-IP-Pattern".to_string()
                     } else {
@@ -339,6 +488,20 @@ impl MmdbBuilder {
                 }),
             );
 
+            // Add entry counts for easy inspection
+            metadata.insert(
+                "ip_entry_count".to_string(),
+                DataValue::Uint32(ip_entries.len() as u32),
+            );
+            metadata.insert(
+                "literal_entry_count".to_string(),
+                DataValue::Uint32(literal_entries.len() as u32),
+            );
+            metadata.insert(
+                "glob_entry_count".to_string(),
+                DataValue::Uint32(glob_entries.len() as u32),
+            );
+
             // Encode metadata
             let mut meta_encoder = DataEncoder::new();
             let metadata_value = DataValue::Map(metadata);
@@ -348,10 +511,16 @@ impl MmdbBuilder {
             // Save metadata for end of file (will be added after pattern section)
             // This ensures it's in the last 128KB for the metadata marker search
 
-            // Add MMDB_PATTERN separator before patterns (if any)
-            if has_patterns {
+            // Add MMDB_PATTERN separator before globs (if any)
+            if has_globs {
                 database.extend_from_slice(b"MMDB_PATTERN\x00\x00\x00\x00");
-                database.extend_from_slice(&pattern_section_bytes);
+                database.extend_from_slice(&glob_section_bytes);
+            }
+
+            // Add MMDB_LITERAL separator before literals (if any)
+            if has_literals {
+                database.extend_from_slice(b"MMDB_LITERAL\x00\x00\x00\x00");
+                database.extend_from_slice(&literal_section_bytes);
             }
 
             // Add metadata at the END of the file so it's within the 128KB search window
@@ -365,19 +534,22 @@ impl MmdbBuilder {
     /// Get statistics about the builder
     pub fn stats(&self) -> BuilderStats {
         let mut ip_count = 0;
-        let mut pattern_count = 0;
+        let mut literal_count = 0;
+        let mut glob_count = 0;
 
         for entry in &self.entries {
             match &entry.entry_type {
                 EntryType::IpAddress { .. } => ip_count += 1,
-                EntryType::Pattern(_) => pattern_count += 1,
+                EntryType::Literal(_) => literal_count += 1,
+                EntryType::Glob(_) => glob_count += 1,
             }
         }
 
         BuilderStats {
             total_entries: self.entries.len(),
             ip_entries: ip_count,
-            pattern_entries: pattern_count,
+            literal_entries: literal_count,
+            glob_entries: glob_count,
         }
     }
 }
@@ -389,8 +561,10 @@ pub struct BuilderStats {
     pub total_entries: usize,
     /// Number of IP address/CIDR entries
     pub ip_entries: usize,
-    /// Number of pattern entries
-    pub pattern_entries: usize,
+    /// Number of literal string entries (exact match)
+    pub literal_entries: usize,
+    /// Number of glob pattern entries (wildcard match)
+    pub glob_entries: usize,
 }
 
 #[cfg(test)]
@@ -437,8 +611,8 @@ mod tests {
     fn test_detect_pattern_wildcard() {
         let result = MmdbBuilder::detect_entry_type("*.evil.com").unwrap();
         match result {
-            EntryType::Pattern(p) => assert_eq!(p, "*.evil.com"),
-            _ => panic!("Expected pattern"),
+            EntryType::Glob(p) => assert_eq!(p, "*.evil.com"),
+            _ => panic!("Expected glob pattern"),
         }
     }
 
@@ -446,8 +620,8 @@ mod tests {
     fn test_detect_pattern_literal() {
         let result = MmdbBuilder::detect_entry_type("evil.com").unwrap();
         match result {
-            EntryType::Pattern(p) => assert_eq!(p, "evil.com"),
-            _ => panic!("Expected pattern"),
+            EntryType::Literal(p) => assert_eq!(p, "evil.com"),
+            _ => panic!("Expected literal pattern"),
         }
     }
 }

@@ -53,7 +53,8 @@ void test_incremental_build() {
     pg.compile();
     
     // Check pattern count
-    ASSERT_EQ(pg.pattern_count(), 3u, "Wrong pattern count");
+    auto all_patterns = pg.get_all_patterns_with_ids();
+    ASSERT_EQ(all_patterns.size(), 3u, "Wrong pattern count");
     
     // Test matching
     auto matches = pg.get("test.cpp");
