@@ -224,9 +224,13 @@ pub unsafe extern "C" fn MMDB_lookup_string(
 
 /// Lookup an IP address from sockaddr
 ///
+/// Note: This function is only available on Unix platforms as it uses Unix-specific socket types.
+/// On Windows, use `MMDB_lookup_string` instead.
+///
 /// # Safety
 /// - `mmdb` must be a valid opened database
 /// - `sockaddr` must be a valid socket address
+#[cfg(unix)]
 #[no_mangle]
 pub unsafe extern "C" fn MMDB_lookup_sockaddr(
     mmdb: *const MMDB_s,
