@@ -53,6 +53,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 rustc-hash = "2.0"  # Fast FxHash for literal pattern lookups
 csv = "1.3"
+memory-stats = "1.2"  # For tracking memory usage during builds
 
 [dev-dependencies]
 # Testing dependencies

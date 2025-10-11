@@ -152,7 +152,7 @@ impl IpTreeBuilder {
                 }
             };
 
-            if depth + 1 >= prefix_len {
+            if depth + 1 == prefix_len {
                 // Reached target depth - set to data
                 let current_node = &mut self.nodes[node_id as usize];
                 if bit == 0 {
@@ -181,11 +181,34 @@ impl IpTreeBuilder {
                     // Continue to existing node
                     node_id = child_id;
                 }
-                NodePointer::Data(_) => {
-                    // Hit existing data before reaching target
-                    // This means a less specific route already exists
-                    // Keep the existing data (don't override)
-                    return Ok(());
+                NodePointer::Data(existing_data_offset) => {
+                    // Hit existing data before reaching target depth.
+                    // This means a less specific prefix already exists (e.g., /24)
+                    // and we're trying to insert a more specific one (e.g., /32).
+                    //
+                    // We need to:
+                    // 1. Convert this data leaf into a node
+                    // 2. Make both children point to the existing data (to preserve less specific match)
+                    // 3. Continue down the tree to insert the more specific prefix
+
+                    let new_node_id = self.allocate_node();
+
+                    // Make both children of the new node point to the existing data
+                    // This preserves the less specific match for all IPs under this prefix
+                    self.nodes[new_node_id as usize].left = NodePointer::Data(existing_data_offset);
+                    self.nodes[new_node_id as usize].right =
+                        NodePointer::Data(existing_data_offset);
+
+                    // Update parent to point to new node instead of data
+                    let current_node = &mut self.nodes[node_id as usize];
+                    if bit == 0 {
+                        current_node.left = NodePointer::Node(new_node_id);
+                    } else {
+                        current_node.right = NodePointer::Node(new_node_id);
+                    }
+
+                    // Continue traversal from the new node
+                    node_id = new_node_id;
                 }
             }
         }
