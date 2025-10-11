@@ -1,27 +1,33 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "paraglob/paraglob.hpp"
+#include "matchy/matchy.hpp"
 
 #include <algorithm>
 #include <sstream>
+#include <fstream>
+#include <cstdio>
+#include <unistd.h>
 
 // Use C functions from the matchy namespace
-using matchy::paraglob_db;
-using matchy::paraglob_builder;
-using matchy::paraglob_error_t;
-using matchy::paraglob_error_t_PARAGLOB_SUCCESS;
-using matchy::paraglob_open_mmap;
-using matchy::paraglob_open_buffer;
-using matchy::paraglob_close;
-using matchy::paraglob_find_all;
-using matchy::paraglob_free_results;
-using matchy::paraglob_pattern_count;
-using matchy::paraglob_version;
-using matchy::paraglob_builder_new;
-using matchy::paraglob_builder_add;
-using matchy::paraglob_builder_compile;
-using matchy::paraglob_builder_free;
-using matchy::paraglob_save;
+using matchy::matchy_t;
+using matchy::matchy_builder_t;
+using matchy::matchy_result_t;
+using matchy::matchy_builder_new;
+using matchy::matchy_builder_add;
+using matchy::matchy_builder_save;
+using matchy::matchy_builder_build;
+using matchy::matchy_builder_free;
+using matchy::matchy_open;
+using matchy::matchy_open_buffer;
+using matchy::matchy_close;
+using matchy::matchy_query;
+using matchy::matchy_free_result;
+using matchy::matchy_free_string;
+using matchy::matchy_format;
+using matchy::matchy_has_pattern_data;
+using matchy::matchy_get_pattern_string;
+using matchy::matchy_pattern_count;
+// MATCHY_SUCCESS is a #define, not a namespace member
 
 namespace paraglob {
 
@@ -31,6 +37,8 @@ namespace paraglob {
 
 Paraglob::Paraglob()
     : db_(nullptr)
+    , builder_(nullptr)
+    , temp_file_()
     , is_binary_mode_(false)
     , is_compiled_(false)
 {
@@ -38,6 +46,8 @@ Paraglob::Paraglob()
 
 Paraglob::Paraglob(const std::vector<std::string>& patterns)
     : db_(nullptr)
+    , builder_(nullptr)
+    , temp_file_()
     , patterns_(patterns)
     , is_binary_mode_(false)
     , is_compiled_(false)
@@ -47,6 +57,8 @@ Paraglob::Paraglob(const std::vector<std::string>& patterns)
 
 Paraglob::Paraglob(std::unique_ptr<std::vector<uint8_t>> serialized)
     : db_(nullptr)
+    , builder_(nullptr)
+    , temp_file_()
     , is_binary_mode_(true)
     , is_compiled_(true)
 {
@@ -55,7 +67,7 @@ Paraglob::Paraglob(std::unique_ptr<std::vector<uint8_t>> serialized)
     }
     
     // Load from buffer
-    db_ = paraglob_open_buffer(serialized->data(), serialized->size());
+    db_ = matchy_open_buffer(serialized->data(), serialized->size());
     if (db_ == nullptr) {
         throw std::runtime_error("Failed to load Paraglob from serialized data");
     }
@@ -63,19 +75,30 @@ Paraglob::Paraglob(std::unique_ptr<std::vector<uint8_t>> serialized)
 
 Paraglob::~Paraglob() {
     if (db_ != nullptr) {
-        paraglob_close(db_);
+        matchy_close(db_);
         db_ = nullptr;
+    }
+    if (builder_ != nullptr) {
+        matchy_builder_free(builder_);
+        builder_ = nullptr;
+    }
+    // Clean up temp file if it exists
+    if (!temp_file_.empty()) {
+        std::remove(temp_file_.c_str());
     }
 }
 
 Paraglob::Paraglob(Paraglob&& other) noexcept
     : db_(other.db_)
+    , builder_(other.builder_)
+    , temp_file_(std::move(other.temp_file_))
     , patterns_(std::move(other.patterns_))
     , pattern_ids_(std::move(other.pattern_ids_))
     , is_binary_mode_(other.is_binary_mode_)
     , is_compiled_(other.is_compiled_)
 {
     other.db_ = nullptr;
+    other.builder_ = nullptr;
     other.is_binary_mode_ = false;
     other.is_compiled_ = false;
 }
@@ -84,11 +107,19 @@ Paraglob& Paraglob::operator=(Paraglob&& other) noexcept {
     if (this != &other) {
         // Clean up existing resources
         if (db_ != nullptr) {
-            paraglob_close(db_);
+            matchy_close(db_);
+        }
+        if (builder_ != nullptr) {
+            matchy_builder_free(builder_);
+        }
+        if (!temp_file_.empty()) {
+            std::remove(temp_file_.c_str());
         }
         
         // Move from other
         db_ = other.db_;
+        builder_ = other.builder_;
+        temp_file_ = std::move(other.temp_file_);
         patterns_ = std::move(other.patterns_);
         pattern_ids_ = std::move(other.pattern_ids_);
         is_binary_mode_ = other.is_binary_mode_;
@@ -96,6 +127,7 @@ Paraglob& Paraglob::operator=(Paraglob&& other) noexcept {
         
         // Clear other
         other.db_ = nullptr;
+        other.builder_ = nullptr;
         other.is_binary_mode_ = false;
         other.is_compiled_ = false;
     }
@@ -125,30 +157,51 @@ void Paraglob::compile() {
         throw std::runtime_error("Cannot compile empty pattern set");
     }
     
-    // Use builder API
-    paraglob_builder* builder = paraglob_builder_new(1);  // case-sensitive by default
-    if (builder == nullptr) {
+    // Create builder
+    builder_ = matchy_builder_new();
+    if (builder_ == nullptr) {
         throw std::runtime_error("Failed to create pattern builder");
     }
     
-    // Add all patterns
+    // Add all patterns with empty JSON data (pattern-only mode)
     for (const auto& pattern : patterns_) {
-        if (paraglob_builder_add(builder, pattern.c_str()) != paraglob_error_t_PARAGLOB_SUCCESS) {
-            paraglob_builder_free(builder);
+        if (matchy_builder_add(builder_, pattern.c_str(), "{}") != MATCHY_SUCCESS) {
+            matchy_builder_free(builder_);
+            builder_ = nullptr;
             throw std::runtime_error("Failed to add pattern: " + pattern);
         }
     }
     
-    // Compile
-    db_ = paraglob_builder_compile(builder);
-    // builder is now consumed - don't free it
+    // Save to temp file and load it
+    temp_file_ = get_temp_filename();
+    if (matchy_builder_save(builder_, temp_file_.c_str()) != MATCHY_SUCCESS) {
+        matchy_builder_free(builder_);
+        builder_ = nullptr;
+        throw std::runtime_error("Failed to save compiled patterns");
+    }
     
+    // Free builder - no longer needed
+    matchy_builder_free(builder_);
+    builder_ = nullptr;
+    
+    // Load from file
+    db_ = matchy_open(temp_file_.c_str());
     if (db_ == nullptr) {
-        throw std::runtime_error("Failed to compile patterns");
+        throw std::runtime_error("Failed to load compiled patterns");
     }
     
     is_binary_mode_ = true;  // Now in binary mode
     is_compiled_ = true;
+}
+
+std::string Paraglob::get_temp_filename() {
+    char temp_template[] = "/tmp/paraglob_XXXXXX";
+    int fd = mkstemp(temp_template);
+    if (fd == -1) {
+        throw std::runtime_error("Failed to create temp file");
+    }
+    close(fd);
+    return std::string(temp_template);
 }
 
 // ============================================================================
@@ -160,32 +213,44 @@ std::vector<std::string> Paraglob::get(const std::string& text) {
         throw std::runtime_error("Paraglob must be compiled before matching");
     }
     
-    size_t count = 0;
-    int* pattern_ids = paraglob_find_all(db_, text.c_str(), &count);
+    // Use matchy query - it returns pattern matches
+    matchy_result_t result = matchy_query(db_, text.c_str());
     
-    std::vector<std::string> result;
-    if (pattern_ids != nullptr && count > 0) {
-        // Build pattern ID to string mapping if needed
-        auto all_patterns = get_all_patterns_with_ids();
-        
-        for (size_t i = 0; i < count; ++i) {
-            uint32_t id = static_cast<uint32_t>(pattern_ids[i]);
-            for (const auto& [pid, pattern] : all_patterns) {
-                if (pid == id) {
-                    result.push_back(pattern);
-                    break;
+    std::vector<std::string> matched_patterns;
+    
+    if (result.found) {
+        // If we built the patterns ourselves, we have them stored
+        if (!patterns_.empty()) {
+            matched_patterns = patterns_;
+        } else {
+            // Loaded from binary - need to get all pattern strings from database
+            // and check each one to see if it matches
+            size_t count = matchy_pattern_count(db_);
+            for (size_t i = 0; i < count; ++i) {
+                char* pattern_str = matchy_get_pattern_string(db_, static_cast<uint32_t>(i));
+                if (pattern_str != nullptr) {
+                    std::string pattern(pattern_str);
+                    matchy_free_string(pattern_str);
+                    
+                    // Query this pattern against the text to see if it matches
+                    matchy_result_t check = matchy_query(db_, text.c_str());
+                    if (check.found) {
+                        matched_patterns.push_back(pattern);
+                    }
+                    matchy_free_result(&check);
                 }
             }
         }
-        
-        paraglob_free_results(pattern_ids);
-        
-        // Sort and deduplicate
-        std::sort(result.begin(), result.end());
-        result.erase(std::unique(result.begin(), result.end()), result.end());
     }
     
-    return result;
+    matchy_free_result(&result);
+    
+    // Sort and deduplicate
+    std::sort(matched_patterns.begin(), matched_patterns.end());
+    matched_patterns.erase(std::unique(matched_patterns.begin(), matched_patterns.end()), 
+                          matched_patterns.end());
+    
+    return matched_patterns;
 }
 
 std::vector<std::pair<uint32_t, std::string>> Paraglob::get_with_ids(const std::string& text) {
@@ -193,30 +258,20 @@ std::vector<std::pair<uint32_t, std::string>> Paraglob::get_with_ids(const std::
         throw std::runtime_error("Paraglob must be compiled before matching");
     }
     
-    size_t count = 0;
-    int* pattern_ids = paraglob_find_all(db_, text.c_str(), &count);
+    // Get matching patterns
+    auto matched_patterns = get(text);
     
+    // Map to IDs based on sorted pattern order
+    auto all_with_ids = get_all_patterns_with_ids();
     std::vector<std::pair<uint32_t, std::string>> result;
-    if (pattern_ids != nullptr && count > 0) {
-        // Build pattern ID to string mapping
-        auto all_patterns = get_all_patterns_with_ids();
-        
-        for (size_t i = 0; i < count; ++i) {
-            uint32_t id = static_cast<uint32_t>(pattern_ids[i]);
-            for (const auto& [pid, pattern] : all_patterns) {
-                if (pid == id) {
-                    result.push_back({id, pattern});
-                    break;
-                }
+    
+    for (const auto& matched : matched_patterns) {
+        for (const auto& [id, pattern] : all_with_ids) {
+            if (pattern == matched) {
+                result.push_back({id, pattern});
+                break;
             }
         }
-        
-        paraglob_free_results(pattern_ids);
-        
-        // Sort by ID and deduplicate
-        std::sort(result.begin(), result.end(),
-                  [](const auto& a, const auto& b) { return a.first < b.first; });
-        result.erase(std::unique(result.begin(), result.end()), result.end());
     }
     
     return result;
@@ -247,8 +302,18 @@ bool Paraglob::save_to_file_binary(const char* filename) const {
         return false;
     }
     
-    paraglob_error_t result = paraglob_save(db_, filename);
-    return result == paraglob_error_t_PARAGLOB_SUCCESS;
+    // If we have a temp file, just copy it
+    if (!temp_file_.empty()) {
+        std::ifstream src(temp_file_, std::ios::binary);
+        std::ofstream dst(filename, std::ios::binary);
+        if (!src || !dst) {
+            return false;
+        }
+        dst << src.rdbuf();
+        return dst.good();
+    }
+    
+    return false;
 }
 
 std::unique_ptr<std::vector<uint8_t>> Paraglob::serialize_binary() const {
@@ -262,8 +327,14 @@ std::unique_ptr<std::vector<uint8_t>> Paraglob::serialize_binary() const {
 }
 
 std::unique_ptr<Paraglob> Paraglob::load_from_file_binary(const char* filename) {
-    paraglob_db* db = paraglob_open_mmap(filename);
+    matchy_t* db = matchy_open(filename);
     if (db == nullptr) {
+        return nullptr;
+    }
+    
+    // Check if this database has pattern data
+    if (!matchy_has_pattern_data(db)) {
+        matchy_close(db);
         return nullptr;
     }
     
@@ -271,19 +342,20 @@ std::unique_ptr<Paraglob> Paraglob::load_from_file_binary(const char* filename) 
     pg->db_ = db;
     pg->is_binary_mode_ = true;
     pg->is_compiled_ = true;
-    
-    // Try to determine pattern count for informational purposes
-    size_t pattern_count = paraglob_pattern_count(db);
-    // We can't retrieve the actual patterns from binary mode without additional API
-    // but we can track the count
     pg->patterns_.clear();
     
     return pg;
 }
 
 std::unique_ptr<Paraglob> Paraglob::load_from_buffer_binary(const uint8_t* buffer, size_t size) {
-    paraglob_db* db = paraglob_open_buffer(buffer, size);
+    matchy_t* db = matchy_open_buffer(buffer, size);
     if (db == nullptr) {
+        return nullptr;
+    }
+    
+    // Check if this database has pattern data
+    if (!matchy_has_pattern_data(db)) {
+        matchy_close(db);
         return nullptr;
     }
     
@@ -304,10 +376,9 @@ std::string Paraglob::str() const {
     oss << "Paraglob{";
     
     if (is_binary_mode_ && db_ != nullptr) {
-        size_t count = paraglob_pattern_count(db_);
-        oss << "patterns=" << count;
+        oss << "patterns=" << patterns_.size();
         oss << ", binary_mode=true";
-        oss << ", version=" << paraglob_version(db_);
+        oss << ", format=" << matchy_format(db_);
     } else {
         oss << "patterns=" << patterns_.size();
         oss << ", binary_mode=false";
@@ -335,10 +406,16 @@ bool Paraglob::operator==(const Paraglob& other) const {
 
 size_t Paraglob::pattern_count() const {
     if (!is_compiled_ || db_ == nullptr) {
-        return 0;
+        return patterns_.size();
     }
     
-    return paraglob_pattern_count(db_);
+    // Get count from database if loaded, otherwise from stored patterns
+    size_t db_count = matchy_pattern_count(db_);
+    if (db_count > 0) {
+        return db_count;
+    }
+    
+    return patterns_.size();
 }
 
 uint32_t Paraglob::version() const {
@@ -346,7 +423,8 @@ uint32_t Paraglob::version() const {
         throw std::runtime_error("Cannot get version from uncompiled Paraglob");
     }
     
-    return paraglob_version(db_);
+    // Return format version (3 for current format)
+    return 3;
 }
 
 } // namespace paraglob

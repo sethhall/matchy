@@ -5,10 +5,11 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead};
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "paraglob")]
+#[command(name = "matchy")]
 #[command(about = "Fast multi-pattern glob matching with optional data associations", long_about = None)]
 #[command(version)]
 struct Cli {
@@ -119,6 +120,38 @@ fn main() -> Result<()> {
     }
 }
 
+/// Helper function to format IP and prefix length as CIDR
+fn format_cidr(ip_str: &str, prefix_len: u8) -> String {
+    if let Ok(addr) = ip_str.parse::<IpAddr>() {
+        match addr {
+            IpAddr::V4(ipv4) => {
+                let ip_int = u32::from(ipv4);
+                let mask = if prefix_len == 0 {
+                    0u32
+                } else {
+                    !0u32 << (32 - prefix_len)
+                };
+                let network_int = ip_int & mask;
+                let network = std::net::Ipv4Addr::from(network_int);
+                format!("{}/{}", network, prefix_len)
+            }
+            IpAddr::V6(ipv6) => {
+                let ip_int = u128::from(ipv6);
+                let mask = if prefix_len == 0 {
+                    0u128
+                } else {
+                    !0u128 << (128 - prefix_len)
+                };
+                let network_int = ip_int & mask;
+                let network = std::net::Ipv6Addr::from(network_int);
+                format!("{}/{}", network, prefix_len)
+            }
+        }
+    } else {
+        format!("{}/{}", ip_str, prefix_len)
+    }
+}
+
 fn cmd_query(database: PathBuf, query: String, json_output: bool, show_data: bool) -> Result<()> {
     use matchy::{Database, QueryResult};
 
@@ -142,6 +175,11 @@ fn cmd_query(database: PathBuf, query: String, json_output: bool, show_data: boo
                         "type": "pattern",
                     });
 
+                    // Add pattern string if available
+                    if let Some(pattern_str) = db.get_pattern_string(pattern_id) {
+                        entry["pattern"] = json!(pattern_str);
+                    }
+
                     if show_data {
                         if let Some(Some(ref d)) = data.get(i) {
                             entry["data"] = data_value_to_json(d);
@@ -162,10 +200,12 @@ fn cmd_query(database: PathBuf, query: String, json_output: bool, show_data: boo
                 );
             }
             Some(QueryResult::Ip { data, prefix_len }) => {
+                let cidr = format_cidr(&query, prefix_len);
                 let mut result = json!({
                     "query": query,
                     "type": "ip",
                     "prefix_len": prefix_len,
+                    "cidr": cidr,
                 });
 
                 if show_data {
@@ -206,16 +246,19 @@ fn cmd_query(database: PathBuf, query: String, json_output: bool, show_data: boo
                         query
                     );
                     for (i, &pattern_id) in pattern_ids.iter().enumerate() {
-                        println!("  Pattern ID: {}", pattern_id);
+                        // Show pattern string
+                        if let Some(pattern_str) = db.get_pattern_string(pattern_id) {
+                            println!("  Pattern: {}", pattern_str);
+                        } else {
+                            // Fallback if pattern string not available
+                            println!("  Pattern ID: {}", pattern_id);
+                        }
 
                         if show_data {
                             if let Some(Some(ref d)) = data.get(i) {
-                                println!(
-                                    "  Data:       {}",
-                                    format_data_value(d, "              ")
-                                );
+                                println!("  Data:    {}", format_data_value(d, "           "));
                             } else {
-                                println!("  Data:       (none)");
+                                println!("  Data:    (none)");
                             }
                         }
                         println!();
@@ -223,13 +266,11 @@ fn cmd_query(database: PathBuf, query: String, json_output: bool, show_data: boo
                 }
             }
             Some(QueryResult::Ip { data, prefix_len }) => {
+                let cidr = format_cidr(&query, prefix_len);
                 println!("IP address found: {}\n", query);
-                println!("  Prefix:     /{}", prefix_len);
+                println!("  Network:  {}", cidr);
                 if show_data {
-                    println!(
-                        "  Data:       {}",
-                        format_data_value(&data, "              ")
-                    );
+                    println!("  Data:     {}", format_data_value(&data, "            "));
                 }
             }
             Some(QueryResult::NotFound) => {
@@ -254,6 +295,7 @@ fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()
     let format_str = db.format();
     let has_ip = db.has_ip_data();
     let has_pattern = db.has_pattern_data();
+    let pattern_count = db.pattern_count();
     let metadata = db.metadata();
 
     if json_output {
@@ -262,6 +304,7 @@ fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()
             "format": format_str,
             "has_ip_data": has_ip,
             "has_pattern_data": has_pattern,
+            "pattern_count": pattern_count,
         });
 
         if let Some(meta) = metadata {
@@ -276,6 +319,9 @@ fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()
         println!("Capabilities:");
         println!("  IP lookups:      {}", if has_ip { "✓" } else { "✗" });
         println!("  Pattern lookups: {}", if has_pattern { "✓" } else { "✗" });
+        if has_pattern {
+            println!("  Pattern count:   {}", pattern_count);
+        }
 
         if let Some(meta) = metadata {
             if let DataValue::Map(map) = &meta {

@@ -87,6 +87,23 @@ Educational demo showing glob pattern matching features:
 
 **Run:** `cargo run --example glob_demo`
 
+## C API Examples
+
+### `enhanced_api_test.c`
+Demonstrates the enhanced C API for structured data access:
+- Building databases from C
+- Querying IP addresses
+- Navigating nested data structures with `matchy_aget_value`
+- Type-safe data access (strings, doubles, etc.)
+- Error handling and cleanup
+- Compatible with MaxMind GeoIP database format
+
+**Build and run:**
+```bash
+make -C examples
+./examples/enhanced_api_test
+```
+
 ## Performance & Testing
 
 ### `production_test.rs`
@@ -134,6 +151,10 @@ cargo run --example combined_query -- combined_database.mmdb
 
 # Pattern matching demo
 cargo run --example glob_demo
+
+# C API example
+make -C examples
+./examples/enhanced_api_test
 
 # Performance validation
 cargo run --release --example production_test

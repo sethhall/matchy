@@ -6,6 +6,31 @@ pragma_once = false
 include_version = true
 namespace = "matchy"
 cpp_compat = true
+after_includes = """
+/* Platform-specific includes for sockaddr and FILE */
+#include <stdio.h>
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+#else
+    #include <sys/socket.h>
+#endif
+
+/* Entry data value union (cbindgen doesn't export unions, so we define it manually) */
+typedef union matchy_entry_data_value_u {
+    uint32_t pointer;
+    const char *utf8_string;
+    double double_value;
+    const uint8_t *bytes;
+    uint16_t uint16;
+    uint32_t uint32;
+    int32_t int32;
+    uint64_t uint64;
+    uint8_t uint128[16];
+    bool boolean;
+    float float_value;
+} matchy_entry_data_value_u;
+"""
 
 # Documentation settings
 documentation = true
@@ -14,7 +39,25 @@ documentation_style = "c"
 # Export settings
 [export]
 item_types = ["enums", "structs", "functions", "typedefs", "constants"]
-exclude = []
+# Exclude MMDB compatibility types and functions (they're in maxminddb.h)
+exclude = [
+    "MMDB_s",
+    "MMDB_entry_s",
+    "MMDB_lookup_result_s",
+    "MMDB_entry_data_list_s",
+    "MMDB_open",
+    "MMDB_lookup_string",
+    "MMDB_lookup_sockaddr",
+    "MMDB_aget_value",
+    "MMDB_get_entry_data_list",
+    "MMDB_free_entry_data_list",
+    "MMDB_close",
+    "MMDB_lib_version",
+    "MMDB_strerror",
+    "MMDB_read_node",
+    "MMDB_dump_entry_data_list",
+    "MMDB_get_metadata_as_entry_data_list",
+]
 
 # Parsing settings
 [parse]
@@ -45,3 +88,7 @@ prefix_with_name = true
 [struct]
 rename_fields = "None"
 derive_eq = true
+
+# Type mappings for libc types
+[export.rename]
+"libc::sockaddr" = "struct sockaddr"

@@ -33,9 +33,13 @@ use std::collections::HashMap;
 ///
 /// This enum represents all MMDB data types and can be used
 /// for both standalone .pgb files and MMDB-embedded data.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+///
+/// Note: `Pointer` is excluded from JSON serialization/deserialization as it's
+/// an internal MMDB format detail (data section offset), not a user-facing type.
+#[derive(Debug, Clone, PartialEq)]
 pub enum DataValue {
-    /// Pointer to another data item (offset)
+    /// Pointer to another data item (offset) - internal use only, not for JSON
+    #[allow(dead_code)]
     Pointer(u32),
     /// UTF-8 string
     String(String),
@@ -61,6 +65,135 @@ pub enum DataValue {
     Bool(bool),
     /// IEEE 754 single precision float
     Float(f32),
+}
+
+// Custom serialization that excludes Pointer (internal format detail)
+impl serde::Serialize for DataValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            DataValue::Pointer(_) => Err(serde::ser::Error::custom(
+                "Pointer is an internal type and cannot be serialized to JSON",
+            )),
+            DataValue::String(s) => serializer.serialize_str(s),
+            DataValue::Double(d) => serializer.serialize_f64(*d),
+            DataValue::Bytes(b) => serializer.serialize_bytes(b),
+            DataValue::Uint16(n) => serializer.serialize_u16(*n),
+            DataValue::Uint32(n) => serializer.serialize_u32(*n),
+            DataValue::Map(m) => m.serialize(serializer),
+            DataValue::Int32(n) => serializer.serialize_i32(*n),
+            DataValue::Uint64(n) => serializer.serialize_u64(*n),
+            DataValue::Uint128(n) => serializer.serialize_u128(*n),
+            DataValue::Array(a) => a.serialize(serializer),
+            DataValue::Bool(b) => serializer.serialize_bool(*b),
+            DataValue::Float(f) => serializer.serialize_f32(*f),
+        }
+    }
+}
+
+// Custom deserialization that properly handles JSON numbers
+impl<'de> serde::Deserialize<'de> for DataValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct DataValueVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for DataValueVisitor {
+            type Value = DataValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a valid MMDB data value")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<DataValue, E> {
+                Ok(DataValue::Bool(v))
+            }
+
+            fn visit_i32<E>(self, v: i32) -> Result<DataValue, E> {
+                Ok(DataValue::Int32(v))
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<DataValue, E> {
+                // Choose appropriate integer type based on value
+                if v >= 0 {
+                    if v <= u16::MAX as i64 {
+                        Ok(DataValue::Uint16(v as u16))
+                    } else if v <= u32::MAX as i64 {
+                        Ok(DataValue::Uint32(v as u32))
+                    } else {
+                        Ok(DataValue::Uint64(v as u64))
+                    }
+                } else if v >= i32::MIN as i64 {
+                    Ok(DataValue::Int32(v as i32))
+                } else {
+                    // For very large negative numbers, store as Double
+                    Ok(DataValue::Double(v as f64))
+                }
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<DataValue, E> {
+                // Choose appropriate unsigned integer type
+                if v <= u16::MAX as u64 {
+                    Ok(DataValue::Uint16(v as u16))
+                } else if v <= u32::MAX as u64 {
+                    Ok(DataValue::Uint32(v as u32))
+                } else {
+                    Ok(DataValue::Uint64(v))
+                }
+            }
+
+            fn visit_f32<E>(self, v: f32) -> Result<DataValue, E> {
+                Ok(DataValue::Float(v))
+            }
+
+            fn visit_f64<E>(self, v: f64) -> Result<DataValue, E> {
+                Ok(DataValue::Double(v))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<DataValue, E> {
+                Ok(DataValue::String(v.to_string()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<DataValue, E> {
+                Ok(DataValue::String(v))
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<DataValue, E> {
+                Ok(DataValue::Bytes(v.to_vec()))
+            }
+
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<DataValue, E> {
+                Ok(DataValue::Bytes(v))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<DataValue, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut array = Vec::new();
+                while let Some(value) = seq.next_element()? {
+                    array.push(value);
+                }
+                Ok(DataValue::Array(array))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<DataValue, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut hash_map = HashMap::new();
+                while let Some((key, value)) = map.next_entry()? {
+                    hash_map.insert(key, value);
+                }
+                Ok(DataValue::Map(hash_map))
+            }
+        }
+
+        deserializer.deserialize_any(DataValueVisitor)
+    }
 }
 
 /// Data section encoder
