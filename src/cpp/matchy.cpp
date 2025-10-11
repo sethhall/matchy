@@ -24,7 +24,10 @@ using matchy::matchy_query;
 using matchy::matchy_free_result;
 using matchy::matchy_free_string;
 using matchy::matchy_format;
-using matchy::matchy_has_pattern_data;
+using matchy::matchy_has_string_data;
+using matchy::matchy_has_literal_data;
+using matchy::matchy_has_glob_data;
+using matchy::matchy_has_pattern_data;  // deprecated
 using matchy::matchy_get_pattern_string;
 using matchy::matchy_pattern_count;
 // MATCHY_SUCCESS is a #define, not a namespace member
@@ -332,8 +335,8 @@ std::unique_ptr<Paraglob> Paraglob::load_from_file_binary(const char* filename) 
         return nullptr;
     }
     
-    // Check if this database has pattern data
-    if (!matchy_has_pattern_data(db)) {
+    // Check if this database has string data (literals or globs)
+    if (!matchy_has_string_data(db)) {
         matchy_close(db);
         return nullptr;
     }
@@ -353,8 +356,8 @@ std::unique_ptr<Paraglob> Paraglob::load_from_buffer_binary(const uint8_t* buffe
         return nullptr;
     }
     
-    // Check if this database has pattern data
-    if (!matchy_has_pattern_data(db)) {
+    // Check if this database has string data (literals or globs)
+    if (!matchy_has_string_data(db)) {
         matchy_close(db);
         return nullptr;
     }

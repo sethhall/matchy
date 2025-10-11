@@ -58,7 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let builder_stats = builder.stats();
     println!("   ✓ Total indicators:  {}", builder_stats.total_entries);
     println!("   ✓ IP entries:        {}", builder_stats.ip_entries);
-    println!("   ✓ Pattern entries:   {}", builder_stats.pattern_entries);
+    println!("   ✓ Literal entries:   {}", builder_stats.literal_entries);
+    println!("   ✓ Glob entries:      {}", builder_stats.glob_entries);
     println!();
 
     // Build database bytes
@@ -92,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("║                                                                ║");
         println!(
             "║  The database contains {} threat indicators.            ║",
-            builder_stats.pattern_entries
+            builder_stats.literal_entries + builder_stats.glob_entries
         );
         println!("║  Load it using Paraglob API for pattern matching.             ║");
         println!("╚════════════════════════════════════════════════════════════════╝");

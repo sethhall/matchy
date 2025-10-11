@@ -23,7 +23,7 @@ use crate::offset_format::{
     read_cstring, read_struct, ACEdge, ParaglobHeader, PatternDataMapping, PatternEntry,
     SingleWildcard,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 
 /// Pattern classification for optimization
@@ -355,13 +355,24 @@ impl ParaglobBuilder {
 
     fn build_internal(self) -> Result<BuildResult, ParaglobError> {
         // Collect literals for AC automaton
+        // Use HashSet for O(1) deduplication instead of Vec::contains which is O(n)
+        let mut ac_literals_set: HashSet<&str> = HashSet::new();
         let mut ac_literals = Vec::new();
         let mut literal_to_patterns: HashMap<String, Vec<u32>> = HashMap::new();
+
+        // Pre-allocate based on pattern count (rough estimate: 2 literals per pattern)
+        ac_literals.reserve(self.patterns.len() * 2);
+        literal_to_patterns.reserve(self.patterns.len() * 2);
 
         for pat in &self.patterns {
             match pat {
                 PatternType::Literal { text, id, .. } => {
-                    ac_literals.push(text.clone());
+                    // Add to dedup set first
+                    let is_new = ac_literals_set.insert(text.as_str());
+                    if is_new {
+                        ac_literals.push(text.clone());
+                    }
+                    // HashMap can use the owned string from the set or pattern
                     literal_to_patterns
                         .entry(text.clone())
                         .or_default()
@@ -369,7 +380,9 @@ impl ParaglobBuilder {
                 }
                 PatternType::Glob { literals, id, .. } => {
                     for lit in literals {
-                        if !ac_literals.contains(lit) {
+                        // O(1) check with HashSet, only clone once for Vec if needed
+                        let is_new = ac_literals_set.insert(lit.as_str());
+                        if is_new {
                             ac_literals.push(lit.clone());
                         }
                         literal_to_patterns

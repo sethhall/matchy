@@ -15,7 +15,8 @@
 //! # Supported Attribute Types
 //!
 //! ## Network Indicators
-//! - `ip-src`, `ip-dst`: IP addresses
+//! - `ip-src`, `ip-dst`, `ip`: IP addresses
+//! - `ip-src/netmask`, `ip-dst/netmask`: IP subnets in CIDR notation
 //! - `ip-src|port`, `ip-dst|port`: IP with port (IP extracted)
 //! - `domain`, `hostname`: Domain names
 //! - `domain|ip`: Domain with IP (both extracted)
@@ -244,9 +245,94 @@ impl MispImporter {
         })
     }
 
-    /// Create importer from multiple MISP JSON files
+    /// Build a database directly from files with streaming processing (low memory)
+    ///
+    /// This processes files one at a time without loading all events into memory,
+    /// making it suitable for very large datasets. Files that don't contain valid
+    /// MISP events (like manifest.json) are skipped with a warning.
+    pub fn build_from_files<P: AsRef<Path>>(
+        paths: &[P],
+        match_mode: MatchMode,
+        minimal_metadata: bool,
+    ) -> Result<MmdbBuilder, ParaglobError> {
+        let mut builder = MmdbBuilder::new(match_mode)
+            .with_database_type("MISP-ThreatIntel")
+            .with_description("en", "Threat intelligence database from MISP JSON feeds");
+
+        let mut skipped_files = Vec::new();
+        let mut processed_events = 0;
+
+        for path in paths {
+            let path_ref = path.as_ref();
+            let json = fs::read_to_string(path_ref).map_err(|e| {
+                ParaglobError::InvalidPattern(format!("Failed to read file: {}", e))
+            })?;
+
+            // Try to parse as MISP event document
+            match serde_json::from_str::<MispDocument>(&json) {
+                Ok(doc) => {
+                    // Process event immediately and drop it
+                    let temp_importer = Self {
+                        events: vec![doc.event],
+                    };
+
+                    for event in &temp_importer.events {
+                        if minimal_metadata {
+                            temp_importer.process_event_minimal(event, &mut builder)?;
+                        } else {
+                            temp_importer.process_event(event, &mut builder)?;
+                        }
+                    }
+                    processed_events += 1;
+                    // Event is dropped here, freeing memory
+                }
+                Err(e) => {
+                    // Check if it's a known non-event file
+                    let filename = path_ref
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+
+                    if filename == "manifest.json" || filename == "hashes.csv" {
+                        // Known metadata files - skip silently
+                        skipped_files.push((filename.to_string(), "metadata file".to_string()));
+                    } else if json.trim_start().starts_with('{') && json.contains("\"Event\"") {
+                        // Looks like it should be a MISP file but failed to parse - this is an error
+                        return Err(ParaglobError::InvalidPattern(format!(
+                            "Failed to parse MISP JSON in {}: {}",
+                            filename, e
+                        )));
+                    } else {
+                        // Doesn't look like a MISP event file - skip with warning
+                        skipped_files.push((filename.to_string(), "not a MISP event".to_string()));
+                    }
+                }
+            }
+        }
+
+        // Print warnings for skipped files
+        if !skipped_files.is_empty() {
+            eprintln!("Warning: Skipped {} non-MISP file(s):", skipped_files.len());
+            for (filename, reason) in &skipped_files {
+                eprintln!("  - {}: {}", filename, reason);
+            }
+        }
+
+        if processed_events == 0 {
+            return Err(ParaglobError::InvalidPattern(
+                "No valid MISP events found in provided files".to_string(),
+            ));
+        }
+
+        Ok(builder)
+    }
+
+    /// Create importer from multiple MISP JSON files (loads all into memory)
     ///
     /// Files that don't contain valid MISP events (like manifest.json) are skipped with a warning.
+    ///
+    /// **Note:** For large datasets, use `build_from_files()` instead which streams
+    /// files one at a time without loading everything into memory.
     pub fn from_files<P: AsRef<Path>>(paths: &[P]) -> Result<Self, ParaglobError> {
         let mut events = Vec::new();
         let mut skipped_files = Vec::new();
@@ -601,55 +687,61 @@ impl MispImporter {
         }
 
         match attr_type {
-            // IP addresses
+            // IP addresses - use explicit add_ip() (also handles CIDR notation)
             "ip-src" | "ip-dst" | "ip" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_ip(value, metadata)?;
             }
 
-            // IP with port - extract IP
+            // IP with netmask (CIDR blocks) - use explicit add_ip()
+            "ip-src/netmask" | "ip-dst/netmask" => {
+                // Value should be in CIDR notation like "192.168.1.0/24"
+                builder.add_ip(value, metadata)?;
+            }
+
+            // IP with port - extract IP and use add_ip()
             "ip-src|port" | "ip-dst|port" => {
                 if let Some(pipe_pos) = value.find('|') {
                     let ip = &value[..pipe_pos];
-                    builder.add_entry(ip, metadata)?;
+                    builder.add_ip(ip, metadata)?;
                 }
             }
 
-            // Domains
+            // Domains - always literals
             "domain" | "hostname" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_literal(value, metadata)?;
             }
 
-            // Domain with IP - extract both
+            // Domain with IP - extract both, use appropriate methods
             "domain|ip" => {
                 if let Some(pipe_pos) = value.find('|') {
                     let domain = &value[..pipe_pos];
                     let ip = &value[pipe_pos + 1..];
 
-                    // Add domain
-                    builder.add_entry(domain, metadata.clone())?;
-                    // Add IP
-                    builder.add_entry(ip, metadata)?;
+                    // Add domain as literal
+                    builder.add_literal(domain, metadata.clone())?;
+                    // Add IP using add_ip()
+                    builder.add_ip(ip, metadata)?;
                 }
             }
 
-            // URLs - extract domain
+            // URLs - extract domain and URL as literals
             "url" | "uri" => {
                 if let Some(domain) = self.extract_domain_from_url(value) {
-                    builder.add_entry(domain, metadata.clone())?;
+                    builder.add_literal(domain, metadata.clone())?;
                 }
-                // Also add full URL as pattern
-                builder.add_entry(value, metadata)?;
+                // Also add full URL as literal
+                builder.add_literal(value, metadata)?;
             }
 
-            // File hashes
+            // File hashes - always literals (including ssdeep with special chars)
             "md5" | "sha1" | "sha224" | "sha256" | "sha384" | "sha512" | "sha512/224"
             | "sha512/256" | "sha3-224" | "sha3-256" | "sha3-384" | "sha3-512" | "ssdeep"
             | "imphash" | "tlsh" | "authentihash" | "vhash" | "cdhash" | "pehash" | "impfuzzy"
             | "telfhash" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_literal(value, metadata)?;
             }
 
-            // Filename with hash - extract both
+            // Filename with hash - extract both as literals
             "filename|md5"
             | "filename|sha1"
             | "filename|sha256"
@@ -666,57 +758,57 @@ impl MispImporter {
                     let filename = &value[..pipe_pos];
                     let hash = &value[pipe_pos + 1..];
 
-                    // Add filename as pattern
-                    builder.add_entry(filename, metadata.clone())?;
-                    // Add hash
-                    builder.add_entry(hash, metadata)?;
+                    // Add filename as literal
+                    builder.add_literal(filename, metadata.clone())?;
+                    // Add hash as literal
+                    builder.add_literal(hash, metadata)?;
                 }
             }
 
-            // Filenames (as patterns)
+            // Filenames - literals (may contain glob-like chars but shouldn't be treated as globs)
             "filename" | "filename-pattern" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_literal(value, metadata)?;
             }
 
-            // Email addresses
+            // Email addresses - literals
             "email" | "email-src" | "email-dst" | "email-reply-to" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_literal(value, metadata)?;
             }
 
-            // Email subjects (patterns)
+            // Email subjects - literals
             "email-subject" | "email-body" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_literal(value, metadata)?;
             }
 
-            // Network patterns
+            // Network patterns - literals
             "user-agent" | "http-method" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_literal(value, metadata)?;
             }
 
-            // MAC addresses
+            // MAC addresses - literals
             "mac-address" | "mac-eui-64" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_literal(value, metadata)?;
             }
 
-            // AS numbers
+            // AS numbers - literals
             "AS" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_literal(value, metadata)?;
             }
 
-            // Cryptocurrency addresses
+            // Cryptocurrency addresses - literals
             "btc" | "xmr" | "dash" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_literal(value, metadata)?;
             }
 
-            // Other patterns
+            // Detection rules - literals (not globs, despite possibly containing patterns)
             "yara" | "snort" | "sigma" | "pattern-in-file" | "pattern-in-traffic"
             | "pattern-in-memory" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_literal(value, metadata)?;
             }
 
-            // Mutex, named pipes, registry keys
+            // Mutex, named pipes, registry keys - literals
             "mutex" | "named pipe" | "regkey" | "regkey|value" => {
-                builder.add_entry(value, metadata)?;
+                builder.add_literal(value, metadata)?;
             }
 
             // Ignore non-actionable types
@@ -725,10 +817,10 @@ impl MispImporter {
                 // Skip these - not useful for matching
             }
 
-            // Default: add as pattern if it looks actionable
+            // Default: add as literal if it looks actionable
             _ => {
                 if !value.is_empty() && value.len() < 1000 {
-                    builder.add_entry(value, metadata)?;
+                    builder.add_literal(value, metadata)?;
                 }
             }
         }

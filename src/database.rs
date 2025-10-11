@@ -9,6 +9,7 @@
 //! lookup method is used transparently.
 
 use crate::data_section::DataValue;
+use crate::literal_hash::LiteralHash;
 use crate::mmdb::{MmdbError, MmdbHeader, SearchTree};
 use crate::paraglob_offset::Paraglob;
 use memmap2::Mmap;
@@ -93,7 +94,9 @@ pub struct Database {
     data: DatabaseStorage,
     format: DatabaseFormat,
     ip_header: Option<MmdbHeader>,
-    /// Pattern matcher for Combined or PatternOnly databases
+    /// Literal hash table for O(1) exact string lookups
+    literal_hash: Option<LiteralHash<'static>>,
+    /// Pattern matcher for glob patterns (Combined or PatternOnly databases)
     /// Uses RefCell for interior mutability since find_all needs &mut self
     pattern_matcher: Option<RefCell<Paraglob>>,
     /// For combined databases: mapping from pattern_id -> data offset in MMDB data section
@@ -165,18 +168,35 @@ impl Database {
             }
         };
 
+        // Load literal hash section if present (MMDB_LITERAL marker)
+        let literal_hash = if let Some(offset) = Self::find_literal_section(data) {
+            // Skip the 16-byte marker
+            let literal_data = &data[offset + 16..];
+            // SAFETY: We're extending the lifetime to 'static because the data is either:
+            // 1. In a mmap which lives as long as the Database struct
+            // 2. In owned Vec<u8> which also lives as long as Database
+            // The LiteralHash only holds a reference, so it won't outlive the data
+            let literal_data_static: &'static [u8] = unsafe { std::mem::transmute(literal_data) };
+            Some(LiteralHash::from_buffer(literal_data_static).map_err(|e| {
+                DatabaseError::Unsupported(format!("Failed to load literal hash: {}", e))
+            })?)
+        } else {
+            None
+        };
+
         Ok(Self {
             data: storage,
             format,
             ip_header,
+            literal_hash,
             pattern_matcher,
             pattern_data_mappings,
         })
     }
 
-    /// Look up a query string (IP address or domain pattern)
+    /// Look up a query string (IP address or string pattern)
     ///
-    /// Automatically determines if the query is an IP address or domain pattern
+    /// Automatically determines if the query is an IP address or string
     /// and uses the appropriate lookup method.
     ///
     /// Returns `Ok(Some(result))` if found, `Ok(None)` if not found.
@@ -186,8 +206,8 @@ impl Database {
             return self.lookup_ip(addr);
         }
 
-        // Otherwise, treat as pattern
-        self.lookup_pattern(query)
+        // Otherwise, treat as string (literal or glob)
+        self.lookup_string(query)
     }
 
     /// Look up an IP address
@@ -217,50 +237,75 @@ impl Database {
         }))
     }
 
-    /// Look up a pattern
+    /// Look up a string (literal or glob pattern)
     ///
     /// Returns matching pattern IDs and associated data.
-    pub fn lookup_pattern(&self, pattern: &str) -> Result<Option<QueryResult>, DatabaseError> {
-        // Check if we have pattern matcher
-        let pg_cell = match &self.pattern_matcher {
-            Some(pg) => pg,
-            None => return Ok(None), // No pattern data in this database
-        };
+    /// Checks both:
+    /// 1. Literal hash table for O(1) exact matches
+    /// 2. Glob patterns for wildcard matches
+    ///
+    /// A query can match both a literal AND a glob pattern simultaneously.
+    pub fn lookup_string(&self, pattern: &str) -> Result<Option<QueryResult>, DatabaseError> {
+        let mut all_pattern_ids = Vec::new();
+        let mut all_data_values = Vec::new();
 
-        // Borrow mutably through RefCell
-        let mut pg = pg_cell.borrow_mut();
-
-        // Find matches
-        let pattern_ids = pg.find_all(pattern);
-
-        if pattern_ids.is_empty() {
-            return Ok(Some(QueryResult::NotFound));
-        }
-
-        // Collect pattern data for each match
-        let mut data_values = Vec::new();
-        for &pattern_id in &pattern_ids {
-            // For combined databases, use mappings to decode from MMDB data section
-            // For pattern-only databases, use Paraglob's internal data cache
-            let data = if let Some(mappings) = &self.pattern_data_mappings {
-                // Combined database: decode from MMDB data section
-                if let Some(&data_offset) = mappings.get(&pattern_id) {
-                    let header = self.ip_header.as_ref().unwrap();
-                    Some(self.decode_ip_data(header, data_offset)?)
-                } else {
-                    None
+        // 1. Try literal hash table first (O(1) lookup)
+        if let Some(literal_hash) = &self.literal_hash {
+            if let Some(pattern_id) = literal_hash.lookup(pattern) {
+                // Found an exact match!
+                if let Some(data_offset) = literal_hash.get_data_offset(pattern_id) {
+                    let header = self.ip_header.as_ref().ok_or_else(|| {
+                        DatabaseError::Format(MmdbError::InvalidFormat(
+                            "Literal hash present but no IP header".to_string(),
+                        ))
+                    })?;
+                    let data = self.decode_ip_data(header, data_offset)?;
+                    all_pattern_ids.push(pattern_id);
+                    all_data_values.push(Some(data));
                 }
-            } else {
-                // Pattern-only database: use Paraglob's cache
-                pg.get_pattern_data(pattern_id).cloned()
-            };
-            data_values.push(data);
+            }
         }
 
-        Ok(Some(QueryResult::Pattern {
-            pattern_ids,
-            data: data_values,
-        }))
+        // 2. Check glob patterns (for wildcard matches)
+        if let Some(pg_cell) = &self.pattern_matcher {
+            let mut pg = pg_cell.borrow_mut();
+            let glob_pattern_ids = pg.find_all(pattern);
+
+            // Add glob matches
+            for &pattern_id in &glob_pattern_ids {
+                // For combined databases, use mappings to decode from MMDB data section
+                // For pattern-only databases, use Paraglob's internal data cache
+                let data = if let Some(mappings) = &self.pattern_data_mappings {
+                    // Combined database: decode from MMDB data section
+                    if let Some(&data_offset) = mappings.get(&pattern_id) {
+                        let header = self.ip_header.as_ref().unwrap();
+                        Some(self.decode_ip_data(header, data_offset)?)
+                    } else {
+                        None
+                    }
+                } else {
+                    // Pattern-only database: use Paraglob's cache
+                    pg.get_pattern_data(pattern_id).cloned()
+                };
+                all_pattern_ids.push(pattern_id);
+                all_data_values.push(data);
+            }
+        }
+
+        // Return results
+        if all_pattern_ids.is_empty() {
+            // Only return NotFound if we actually have some pattern data
+            if self.literal_hash.is_some() || self.pattern_matcher.is_some() {
+                Ok(Some(QueryResult::NotFound))
+            } else {
+                Ok(None) // No pattern data in this database
+            }
+        } else {
+            Ok(Some(QueryResult::Pattern {
+                pattern_ids: all_pattern_ids,
+                data: all_data_values,
+            }))
+        }
     }
 
     /// Decode IP data at a given offset
@@ -321,9 +366,28 @@ impl Database {
         self.ip_header.is_some()
     }
 
-    /// Check if database supports pattern lookups
-    pub fn has_pattern_data(&self) -> bool {
+    /// Check if database supports string lookups (literals or patterns)
+    pub fn has_string_data(&self) -> bool {
+        self.literal_hash.is_some() || self.pattern_matcher.is_some()
+    }
+
+    /// Check if database supports literal (exact string) lookups
+    pub fn has_literal_data(&self) -> bool {
+        self.literal_hash.is_some()
+    }
+
+    /// Check if database supports glob pattern lookups
+    pub fn has_glob_data(&self) -> bool {
         self.pattern_matcher.is_some()
+    }
+
+    /// Check if database supports pattern lookups (deprecated, use has_literal_data or has_glob_data)
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use has_literal_data or has_glob_data instead"
+    )]
+    pub fn has_pattern_data(&self) -> bool {
+        self.has_string_data()
     }
 
     /// Get MMDB metadata if available
@@ -350,9 +414,9 @@ impl Database {
         pg.get_pattern(pattern_id)
     }
 
-    /// Get total number of patterns
+    /// Get total number of glob patterns
     ///
-    /// Returns the number of patterns in the database.
+    /// Returns the number of glob patterns in the database.
     /// Returns 0 if the database has no pattern data.
     pub fn pattern_count(&self) -> usize {
         match &self.pattern_matcher {
@@ -364,8 +428,72 @@ impl Database {
         }
     }
 
+    /// Get number of glob patterns (alias for pattern_count)
+    ///
+    /// Returns the number of glob patterns in the database.
+    /// Returns 0 if the database has no glob pattern data.
+    pub fn glob_count(&self) -> usize {
+        // Try to get from metadata first (more accurate)
+        if let Some(DataValue::Map(map)) = self.metadata() {
+            if let Some(count) = map.get("glob_entry_count") {
+                if let Some(val) = Self::extract_uint_from_datavalue(count) {
+                    return val as usize;
+                }
+            }
+        }
+        // Fallback to pattern_count
+        self.pattern_count()
+    }
+
+    /// Get number of literal patterns
+    ///
+    /// Returns the number of literal (exact-match) patterns in the database.
+    /// Returns 0 if the database has no literal pattern data.
+    pub fn literal_count(&self) -> usize {
+        // Try to get from metadata first (more accurate)
+        if let Some(DataValue::Map(map)) = self.metadata() {
+            if let Some(count) = map.get("literal_entry_count") {
+                if let Some(val) = Self::extract_uint_from_datavalue(count) {
+                    return val as usize;
+                }
+            }
+        }
+        // Fallback to literal_hash entry count
+        match &self.literal_hash {
+            Some(lh) => lh.entry_count() as usize,
+            None => 0,
+        }
+    }
+
+    /// Get number of IP address entries
+    ///
+    /// Returns the number of IP entries in the database.
+    /// Returns 0 if the database has no IP data.
+    pub fn ip_count(&self) -> usize {
+        // Try to get from metadata first (most accurate)
+        if let Some(DataValue::Map(map)) = self.metadata() {
+            if let Some(count) = map.get("ip_entry_count") {
+                if let Some(val) = Self::extract_uint_from_datavalue(count) {
+                    return val as usize;
+                }
+            }
+        }
+        // No accurate fallback for IP count
+        0
+    }
+
+    /// Helper to extract unsigned integer from DataValue
+    fn extract_uint_from_datavalue(value: &DataValue) -> Option<u64> {
+        match value {
+            DataValue::Uint16(v) => Some(*v as u64),
+            DataValue::Uint32(v) => Some(*v as u64),
+            DataValue::Uint64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
     /// Find the pattern section in a combined database
-    /// Returns the offset after the MMDB_PATTERN separator
+    /// Returns the offset to the start of MMDB_PATTERN marker
     fn find_pattern_section(data: &[u8]) -> Option<usize> {
         let separator = b"MMDB_PATTERN\x00\x00\x00\x00";
 
@@ -377,6 +505,15 @@ impl Database {
             }
         }
         None
+    }
+
+    /// Find the literal hash section in a combined database
+    /// Returns the offset to the start of MMDB_LITERAL marker
+    fn find_literal_section(data: &[u8]) -> Option<usize> {
+        let separator = b"MMDB_LITERAL\x00\x00\x00\x00";
+
+        // Search for the separator
+        (0..data.len().saturating_sub(16)).find(|&i| &data[i..i + 16] == separator)
     }
 
     /// Load pattern section from data at given offset (for pattern-only databases)
@@ -518,7 +655,7 @@ mod tests {
         let db = Database::open("tests/data/GeoLite2-Country.mmdb").unwrap();
         assert_eq!(db.format, DatabaseFormat::IpOnly);
         assert!(db.has_ip_data());
-        assert!(!db.has_pattern_data());
+        assert!(!db.has_string_data());
     }
 
     #[test]

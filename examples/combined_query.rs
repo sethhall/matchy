@@ -19,7 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::open(db_path)?;
     println!("Format: {}", db.format());
     println!("Has IP data: {}", db.has_ip_data());
-    println!("Has pattern data: {}", db.has_pattern_data());
+    println!("Has literal data: {}", db.has_literal_data());
+    println!("Has glob data: {}", db.has_glob_data());
     println!();
 
     if args.len() >= 3 {
