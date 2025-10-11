@@ -152,7 +152,7 @@ impl Database {
 
                 // Find and load pattern section after MMDB_PATTERN separator
                 let (pattern_matcher, mappings) =
-                    if let Some(offset) = Self::find_pattern_section(data) {
+                    if let Some(offset) = Self::find_pattern_section_fast(data) {
                         let (pg, map) =
                             Self::load_combined_pattern_section(data, offset).map_err(|e| {
                                 DatabaseError::Unsupported(format!(
@@ -169,7 +169,7 @@ impl Database {
         };
 
         // Load literal hash section if present (MMDB_LITERAL marker)
-        let literal_hash = if let Some(offset) = Self::find_literal_section(data) {
+        let literal_hash = if let Some(offset) = Self::find_literal_section_fast(data) {
             // Skip the 16-byte marker
             let literal_data = &data[offset + 16..];
             // SAFETY: We're extending the lifetime to 'static because the data is either:
@@ -327,28 +327,52 @@ impl Database {
             .map_err(|e| DatabaseError::Format(MmdbError::DecodeError(e.to_string())))
     }
 
-    /// Detect database format
+    /// Detect database format (optimized to avoid full file scan)
     fn detect_format(data: &[u8]) -> Result<DatabaseFormat, DatabaseError> {
-        // Check for MMDB metadata marker
-        let has_mmdb = crate::mmdb::find_metadata_marker(data).is_ok();
-
         // Check for paraglob magic at start (pattern-only format)
         let has_paraglob_start = data.len() >= 8 && &data[0..8] == b"PARAGLOB";
+        if has_paraglob_start {
+            return Ok(DatabaseFormat::PatternOnly);
+        }
 
+        // Check for MMDB metadata marker (searches last 128KB only)
+        let has_mmdb = crate::mmdb::find_metadata_marker(data).is_ok();
+        if !has_mmdb {
+            return Err(DatabaseError::Format(MmdbError::InvalidFormat(
+                "Unknown database format (no MMDB or PARAGLOB marker)".to_string(),
+            )));
+        }
+
+        // Fast path: Check metadata for section offsets (new format)
+        if let Ok(metadata) = crate::mmdb::MmdbMetadata::from_file(data) {
+            if let Ok(DataValue::Map(map)) = metadata.as_value() {
+                // If pattern_section_offset exists in metadata, use it to determine format
+                if let Some(DataValue::Uint32(pattern_offset)) = map.get("pattern_section_offset") {
+                    // New format with metadata offsets
+                    let has_patterns = *pattern_offset != 0;
+                    if let Some(DataValue::Uint32(literal_offset)) =
+                        map.get("literal_section_offset")
+                    {
+                        let has_literals = *literal_offset != 0;
+                        if has_patterns || has_literals {
+                            return Ok(DatabaseFormat::Combined);
+                        } else {
+                            return Ok(DatabaseFormat::IpOnly);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Slow path: Old format without metadata offsets - need to scan
         // Check for MMDB_PATTERN separator (combined format)
-        // Pattern section separator: "MMDB_PATTERN\x00\x00\x00" (16 bytes)
         let pattern_separator = b"MMDB_PATTERN\x00\x00\x00\x00";
         let has_pattern_section = data.windows(16).any(|window| window == pattern_separator);
 
-        match (has_mmdb, has_paraglob_start, has_pattern_section) {
-            (true, false, false) => Ok(DatabaseFormat::IpOnly),
-            (false, true, false) => Ok(DatabaseFormat::PatternOnly),
-            (true, false, true) => Ok(DatabaseFormat::Combined), // MMDB + pattern separator
-            (true, true, _) => Ok(DatabaseFormat::Combined),     // Both markers
-            (false, false, false) => Err(DatabaseError::Format(MmdbError::InvalidFormat(
-                "Unknown database format".to_string(),
-            ))),
-            _ => Ok(DatabaseFormat::Combined), // Any other combination, assume combined
+        if has_pattern_section {
+            Ok(DatabaseFormat::Combined)
+        } else {
+            Ok(DatabaseFormat::IpOnly)
         }
     }
 
@@ -492,9 +516,31 @@ impl Database {
         }
     }
 
-    /// Find the pattern section in a combined database
-    /// Returns the offset to the start of MMDB_PATTERN marker
-    fn find_pattern_section(data: &[u8]) -> Option<usize> {
+    /// Find the pattern section using fast metadata lookup with fallback to scanning
+    /// Returns the offset to the start of pattern data (after MMDB_PATTERN marker)
+    fn find_pattern_section_fast(data: &[u8]) -> Option<usize> {
+        // Fast path: Try to read offset from metadata
+        if let Ok(metadata) = crate::mmdb::MmdbMetadata::from_file(data) {
+            if let Ok(DataValue::Map(map)) = metadata.as_value() {
+                if let Some(DataValue::Uint32(offset)) = map.get("pattern_section_offset") {
+                    let offset_val = *offset as usize;
+                    // 0 means no pattern section (fast negative result)
+                    if offset_val == 0 {
+                        return None;
+                    }
+                    return Some(offset_val);
+                }
+            }
+        }
+
+        // Slow path: Scan for separator (backwards compatibility)
+        eprintln!("Warning: Database lacks section offset metadata, falling back to full file scan (slower load time)");
+        Self::find_pattern_section_slow(data)
+    }
+
+    /// Find the pattern section by scanning (slow, for backwards compatibility)
+    /// Returns the offset to the start of pattern data (after MMDB_PATTERN marker)
+    fn find_pattern_section_slow(data: &[u8]) -> Option<usize> {
         let separator = b"MMDB_PATTERN\x00\x00\x00\x00";
 
         // Search for the separator
@@ -507,9 +553,36 @@ impl Database {
         None
     }
 
-    /// Find the literal hash section in a combined database
+    /// Find the literal section using fast metadata lookup with fallback to scanning
     /// Returns the offset to the start of MMDB_LITERAL marker
-    fn find_literal_section(data: &[u8]) -> Option<usize> {
+    fn find_literal_section_fast(data: &[u8]) -> Option<usize> {
+        // Fast path: Try to read offset from metadata
+        if let Ok(metadata) = crate::mmdb::MmdbMetadata::from_file(data) {
+            if let Ok(DataValue::Map(map)) = metadata.as_value() {
+                if let Some(DataValue::Uint32(offset)) = map.get("literal_section_offset") {
+                    let offset_val = *offset as usize;
+                    // 0 means no literal section (fast negative result)
+                    if offset_val == 0 {
+                        return None;
+                    }
+                    // Metadata stores offset to start of data, but we need offset to marker
+                    // So subtract 16 bytes for the "MMDB_LITERAL" marker
+                    return Some(offset_val - 16);
+                }
+            }
+        }
+
+        // Slow path: Scan for separator (backwards compatibility)
+        if data.len() > 1024 * 1024 {
+            // Only warn for files > 1MB
+            eprintln!("Warning: Database lacks section offset metadata, falling back to full file scan (slower load time)");
+        }
+        Self::find_literal_section_slow(data)
+    }
+
+    /// Find the literal hash section by scanning (slow, for backwards compatibility)
+    /// Returns the offset to the start of MMDB_LITERAL marker
+    fn find_literal_section_slow(data: &[u8]) -> Option<usize> {
         let separator = b"MMDB_LITERAL\x00\x00\x00\x00";
 
         // Search for the separator

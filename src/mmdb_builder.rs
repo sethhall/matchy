@@ -323,8 +323,22 @@ impl MmdbBuilder {
             // Determine IP version needed
             let needs_v6 = ip_entries.iter().any(|(addr, _, _)| addr.is_ipv6());
 
-            // Use 24-bit records (most common, balances size and performance)
-            let record_size = RecordSize::Bits24;
+            // Choose record size based on expected tree size
+            // For /32 IPs, worst case is ~ip_count nodes
+            // 24-bit: max 16,777,216 nodes (16M IPs)
+            // 28-bit: max 268,435,456 nodes (268M IPs)
+            // 32-bit: max 4,294,967,296 nodes (4.2B IPs)
+            let estimated_nodes = ip_entries.len();
+            let record_size = if estimated_nodes > 200_000_000 {
+                // Over 200M IPs - use 32-bit for safety
+                RecordSize::Bits32
+            } else if estimated_nodes > 15_000_000 {
+                // Over 15M IPs - use 28-bit
+                RecordSize::Bits28
+            } else {
+                // Under 15M IPs - use 24-bit (most common)
+                RecordSize::Bits24
+            };
 
             let mut tree_builder = if needs_v6 {
                 IpTreeBuilder::new_v6(record_size)
@@ -500,6 +514,39 @@ impl MmdbBuilder {
             metadata.insert(
                 "glob_entry_count".to_string(),
                 DataValue::Uint32(glob_entries.len() as u32),
+            );
+
+            // ALWAYS write section offset fields for fast loading (0 = not present)
+            // This eliminates the need to scan the entire file for separators
+            let tree_and_separator_size = ip_tree_bytes.len() + 16;
+            let data_section_size = data_section.len();
+
+            // Pattern section offset (after tree + separator + data section)
+            // 0 means no pattern section present
+            let pattern_offset = if has_globs {
+                tree_and_separator_size + data_section_size + 16 // +16 for "MMDB_PATTERN" separator
+            } else {
+                0 // No pattern section
+            };
+            metadata.insert(
+                "pattern_section_offset".to_string(),
+                DataValue::Uint32(pattern_offset as u32),
+            );
+
+            // Literal section offset (after pattern section if present)
+            // 0 means no literal section present
+            let literal_offset = if has_literals {
+                if has_globs {
+                    tree_and_separator_size + data_section_size + 16 + glob_section_bytes.len() + 16
+                } else {
+                    tree_and_separator_size + data_section_size + 16 // +16 for "MMDB_LITERAL" separator
+                }
+            } else {
+                0 // No literal section
+            };
+            metadata.insert(
+                "literal_section_offset".to_string(),
+                DataValue::Uint32(literal_offset as u32),
             );
 
             // Encode metadata
