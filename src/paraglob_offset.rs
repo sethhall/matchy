@@ -566,7 +566,7 @@ impl ParaglobBuilder {
         header.pattern_strings_size = pattern_strings_size as u32;
         header.wildcard_count = pure_wildcards.len() as u32;
         header.total_buffer_size = total_size as u32;
-        header.reserved = 0;
+        // header.reserved is already initialized to [0; 3] in new()
 
         // v2 fields (if we have data)
         if data_section_size > 0 {
