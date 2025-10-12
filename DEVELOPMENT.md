@@ -1,10 +1,15 @@
-# Paraglob Rust Port - Development Notes
+# Matchy - Development Notes
 
 ## Project Summary
 
-This is a **completed** Rust port of the paraglob C++ library. The port successfully provides fast multi-pattern glob matching using the Aho-Corasick algorithm with zero-copy memory-mapped file support.
+Matchy is a **production-ready** unified database for IP addresses, string literals, and glob pattern matching. Built in Rust, it provides:
+- Fast IP address lookups using binary trie (O(log n))
+- Exact string matching with hash tables (O(1))
+- Multi-pattern glob matching with Aho-Corasick algorithm (O(n))
+- Zero-copy memory-mapped file support
+- Extended MMDB format with backwards compatibility
 
-**Status**: ✅ Production-ready (all tests passing, performance exceeds requirements)
+**Status**: ✅ Production-ready (all tests passing, excellent performance)
 
 ## Architecture
 
@@ -13,31 +18,35 @@ This is a **completed** Rust port of the paraglob C++ library. The port successf
 ```
 ┌─────────────────────────────────────┐
 │     Application Layer               │
-│  (C, C++, or Rust consumers)        │
+│     (C or Rust consumers)           │
 └─────────────────────────────────────┘
               │
-      ┌───────┴───────┐
-      │               │
-┌─────▼─────┐   ┌────▼──────┐
-│ C++ Shim  │   │  C API    │
-│ (wrapper) │   │(extern C) │
-└─────┬─────┘   └────┬──────┘
-      │              │
-      └──────┬───────┘
-             │
-      ┌──────▼────────┐
-      │  Rust Core    │
-      │ - AC Engine   │
-      │ - Glob Match  │
-      │ - Binary I/O  │
+              │
+      ┌───────▼───────┐
+      │    C API      │
+      │  (extern C)   │
+      └───────┬───────┘
+              │
+      ┌───────▼───────────────┐
+      │     Rust Core         │
+      │ - IP Binary Trie      │
+      │ - String Hash Table   │
+      │ - AC Pattern Engine   │
+      │ - Glob Matching       │
+      │ - MMDB Format I/O     │
+      │ - Memory Mapping      │
+      └───────────────────────┘
+```
       │ - Mmap        │
       └───────────────┘
 ```
 
 ### Core Implementation
 
+- **Unified Query Interface**: Single API automatically detects IP addresses vs. patterns
+- **Extended MMDB Format**: Backwards-compatible with MaxMind databases, adds string/pattern sections
 - **Offset-Based Data Structures**: All data uses file offsets instead of pointers for zero-copy mmap support
-- **Binary Format Compatibility**: 100% compatible with C++ .pgb files using `#[repr(C)]` structures
+- **Binary Format**: Uses `#[repr(C)]` structures for stable cross-platform compatibility
 - **Memory Safety**: Rust's safety guarantees with minimal unsafe code (FFI boundary only)
 
 ## Performance Characteristics
@@ -179,8 +188,8 @@ Two major bugs were fixed during development:
 
 - ✅ 79/79 unit tests passing
 - ✅ Serialization/deserialization roundtrip tests
-- ✅ Correctness tests against C++ reference implementation
-- ✅ Performance benchmarks exceeding requirements
+- ✅ Correctness tests for IP, string, and pattern matching
+- ✅ Performance benchmarks
 
 ## File Organization
 
@@ -199,7 +208,6 @@ examples/
 ├── README.md                 # Examples documentation
 ├── demo.rs                   # Basic usage demo
 ├── perf.rs                   # Performance benchmark
-├── cpp_comparison_test.rs    # C++ parity validation
 └── production_test.rs        # Production workload simulation
 
 tests/
@@ -245,9 +253,8 @@ Offset-based with mmap:
 
 - **Rust Core**: Idiomatic Rust with `Result<T, E>`, ownership, lifetimes
 - **C API**: Stable `extern "C"` with opaque handles, error codes
-- **C++ Shim**: RAII wrapper for C++ consumers (if needed)
 
-This approach eliminates C++ runtime dependencies while maintaining compatibility.
+This approach provides a stable C API that can be consumed from any language.
 
 ## Optimization Opportunities
 
@@ -369,7 +376,8 @@ These are preserved for historical reference but represent development history, 
 ### Additional Documentation
 
 - `examples/README.md` - Example programs and how to run them
-- C++ implementation in `../paraglob/` - Reference implementation
+- `README.md` - Project overview and API reference
+- `API_REDESIGN.md` - Detailed API specification
 
 ## Building & Testing
 
@@ -393,10 +401,10 @@ cargo doc --no-deps --open
 
 ## Key Takeaways
 
-1. **Port is complete and production-ready**
-2. **Performance exceeds original C++ implementation** for most workloads
+1. **Implementation is complete and production-ready**
+2. **Unified database** supports IP addresses, exact strings, and glob patterns
 3. **Zero-copy mmap provides massive memory savings** in multi-process scenarios
-4. **Binary format is 100% compatible** with C++ version
+4. **Backwards-compatible** with standard MaxMind MMDB format
 5. **All tests passing** with comprehensive coverage
 
 The architecture is sound, the implementation is correct, and performance is excellent for typical use cases.

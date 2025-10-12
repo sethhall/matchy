@@ -4,21 +4,27 @@ Guidance for working with the matchy codebase.
 
 ## Project Overview
 
-**matchy** is a production-ready Rust implementation of multi-pattern glob matching using the Aho-Corasick algorithm. It provides zero-copy memory-mapped file support and maintains binary compatibility with the original C++ paraglob library.
+**matchy** is a production-ready unified database for IP addresses, string literals, and glob pattern matching. Built in Rust, it provides:
+- Fast IP address lookups using binary trie
+- Exact string matching with hash tables
+- Multi-pattern glob matching using Aho-Corasick algorithm
+- Zero-copy memory-mapped file support
+- Extended MMDB format with backwards compatibility
 
 **Status**: ✅ Production Ready
 - 79/79 tests passing
-- Performance exceeds C++ baseline (2.4×-14× faster depending on workload)
-- Binary format compatible with C++ implementation
+- Excellent performance across all query types
+- Stable binary format for cross-platform use
 - Stable C FFI for cross-language use
 
 ### Design Principles
 
-1. **Zero-copy architecture**: Offset-based data structures enable direct memory mapping
-2. **Memory safety**: Core algorithms in safe Rust; unsafe code only at FFI boundaries
-3. **Performance**: O(n) matching complexity regardless of pattern count
-4. **FFI stability**: C API uses opaque handles and integer error codes
-5. **Binary compatibility**: `#[repr(C)]` structures match C++ layout exactly
+1. **Unified database**: Single file format for IP addresses, strings, and patterns
+2. **Zero-copy architecture**: Offset-based data structures enable direct memory mapping
+3. **Memory safety**: Core algorithms in safe Rust; unsafe code only at FFI boundaries
+4. **Performance**: Optimized data structures for each query type
+5. **FFI stability**: C API uses opaque handles and integer error codes
+6. **Binary stability**: `#[repr(C)]` structures for cross-platform compatibility
 
 ## Documentation
 
@@ -107,7 +113,7 @@ cargo doc --no-deps --open
 cargo doc --open
 ```
 
-### C/C++ Integration Testing
+### C Integration Testing
 
 ```bash
 # Compile and link C program against library
@@ -148,8 +154,7 @@ matchy/
 │   └── paraglob_bench.rs     # Criterion benchmarks
 ├── examples/
 │   ├── glob_demo.rs          # Basic glob pattern demonstrations
-│   ├── production_test.rs    # Production workload simulation
-│   └── cpp_comparison_test.rs # C++ compatibility validation
+│   └── production_test.rs    # Production workload simulation
 ├── include/
 │   └── matchy.h         # Auto-generated C header (cbindgen)
 ├── Cargo.toml              # Package metadata, dependencies, build profiles
@@ -168,7 +173,7 @@ matchy/
 | **ac_offset.rs** | Aho-Corasick automaton with offset-based pointers for mmap |
 | **paraglob_offset.rs** | Main Paraglob struct, pattern matching orchestration |
 | **glob.rs** | Glob syntax parsing and matching (*, ?, [], [!]) |
-| **offset_format.rs** | Binary format definitions, must match C++ layout exactly |
+|| **offset_format.rs** | Binary format definitions with stable layout |
 | **serialization.rs** | High-level save/load/mmap API |
 | **binary/** | Low-level binary format reading/writing/validation |
 | **mmap.rs** | Safe wrapper around memory-mapped files |
@@ -198,7 +203,7 @@ When working with unsafe:
 
 ### Binary Format Changes
 
-All binary format structures use `#[repr(C)]` and **must maintain exact C++ layout**:
+All binary format structures use `#[repr(C)]` for stable cross-platform compatibility:
 
 ```rust
 #[repr(C)]
@@ -214,8 +219,8 @@ pub struct OffsetAcHeader {
 
 **Critical**: Any changes to these structures break binary compatibility. If you must change:
 1. Update the version number
-2. Test with C++ implementation
-3. Verify byte-by-byte .pgb file compatibility
+2. Test thoroughly with existing databases
+3. Verify byte-by-byte .mxy file compatibility
 4. Update DEVELOPMENT.md with format changes
 
 ### Testing Strategy
@@ -394,14 +399,13 @@ cargo +nightly miri test
 
 ## Integration with Parent Project
 
-This Rust port is part of the larger `mmdb_with_strings` project:
+Matchy is part of the larger `mmdb_with_strings` project:
 
 - **Parent directory**: `/Users/seth/factual/mmdb_with_strings/`
-- **C++ paraglob**: `../paraglob/` - Original implementation
 - **libmaxminddb**: `../libmaxminddb/` - MaxMind DB integration
 - **Parent WARP.md**: `../WARP.md` - Broader project context
 
-The Rust port aims to replace the C++ implementation while maintaining binary compatibility, enabling the larger project to eliminate C++ runtime dependencies.
+Matchy extends the MMDB format to support string and pattern matching alongside traditional IP address lookups.
 
 ## Cargo Profile Settings
 

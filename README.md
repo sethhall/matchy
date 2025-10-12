@@ -624,7 +624,7 @@ cargo bench
 cargo doc --no-deps --open
 ```
 
-The build process automatically generates `include/matchy.h` for C/C++ integration.
+The build process automatically generates `include/matchy.h` for C integration.
 
 **Build artifacts:**
 - `target/release/libmatchy.dylib` (macOS)
@@ -676,9 +676,6 @@ See [API documentation](https://docs.rs/matchy) for complete reference.
 ```bash
 # C programs
 gcc -o app app.c -L./target/release -lmatchy -lpthread -ldl -lm
-
-# C++ programs
-g++ -o app app.cpp -L./target/release -lmatchy -lpthread -ldl -lm
 
 # Add to rpath (macOS)
 install_name_tool -add_rpath @executable_path/. app

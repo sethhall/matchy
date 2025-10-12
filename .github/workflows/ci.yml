@@ -65,7 +65,6 @@ jobs:
       - name: Run examples
         run: |
           cargo run --release --example production_test
-          cargo run --release --example cpp_comparison_test
 
   fmt:
     name: Formatting
