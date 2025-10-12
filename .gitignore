@@ -11,3 +11,7 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# Benchmarks - keep baselines, ignore runtime data
+/benchmarks/criterion_data/
+/benchmarks/comparison_*/

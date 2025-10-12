@@ -21,8 +21,7 @@ generation = true        # Use cbindgen to generate headers
 
 [package.metadata.capi.install.include]
 # Install additional headers from the include directory  
-asset = [{from = "include/matchy/matchy.hpp"},
-         {from = "include/matchy/maxminddb.h"}]
+asset = [{from = "include/matchy/maxminddb.h"}]
 
 [package.metadata.capi.pkg_config]
 name = "matchy"
