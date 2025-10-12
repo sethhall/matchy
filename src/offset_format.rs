@@ -34,6 +34,7 @@
 //! 4. **Portability**: Little-endian u32/u8 only (standard on x86/ARM)
 
 use std::mem;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Magic bytes identifying Paraglob binary format
 pub const MAGIC: &[u8; 8] = b"PARAGLOB";
@@ -57,7 +58,7 @@ pub const VERSION_V1: u32 = 1;
 /// - v2 (96 bytes): Adds data section support for pattern-associated data
 /// - v3 (104 bytes): Adds AC literal mapping for O(1) zero-copy loading
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct ParaglobHeader {
     /// Magic bytes: "PARAGLOB"
     pub magic: [u8; 8],
@@ -154,7 +155,7 @@ pub struct ParaglobHeader {
 /// Represents a single node in the Aho-Corasick trie.
 /// All child references are stored as offsets to allow zero-copy loading.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct ACNode {
     /// Unique node ID
     pub node_id: u32,
@@ -191,7 +192,7 @@ pub struct ACNode {
 ///
 /// Represents a transition from one node to another on a specific character.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct ACEdge {
     /// Input character (0-255)
     pub character: u8,
@@ -207,7 +208,7 @@ pub struct ACEdge {
 ///
 /// Metadata about a single glob pattern in the database.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct PatternEntry {
     /// Pattern ID (matches IDs used in AC automaton)
     pub pattern_id: u32,
@@ -230,7 +231,7 @@ pub struct PatternEntry {
 /// Maps a meta-word (literal segment from AC automaton) to all patterns
 /// that contain it. Used for hybrid AC + glob matching.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct MetaWordMapping {
     /// Meta-word string offset
     pub meta_word_offset: u32,
@@ -247,7 +248,7 @@ pub struct MetaWordMapping {
 /// Represents a pattern with only wildcards (*, ?) and no literals.
 /// These must be checked separately since they don't have AC matches.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct SingleWildcard {
     /// Pattern ID
     pub pattern_id: u32,
@@ -262,7 +263,7 @@ pub struct SingleWildcard {
 /// The data can be inline (stored in data section) or external
 /// (reference to MMDB data section).
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct PatternDataMapping {
     /// Pattern ID this mapping applies to
     pub pattern_id: u32,
@@ -343,6 +344,72 @@ impl ParaglobHeader {
         if self.version != VERSION {
             return Err("Unsupported version - only v3 format supported");
         }
+        Ok(())
+    }
+
+    /// Validate that all header offsets are within buffer bounds
+    pub fn validate_offsets(&self, buffer_len: usize) -> Result<(), &'static str> {
+        // Validate AC literal mapping offset if present
+        if self.has_ac_literal_mapping() {
+            let offset = self.ac_literal_map_offset as usize;
+            if offset >= buffer_len {
+                return Err("AC literal map offset out of bounds");
+            }
+        }
+
+        // Validate data section if present
+        if self.has_data_section() {
+            let start = self.data_section_offset as usize;
+            let size = self.data_section_size as usize;
+            if start.checked_add(size).is_none_or(|end| end > buffer_len) {
+                return Err("Data section out of bounds");
+            }
+        }
+
+        // Validate mapping table if present
+        if self.mapping_count > 0 {
+            let offset = self.mapping_table_offset as usize;
+            if offset >= buffer_len {
+                return Err("Mapping table offset out of bounds");
+            }
+        }
+
+        // Validate AC nodes section
+        if self.ac_node_count > 0 {
+            let offset = self.ac_nodes_offset as usize;
+            let size = (self.ac_node_count as usize) * mem::size_of::<ACNode>();
+            if offset.checked_add(size).is_none_or(|end| end > buffer_len) {
+                return Err("AC nodes section out of bounds");
+            }
+        }
+
+        // Validate patterns section
+        if self.pattern_count > 0 {
+            let offset = self.patterns_offset as usize;
+            let size = (self.pattern_count as usize) * mem::size_of::<PatternEntry>();
+            if offset.checked_add(size).is_none_or(|end| end > buffer_len) {
+                return Err("Patterns section out of bounds");
+            }
+        }
+
+        // Validate pattern strings section
+        if self.pattern_strings_size > 0 {
+            let start = self.pattern_strings_offset as usize;
+            let size = self.pattern_strings_size as usize;
+            if start.checked_add(size).is_none_or(|end| end > buffer_len) {
+                return Err("Pattern strings section out of bounds");
+            }
+        }
+
+        // Validate meta-word mappings
+        if self.meta_word_mapping_count > 0 {
+            let offset = self.meta_word_mappings_offset as usize;
+            let size = (self.meta_word_mapping_count as usize) * mem::size_of::<MetaWordMapping>();
+            if offset.checked_add(size).is_none_or(|end| end > buffer_len) {
+                return Err("Meta-word mappings section out of bounds");
+            }
+        }
+
         Ok(())
     }
 
@@ -457,6 +524,73 @@ pub unsafe fn read_cstring(buffer: &[u8], offset: usize) -> Result<&str, &'stati
 
     // Convert to str
     std::str::from_utf8(&buffer[start..end]).map_err(|_| "Invalid UTF-8")
+}
+
+/// Helper to read a UTF-8 string from buffer with known length (FAST PATH)
+///
+/// This is much faster than `read_cstring` because it doesn't scan for the null terminator.
+/// Use this when you have the string length from PatternEntry.pattern_string_length.
+///
+/// # Safety
+///
+/// Caller must ensure:
+/// - offset + length <= buffer.len()
+/// - Bytes are valid UTF-8
+/// - Length is correct
+#[inline]
+pub unsafe fn read_cstring_with_len(
+    buffer: &[u8],
+    offset: usize,
+    length: usize,
+) -> Result<&str, &'static str> {
+    if offset + length > buffer.len() {
+        return Err("Offset + length out of bounds");
+    }
+
+    // Direct slice without scanning for null terminator
+    std::str::from_utf8(&buffer[offset..offset + length]).map_err(|_| "Invalid UTF-8")
+}
+
+/// Helper to read a UTF-8 string from buffer with known length (ULTRA-FAST PATH - NO UTF-8 VALIDATION)
+///
+/// This is the fastest option - it skips null terminator scanning AND UTF-8 validation.
+/// Only use this in hot query paths where you KNOW the strings are valid UTF-8 (from build time).
+///
+/// # Safety
+///
+/// Caller must ensure:
+/// - offset + length <= buffer.len()
+/// - Bytes are DEFINITELY valid UTF-8 (undefined behavior if not!)
+/// - Length is correct
+#[inline]
+pub unsafe fn read_str_unchecked(buffer: &[u8], offset: usize, length: usize) -> &str {
+    debug_assert!(offset + length <= buffer.len());
+    // SAFETY: Caller guarantees valid UTF-8
+    std::str::from_utf8_unchecked(&buffer[offset..offset + length])
+}
+
+/// Helper to read a UTF-8 string from buffer with known length (SAFE PATH - validates UTF-8)
+///
+/// This validates UTF-8 on every read. Use for untrusted databases.
+/// Slower than `read_str_unchecked` but prevents undefined behavior.
+///
+/// # Safety
+///
+/// Caller must ensure:
+/// - offset + length <= buffer.len()
+/// - Length is correct
+///
+/// UTF-8 validation is performed, so invalid UTF-8 returns an error.
+#[inline]
+pub unsafe fn read_str_checked(
+    buffer: &[u8],
+    offset: usize,
+    length: usize,
+) -> Result<&str, &'static str> {
+    if offset + length > buffer.len() {
+        return Err("Offset + length out of bounds");
+    }
+    std::str::from_utf8(&buffer[offset..offset + length]).map_err(|_| "Invalid UTF-8")
 }
 
 #[cfg(test)]

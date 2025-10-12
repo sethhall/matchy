@@ -15,9 +15,10 @@
 //! All operations (both building and matching) work directly on this buffer.
 
 use crate::error::ParaglobError;
-use crate::offset_format::{read_struct, read_struct_slice, ACEdge, ACNode};
+use crate::offset_format::{ACEdge, ACNode};
 use std::collections::{HashMap, VecDeque};
 use std::mem;
+use zerocopy::Ref;
 
 /// Matching mode for the automaton
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,7 +355,15 @@ impl ACAutomaton {
 
             // Follow failure links until we find a transition or reach root
             while next_offset.is_none() && current_offset != 0 {
-                let node: ACNode = unsafe { read_struct(&self.buffer, current_offset) };
+                let node_slice = match self.buffer.get(current_offset..) {
+                    Some(s) => s,
+                    None => break,
+                };
+                let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
+                    Ok((r, _)) => r,
+                    Err(_) => break,
+                };
+                let node = *node_ref;
                 current_offset = node.failure_offset as usize;
 
                 if current_offset == 0 {
@@ -374,16 +383,30 @@ impl ACAutomaton {
 
             // Collect pattern IDs at this state
             // Note: Patterns from suffix states were already merged during build_failure_links
-            let node: ACNode = unsafe { read_struct(&self.buffer, current_offset) };
+            let node_slice = match self.buffer.get(current_offset..) {
+                Some(s) => s,
+                None => continue,
+            };
+            let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
+                Ok((r, _)) => r,
+                Err(_) => continue,
+            };
+            let node = *node_ref;
             if node.pattern_count > 0 {
-                let pattern_ids_slice: &[u32] = unsafe {
-                    read_struct_slice(
-                        &self.buffer,
-                        node.patterns_offset as usize,
-                        node.pattern_count as usize,
-                    )
-                };
-                pattern_ids.extend_from_slice(pattern_ids_slice);
+                // Read pattern IDs with zerocopy (HOT PATH optimization)
+                // Pattern IDs are always 4-byte aligned in our serialization format
+                let patterns_offset = node.patterns_offset as usize;
+                let pattern_count = node.pattern_count as usize;
+
+                if patterns_offset + pattern_count * 4 <= self.buffer.len() {
+                    let pattern_slice = &self.buffer[patterns_offset..];
+                    if let Ok((ids_ref, _)) =
+                        Ref::<_, [u32]>::from_prefix_with_elems(pattern_slice, pattern_count)
+                    {
+                        // Zero-copy path - direct slice access
+                        pattern_ids.extend_from_slice(&ids_ref);
+                    }
+                }
             }
         }
 
@@ -397,25 +420,38 @@ impl ACAutomaton {
     ///
     /// Returns the offset to the target node, or None if no transition exists.
     fn find_transition(&self, node_offset: usize, ch: u8) -> Option<usize> {
-        let node: ACNode = unsafe { read_struct(&self.buffer, node_offset) };
+        let node_slice = self.buffer.get(node_offset..)?;
+        let (node_ref, _) = Ref::<_, ACNode>::from_prefix(node_slice).ok()?;
+        let node = *node_ref;
 
         if node.edge_count == 0 {
             return None;
         }
 
-        let edges: &[ACEdge] = unsafe {
-            read_struct_slice(
-                &self.buffer,
-                node.edges_offset as usize,
-                node.edge_count as usize,
-            )
-        };
+        // Read edges safely byte-by-byte (may not be aligned)
+        let edges_offset = node.edges_offset as usize;
+        let edge_size = mem::size_of::<ACEdge>();
 
-        // Binary search (edges are sorted by character)
-        edges
-            .binary_search_by_key(&ch, |edge| edge.character)
-            .ok()
-            .map(|idx| edges[idx].target_offset as usize)
+        // Binary search through edges (sorted by character)
+        for i in 0..node.edge_count as usize {
+            let edge_offset = edges_offset + i * edge_size;
+            if edge_offset + edge_size > self.buffer.len() {
+                return None;
+            }
+
+            let edge_slice = self.buffer.get(edge_offset..)?;
+            let (edge_ref, _) = Ref::<_, ACEdge>::from_prefix(edge_slice).ok()?;
+            let edge = *edge_ref;
+
+            if edge.character == ch {
+                return Some(edge.target_offset as usize);
+            } else if edge.character > ch {
+                // Edges are sorted, so we won't find it
+                return None;
+            }
+        }
+
+        None
     }
 
     /// Get the buffer (for serialization)

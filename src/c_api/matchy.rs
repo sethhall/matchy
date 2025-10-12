@@ -366,10 +366,12 @@ pub unsafe extern "C" fn matchy_builder_free(builder: *mut matchy_builder_t) {
 // DATABASE QUERYING API
 // ============================================================================
 
-/// Open database from file (memory-mapped)
+/// Open database from file (memory-mapped) - SAFE mode
 ///
 /// Opens a database file using memory mapping for optimal performance.
 /// The file is not loaded into memory - it's accessed on-demand.
+///
+/// This validates UTF-8 on pattern string reads. Use for untrusted databases.
 ///
 /// # Parameters
 /// * `filename` - Path to database file (null-terminated C string, must not be NULL)
@@ -401,6 +403,54 @@ pub unsafe extern "C" fn matchy_open(filename: *const c_char) -> *mut matchy_t {
     };
 
     match RustDatabase::open(path) {
+        Ok(db) => {
+            let internal = Box::new(MatchyInternal { database: db });
+            matchy_t::from_internal(internal)
+        }
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Open database from file (memory-mapped) - TRUSTED mode
+///
+/// **SECURITY WARNING**: Only use for databases from trusted sources!
+/// Skips UTF-8 validation for ~15-20% performance improvement.
+///
+/// Opens a database file using memory mapping for optimal performance.
+/// The file is not loaded into memory - it's accessed on-demand.
+///
+/// # Parameters
+/// * `filename` - Path to database file (null-terminated C string, must not be NULL)
+///
+/// # Returns
+/// * Non-null pointer on success
+/// * NULL on failure
+///
+/// # Safety
+/// * `filename` must be a valid null-terminated C string
+/// * Database must be from a trusted source (undefined behavior if malicious)
+///
+/// # Example
+/// ```c
+/// // Only for databases you built yourself or trust completely
+/// matchy_t *db = matchy_open_trusted("my-threats.db");
+/// if (db == NULL) {
+///     fprintf(stderr, "Failed to open database\n");
+///     return 1;
+/// }
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_open_trusted(filename: *const c_char) -> *mut matchy_t {
+    if filename.is_null() {
+        return ptr::null_mut();
+    }
+
+    let path = match CStr::from_ptr(filename).to_str() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    match RustDatabase::open_trusted(path) {
         Ok(db) => {
             let internal = Box::new(MatchyInternal { database: db });
             matchy_t::from_internal(internal)

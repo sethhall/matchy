@@ -53,8 +53,12 @@ impl MmappedParaglob {
 ///
 /// let patterns = vec!["*.txt", "test_*"];
 /// let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
-/// save(&pg, "patterns.pgb").unwrap();
+/// save(&pg, "patterns.mxy").unwrap();
 /// ```
+///
+/// **Note:** This is a low-level API for standalone pattern files. Most users should
+/// use the unified `Database` and `DatabaseBuilder` APIs instead, which create `.mxy`
+/// files with optional IP and pattern data.
 pub fn save<P: AsRef<Path>>(paraglob: &Paraglob, path: P) -> Result<(), ParaglobError> {
     let mut file = File::create(path)?;
     file.write_all(paraglob.buffer())?;
@@ -79,9 +83,12 @@ pub fn save<P: AsRef<Path>>(paraglob: &Paraglob, path: P) -> Result<(), Paraglob
 /// use matchy::glob::MatchMode;
 /// use matchy::serialization::load;
 ///
-/// let mut pg = load("patterns.pgb", MatchMode::CaseSensitive).unwrap();
+/// let mut pg = load("patterns.mxy", MatchMode::CaseSensitive).unwrap();
 /// let matches = pg.paraglob_mut().find_all("test.txt");
 /// ```
+///
+/// **Note:** This is a low-level API for standalone pattern files. Most users should
+/// use the unified `Database::open()` API instead.
 pub fn load<P: AsRef<Path>>(
     path: P,
     mode: GlobMatchMode,

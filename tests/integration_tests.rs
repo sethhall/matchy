@@ -427,7 +427,7 @@ fn test_v2_roundtrip_serialization() {
         panic!("Expected Map after roundtrip");
     }
 
-    assert_eq!(data2, &DataValue::String("test_data".to_string()));
+    assert_eq!(data2, DataValue::String("test_data".to_string()));
 }
 
 #[test]
