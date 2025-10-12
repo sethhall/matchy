@@ -298,6 +298,43 @@ fn bench_case_sensitivity(c: &mut Criterion) {
     group.finish();
 }
 
+// Benchmark 8: Dense Node Performance (tests 64-byte alignment impact)
+fn bench_dense_nodes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dense_nodes");
+
+    // Create patterns that force dense nodes (9+ transitions)
+    let mut patterns = Vec::new();
+
+    // 26 patterns with common prefix -> creates dense node
+    for ch in 'a'..='z' {
+        patterns.push(format!("prefix_{}suffix", ch));
+    }
+
+    // 100 numeric patterns -> more dense nodes
+    for i in 0..10 {
+        for j in 0..10 {
+            patterns.push(format!("num_{}{}_end", i, j));
+        }
+    }
+
+    let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+    let mut pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
+
+    // Test traversing dense nodes
+    let test_strings = vec!["prefix_msuffix", "num_55_end", "prefix_zsuffix"];
+
+    group.bench_function("dense_lookup", |b| {
+        b.iter(|| {
+            for s in &test_strings {
+                let matches = pg.find_all(black_box(s));
+                black_box(matches);
+            }
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_build,
@@ -306,7 +343,8 @@ criterion_group!(
     bench_load,
     bench_memory_efficiency,
     bench_realistic_workload,
-    bench_case_sensitivity
+    bench_case_sensitivity,
+    bench_dense_nodes
 );
 
 criterion_main!(benches);

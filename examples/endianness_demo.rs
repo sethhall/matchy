@@ -15,7 +15,7 @@
 //! - Little-endian (x86/ARM): Zero overhead, compiles to direct loads
 //! - Big-endian (POWER/SPARC): Single CPU instruction per read (bswap)
 
-use matchy::{Database, DatabaseBuilder, DataValue, MatchMode};
+use matchy::{DataValue, Database, DatabaseBuilder, MatchMode};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,7 +34,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add some test patterns
     let mut data = HashMap::new();
-    data.insert("category".to_string(), DataValue::String("test".to_string()));
+    data.insert(
+        "category".to_string(),
+        DataValue::String("test".to_string()),
+    );
     builder.add_entry("*.example.com", data.clone())?;
     builder.add_entry("test_*", data)?;
 
@@ -47,10 +50,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Format: Hybrid MMDB + Pattern matcher");
     println!("   All multi-byte values stored in little-endian format");
     println!("   Endianness marker: Always written as 0x01 (little-endian)");
-    
+
     #[cfg(target_endian = "little")]
     println!("   Native system: Little-endian (no byte swapping needed)");
-    
+
     #[cfg(target_endian = "big")]
     println!("   Native system: Big-endian (transparent byte swapping on read)");
 
@@ -66,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test queries
     println!("\n4. Testing queries...");
-    
+
     if let Some(result) = db.lookup("test.example.com")? {
         println!("   ✓ Match found: test.example.com -> {:?}", result);
     }
@@ -79,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n5. Performance characteristics:");
     println!("   - Database format: Always little-endian");
     println!("   - Storage: Zero-copy memory mapped file");
-    
+
     #[cfg(target_endian = "little")]
     {
         println!("   - Read overhead: Zero (native endianness)");

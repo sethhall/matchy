@@ -79,8 +79,10 @@ impl EndiannessMarker {
     pub const fn needs_swap(self) -> bool {
         !matches!(
             (self, Self::native()),
-            (EndiannessMarker::LittleEndian, EndiannessMarker::LittleEndian)
-                | (EndiannessMarker::BigEndian, EndiannessMarker::BigEndian)
+            (
+                EndiannessMarker::LittleEndian,
+                EndiannessMarker::LittleEndian
+            ) | (EndiannessMarker::BigEndian, EndiannessMarker::BigEndian)
         )
     }
 

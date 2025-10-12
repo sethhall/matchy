@@ -389,7 +389,7 @@ impl ParaglobHeader {
     /// Create a new v3 header with magic and version
     pub fn new() -> Self {
         use crate::endian::EndiannessMarker;
-        
+
         Self {
             magic: *MAGIC,
             version: VERSION,
@@ -517,7 +517,7 @@ impl ParaglobHeader {
     /// Get the endianness marker from the header
     pub fn get_endianness(&self) -> crate::endian::EndiannessMarker {
         use crate::endian::EndiannessMarker;
-        
+
         match self.endianness {
             0x01 => EndiannessMarker::LittleEndian,
             0x02 => EndiannessMarker::BigEndian,
