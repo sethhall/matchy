@@ -495,7 +495,9 @@ impl<'a> DataDecoder<'a> {
             return Err("Offset before base");
         }
         cursor -= self.base_offset;
-        self.decode_at(&mut cursor)
+        let value = self.decode_at(&mut cursor)?;
+        // Recursively resolve pointers in the returned value
+        self.resolve_pointers(value)
     }
 
     fn decode_at(&self, cursor: &mut usize) -> Result<DataValue, &'static str> {
@@ -842,6 +844,40 @@ impl<'a> DataDecoder<'a> {
             _ => Err("Invalid size encoding"),
         }
     }
+
+    /// Recursively resolve all pointers in a decoded value
+    fn resolve_pointers(&self, value: DataValue) -> Result<DataValue, &'static str> {
+        match value {
+            DataValue::Pointer(offset) => {
+                // Follow the pointer and recursively resolve
+                let mut cursor = offset as usize;
+                if cursor < self.base_offset {
+                    return Err("Pointer offset before base");
+                }
+                cursor -= self.base_offset;
+                let pointed_value = self.decode_at(&mut cursor)?;
+                self.resolve_pointers(pointed_value)
+            }
+            DataValue::Map(entries) => {
+                // Recursively resolve pointers in map values
+                let mut resolved_map = HashMap::new();
+                for (key, val) in entries {
+                    resolved_map.insert(key, self.resolve_pointers(val)?);
+                }
+                Ok(DataValue::Map(resolved_map))
+            }
+            DataValue::Array(items) => {
+                // Recursively resolve pointers in array elements
+                let mut resolved_array = Vec::new();
+                for item in items {
+                    resolved_array.push(self.resolve_pointers(item)?);
+                }
+                Ok(DataValue::Array(resolved_array))
+            }
+            // All other types have no pointers to resolve
+            other => Ok(other),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1019,24 +1055,43 @@ mod tests {
 
     #[test]
     fn test_pointer_encoding() {
+        // Test pointer resolution with actual data that pointers reference
         let mut encoder = DataEncoder::new();
 
-        // Test different pointer sizes
-        let ptrs = vec![
-            DataValue::Pointer(0x100),      // 11-bit
-            DataValue::Pointer(0x10000),    // 19-bit
-            DataValue::Pointer(0x1000000),  // 27-bit
-            DataValue::Pointer(0xDEADBEEF), // 32-bit
-        ];
+        // First encode some actual data that we'll point to
+        let target_data = DataValue::String("shared_value".to_string());
+        let target_offset = encoder.encode(&target_data);
 
-        let offsets: Vec<_> = ptrs.iter().map(|p| encoder.encode(p)).collect();
+        // Now create a map that uses a pointer to reference that data (simulating deduplication)
+        // In MMDB format, pointers are typically used within maps for deduplicated keys/values
+        let mut map = HashMap::new();
+        map.insert(
+            "direct".to_string(),
+            DataValue::String("direct_value".to_string()),
+        );
+        // Manually insert pointer (in real MMDB, encoder would do this for deduplication)
+        map.insert("ptr_ref".to_string(), DataValue::Pointer(target_offset));
+
+        let map_offset = encoder.encode(&DataValue::Map(map));
 
         let bytes = encoder.into_bytes();
         let decoder = DataDecoder::new(&bytes, 0);
 
-        for (offset, expected) in offsets.iter().zip(ptrs.iter()) {
-            let decoded = decoder.decode(*offset).unwrap();
-            assert_eq!(&decoded, expected);
+        // Decode the map - pointers should be automatically resolved
+        let decoded = decoder.decode(map_offset).unwrap();
+
+        if let DataValue::Map(decoded_map) = decoded {
+            // The pointer should have been resolved to the actual string value
+            assert_eq!(
+                decoded_map.get("direct"),
+                Some(&DataValue::String("direct_value".to_string()))
+            );
+            assert_eq!(
+                decoded_map.get("ptr_ref"),
+                Some(&DataValue::String("shared_value".to_string()))
+            );
+        } else {
+            panic!("Expected Map, got {:?}", decoded);
         }
     }
 }
