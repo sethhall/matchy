@@ -1,0 +1,14 @@
+{
+  "baseline_name": "post-state-encoding",
+  "timestamp": "20251012_143920",
+  "git_commit": "a2d72cace76890ec3314fbfd6786908915bacac2",
+  "git_commit_short": "a2d72ca",
+  "git_branch": "feature/state-encoding-optimization",
+  "git_dirty": true,
+  "rustc_version": "rustc 1.90.0 (1159e78c4 2025-09-14)",
+  "cargo_version": "cargo 1.90.0 (840b83a10 2025-07-30)",
+  "system": "Darwin blake.lan 25.0.0 Darwin Kernel Version 25.0.0: Mon Aug 25 21:12:01 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T8132 arm64",
+  "cpu_info": "Apple M4",
+  "cpu_count": "10",
+  "memory_gb": "24"
+}

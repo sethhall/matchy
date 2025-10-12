@@ -150,10 +150,48 @@ pub struct ParaglobHeader {
     pub ac_literal_map_count: u32,
 }
 
+/// State encoding type for AC automaton nodes
+///
+/// Determines how transitions are stored and looked up for optimal performance.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateKind {
+    /// No transitions (terminal state only)
+    Empty = 0,
+    /// Single transition - stored inline in node (75-80% of states)
+    One = 1,
+    /// 2-8 transitions - sparse edge array (10-15% of states)
+    Sparse = 2,
+    /// 9+ transitions - dense lookup table (2-5% of states)
+    Dense = 3,
+}
+
+impl StateKind {
+    /// Convert from u8 (for deserialization)
+    #[inline]
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(StateKind::Empty),
+            1 => Some(StateKind::One),
+            2 => Some(StateKind::Sparse),
+            3 => Some(StateKind::Dense),
+            _ => None,
+        }
+    }
+}
+
 /// AC Automaton node (32 bytes, 8-byte aligned)
 ///
-/// Represents a single node in the Aho-Corasick trie.
+/// Represents a single node in the Aho-Corasick trie with state-specific encoding.
 /// All child references are stored as offsets to allow zero-copy loading.
+///
+/// # State Encoding
+///
+/// The node uses different encodings based on transition count:
+/// - **Empty** (0 transitions): No additional data needed
+/// - **One** (1 transition): Character and target stored inline (no indirection!)
+/// - **Sparse** (2-8 transitions): Offset to edge array, linear search
+/// - **Dense** (9+ transitions): Offset to 256-entry lookup table, O(1) access
 #[repr(C)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct ACNode {
@@ -163,34 +201,54 @@ pub struct ACNode {
     /// Offset to failure link node (0 = root)
     pub failure_offset: u32,
 
-    /// Offset to edge array (0 = no edges)
+    /// State encoding type (StateKind enum)
+    pub state_kind: u8,
+
+    /// Depth from root node
+    pub depth: u8,
+
+    /// Is this a terminal/final state? (1=yes, 0=no)
+    pub is_final: u8,
+
+    /// Reserved for future flags
+    pub reserved_flags: u8,
+
+    /// ONE encoding: character for single transition
+    pub one_char: u8,
+
+    /// Reserved for alignment
+    pub reserved_one: [u8; 3],
+
+    /// SPARSE/DENSE encoding: offset-based lookup (4 bytes)
+    /// - SPARSE: offset to ACEdge array
+    /// - DENSE: offset to DenseLookup table
+    /// - ONE: target offset for single transition
     pub edges_offset: u32,
 
-    /// Number of outgoing edges
+    /// Number of edges (SPARSE/DENSE states only)
     pub edge_count: u16,
 
     /// Reserved for alignment
-    pub reserved1: u16,
+    pub reserved_edge: u16,
 
-    /// Offset to pattern ID array (0 = no patterns)
+    /// Offset to pattern ID array
     pub patterns_offset: u32,
 
     /// Number of pattern IDs at this node
     pub pattern_count: u16,
 
-    /// Is this a terminal/word node?
-    pub is_final: u8,
-
-    /// Depth from root
-    pub depth: u8,
-
-    /// Reserved for future use (padding to 32 bytes)
-    pub reserved2: [u32; 2],
+    /// Reserved for alignment
+    pub reserved_pattern: u16,
 }
+// Total: node_id(4) + failure_offset(4) + state_kind/depth/is_final/reserved(4)
+//        + one_char/reserved_one(4) + edges_offset(4) + edge_count/reserved(4)
+//        + patterns_offset(4) + pattern_count/reserved(4)
+//        = 4+4+4+4+4+4+4+4 = 32 bytes ✓
 
 /// AC Automaton edge (8 bytes, 4-byte aligned)
 ///
 /// Represents a transition from one node to another on a specific character.
+/// Used by SPARSE state encoding.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct ACEdge {
@@ -202,6 +260,18 @@ pub struct ACEdge {
 
     /// Offset to target node
     pub target_offset: u32,
+}
+
+/// Dense lookup table for states with many transitions (1024 bytes, 4-byte aligned)
+///
+/// Used by DENSE state encoding for O(1) transition lookup.
+/// Each entry is a target node offset (0 = no transition).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DenseLookup {
+    /// Target offsets indexed by character (0-255)
+    /// 0 means no transition for that character
+    pub targets: [u32; 256],
 }
 
 /// Pattern entry (16 bytes, 8-byte aligned)
@@ -280,6 +350,7 @@ pub struct PatternDataMapping {
 const _: () = assert!(mem::size_of::<ParaglobHeader>() == 104); // v3: 8-byte magic + 24 * u32 fields
 const _: () = assert!(mem::size_of::<ACNode>() == 32);
 const _: () = assert!(mem::size_of::<ACEdge>() == 8);
+const _: () = assert!(mem::size_of::<DenseLookup>() == 1024); // 256 * 4 bytes
 const _: () = assert!(mem::size_of::<PatternEntry>() == 16);
 const _: () = assert!(mem::size_of::<MetaWordMapping>() == 12);
 const _: () = assert!(mem::size_of::<SingleWildcard>() == 8);
@@ -430,19 +501,23 @@ impl ParaglobHeader {
 }
 
 impl ACNode {
-    /// Create a new node
+    /// Create a new node with default EMPTY encoding
     pub fn new(node_id: u32, depth: u8) -> Self {
         Self {
             node_id,
             failure_offset: 0,
+            state_kind: StateKind::Empty as u8,
+            depth,
+            is_final: 0,
+            reserved_flags: 0,
+            one_char: 0,
+            reserved_one: [0; 3],
             edges_offset: 0,
             edge_count: 0,
-            reserved1: 0,
+            reserved_edge: 0,
             patterns_offset: 0,
             pattern_count: 0,
-            is_final: 0,
-            depth,
-            reserved2: [0; 2],
+            reserved_pattern: 0,
         }
     }
 }

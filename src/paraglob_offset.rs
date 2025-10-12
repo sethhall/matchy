@@ -1054,49 +1054,78 @@ impl Paraglob {
     }
 
     /// Find a transition from a node for a character in AC automaton
+    /// Uses state-specific encoding for optimal performance
     fn find_ac_transition(ac_buffer: &[u8], node_offset: usize, ch: u8) -> Option<usize> {
-        use crate::offset_format::ACNode;
+        use crate::offset_format::{ACNode, StateKind};
 
         let node_slice = ac_buffer.get(node_offset..)?;
         let (node_ref, _) = Ref::<_, ACNode>::from_prefix(node_slice).ok()?;
         let node = *node_ref;
 
-        if node.edge_count == 0 {
-            return None;
-        }
+        // Dispatch on state encoding
+        let kind = StateKind::from_u8(node.state_kind)?;
 
-        // Use zerocopy for edge parsing (HOT PATH optimization)
-        let edges_offset = node.edges_offset as usize;
-        let edge_size = mem::size_of::<ACEdge>();
+        match kind {
+            StateKind::Empty => None,
 
-        // Binary search through edges (sorted by character)
-        let mut left = 0;
-        let mut right = node.edge_count as usize;
-
-        while left < right {
-            let mid = left + (right - left) / 2;
-            let edge_offset = edges_offset + mid * edge_size;
-
-            if edge_offset + edge_size > ac_buffer.len() {
-                return None;
+            StateKind::One => {
+                // Single inline comparison
+                if node.one_char == ch {
+                    Some(node.edges_offset as usize)
+                } else {
+                    None
+                }
             }
 
-            // Use zerocopy for edge struct parsing
-            let edge_slice = &ac_buffer[edge_offset..];
-            let (edge_ref, _) = Ref::<_, ACEdge>::from_prefix(edge_slice).ok()?;
-            let edge = *edge_ref;
+            StateKind::Sparse => {
+                // Linear search through sparse edges
+                let edges_offset = node.edges_offset as usize;
+                let edge_size = mem::size_of::<ACEdge>();
+                let count = node.edge_count as usize;
 
-            if edge.character == ch {
-                // Found!
-                return Some(edge.target_offset as usize);
-            } else if edge.character < ch {
-                left = mid + 1;
-            } else {
-                right = mid;
+                for i in 0..count {
+                    let edge_offset = edges_offset + i * edge_size;
+                    if edge_offset + edge_size > ac_buffer.len() {
+                        return None;
+                    }
+
+                    let edge_slice = &ac_buffer[edge_offset..];
+                    let (edge_ref, _) = Ref::<_, ACEdge>::from_prefix(edge_slice).ok()?;
+                    let edge = *edge_ref;
+
+                    if edge.character == ch {
+                        return Some(edge.target_offset as usize);
+                    }
+                    if edge.character > ch {
+                        return None;
+                    }
+                }
+                None
+            }
+
+            StateKind::Dense => {
+                // O(1) lookup in dense table
+                let lookup_offset = node.edges_offset as usize;
+                let target_offset_offset = lookup_offset + (ch as usize * 4);
+
+                if target_offset_offset + 4 > ac_buffer.len() {
+                    return None;
+                }
+
+                let target = u32::from_le_bytes([
+                    ac_buffer[target_offset_offset],
+                    ac_buffer[target_offset_offset + 1],
+                    ac_buffer[target_offset_offset + 2],
+                    ac_buffer[target_offset_offset + 3],
+                ]);
+
+                if target != 0 {
+                    Some(target as usize)
+                } else {
+                    None
+                }
             }
         }
-
-        None
     }
 
     /// Get the buffer (for serialization)
