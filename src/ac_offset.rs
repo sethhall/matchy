@@ -77,7 +77,7 @@ impl ACBuilder {
         }
     }
 
-    fn add_pattern(&mut self, pattern: &str) -> u32 {
+    fn add_pattern(&mut self, pattern: &str) -> Result<u32, ParaglobError> {
         let pattern_id = self.patterns.len() as u32;
         self.patterns.push(pattern.to_string());
 
@@ -107,7 +107,7 @@ impl ACBuilder {
         // Add output
         self.states[current as usize].outputs.push(pattern_id);
 
-        pattern_id
+        Ok(pattern_id)
     }
 
     fn build_failure_links(&mut self) {
@@ -177,7 +177,7 @@ impl ACBuilder {
     }
 
     /// Serialize into offset-based format
-    fn serialize(self) -> Vec<u8> {
+    fn serialize(self) -> Result<Vec<u8>, ParaglobError> {
         let mut buffer = Vec::new();
 
         // Calculate section sizes
@@ -197,8 +197,28 @@ impl ACBuilder {
         let patterns_start = edges_start + edges_size;
         let patterns_size = total_patterns * mem::size_of::<u32>();
 
-        // Allocate buffer
+        // Calculate total size
         let total_size = nodes_size + edges_size + patterns_size;
+
+        // Reasonable size limit to prevent pathological inputs from causing OOM
+        // Set to 2GB which is large enough for legitimate databases but catches
+        // pathological inputs early
+        const MAX_BUFFER_SIZE: usize = 2_000_000_000; // 2GB
+
+        if total_size > MAX_BUFFER_SIZE {
+            return Err(ParaglobError::ResourceLimitExceeded(format!(
+                "Pattern database too large: {} bytes ({} states, {} edges, {} patterns). \
+                     Maximum allowed is {} bytes. This may be caused by pathological patterns \
+                     with many null bytes or special characters.",
+                total_size,
+                self.states.len(),
+                total_edges,
+                total_patterns,
+                MAX_BUFFER_SIZE
+            )));
+        }
+
+        // Allocate buffer
         buffer.resize(total_size, 0);
 
         // Track offsets for each node's data
@@ -275,7 +295,7 @@ impl ACBuilder {
             }
         }
 
-        buffer
+        Ok(buffer)
     }
 }
 
@@ -318,13 +338,13 @@ impl ACAutomaton {
             if pattern.is_empty() {
                 return Err(ParaglobError::InvalidPattern("Empty pattern".to_string()));
             }
-            builder.add_pattern(pattern);
+            builder.add_pattern(pattern)?; // Propagate error
         }
 
         builder.build_failure_links();
 
         let stored_patterns = builder.patterns.clone();
-        let buffer = builder.serialize();
+        let buffer = builder.serialize()?; // Propagate error
 
         Ok(Self {
             buffer,

@@ -243,7 +243,12 @@ impl GlobPattern {
                     let matches = if *negated { !in_class } else { in_class };
 
                     if matches {
-                        self.matches_impl(text, text_pos + ch.len_utf8(), seg_idx + 1, steps_remaining)
+                        self.matches_impl(
+                            text,
+                            text_pos + ch.len_utf8(),
+                            seg_idx + 1,
+                            steps_remaining,
+                        )
                     } else {
                         false
                     }
@@ -270,7 +275,7 @@ impl GlobPattern {
                     if self.matches_impl(text, pos, seg_idx + 1, steps_remaining) {
                         return true;
                     }
-                    
+
                     // Advance to next character boundary
                     if pos >= text.len() {
                         break;
@@ -645,20 +650,20 @@ mod tests {
         // Previously, this would panic when the star wildcard tried to iterate
         // through byte positions that landed in the middle of UTF-8 characters.
         let pattern = GlobPattern::new("*4**4\\4**4\\*", MatchMode::CaseSensitive).unwrap();
-        
+
         // This text contains 'Ż' which is a 2-byte UTF-8 character (bytes 0xC5 0xBB)
         // The bug occurred when iterating byte-by-byte through this text
         let text = "*4**4\\4*\x01\x00\x00\x00*4\\\x00\x00=/?ŻDD0\x00";
-        
+
         // Should not panic - just return false if it doesn't match
         let _result = pattern.matches(text);
-        
+
         // Additional tests with multi-byte characters and wildcards
         let pattern2 = GlobPattern::new("*Ż*", MatchMode::CaseSensitive).unwrap();
         assert!(pattern2.matches("fooŻbar"));
         assert!(pattern2.matches("Żstart"));
         assert!(pattern2.matches("endŻ"));
-        
+
         // Test with multiple multi-byte characters
         let pattern3 = GlobPattern::new("*世*界*", MatchMode::CaseSensitive).unwrap();
         assert!(pattern3.matches("hello世foo界bar"));
@@ -668,16 +673,20 @@ mod tests {
     fn test_backtracking_limit() {
         // Regression test for OOM from exponential backtracking
         // Pattern with many stars and text that doesn't match will cause exponential behavior
-        let pattern = GlobPattern::new("*a*b*c*d*e*f*g*h*i*j*k*l*m*n*o*p*", MatchMode::CaseSensitive).unwrap();
-        
+        let pattern = GlobPattern::new(
+            "*a*b*c*d*e*f*g*h*i*j*k*l*m*n*o*p*",
+            MatchMode::CaseSensitive,
+        )
+        .unwrap();
+
         // This text doesn't contain all the required letters, so the pattern will
         // try many backtracking combinations. Without the step limit, this would OOM.
         let text = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
-        
+
         // Should complete without OOM and return false
         let result = pattern.matches(text);
         assert!(!result);
-        
+
         // But it should still match valid text
         let text2 = "abcdefghijklmnop";
         assert!(pattern.matches(text2));
