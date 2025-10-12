@@ -51,21 +51,33 @@ cargo clean
 cargo build --release
 echo
 
-# Create benchmarks directory
-mkdir -p benchmarks
+# Setup symlink for persistent criterion data if not already set up
+if [[ ! -L "target/criterion" ]]; then
+    echo -e "${YELLOW}Setting up persistent benchmark storage...${NC}"
+    mkdir -p benchmarks/criterion_data
+    mkdir -p target
+    if [[ -d "target/criterion" ]]; then
+        # Migrate existing data
+        cp -r target/criterion/* benchmarks/criterion_data/ 2>/dev/null || true
+        rm -rf target/criterion
+    fi
+    ln -s ../benchmarks/criterion_data target/criterion
+    echo -e "${GREEN}Benchmark data will persist across cargo clean${NC}"
+    echo
+fi
 
 # Run benchmarks
 echo -e "${GREEN}Step 2: Running benchmarks (this will take ~5-10 minutes)${NC}"
 cargo bench --bench matchy_bench -- --save-baseline "${BASELINE_NAME}"
 echo
 
-# Create timestamped backup
+# Create timestamped backup for safety
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_DIR="benchmarks/baseline_${BASELINE_NAME}_${TIMESTAMP}"
 
-echo -e "${GREEN}Step 3: Backing up results${NC}"
+echo -e "${GREEN}Step 3: Creating timestamped backup${NC}"
 mkdir -p "${BACKUP_DIR}"
-cp -r target/criterion/* "${BACKUP_DIR}/"
+cp -r benchmarks/criterion_data/* "${BACKUP_DIR}/"
 
 # Save metadata
 cat > "${BACKUP_DIR}/metadata.json" <<EOF
