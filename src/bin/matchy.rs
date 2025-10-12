@@ -114,6 +114,10 @@ enum Commands {
         /// Trust database and skip UTF-8 validation (faster, only for trusted sources)
         #[arg(long)]
         trusted: bool,
+
+        /// Pattern style for pattern benchmarks: prefix, suffix, mixed, or complex (default: complex)
+        #[arg(long, default_value = "complex")]
+        pattern_style: String,
     },
 }
 
@@ -157,6 +161,7 @@ fn main() -> Result<()> {
             query_count,
             hit_rate,
             trusted,
+            pattern_style,
         } => cmd_bench(
             db_type,
             count,
@@ -166,6 +171,7 @@ fn main() -> Result<()> {
             query_count,
             hit_rate,
             trusted,
+            pattern_style,
         ),
     }
 }
@@ -865,6 +871,7 @@ fn cmd_bench(
     query_count: usize,
     hit_rate: usize,
     trusted: bool,
+    pattern_style: String,
 ) -> Result<()> {
     println!("=== Matchy Database Benchmark ===\n");
     println!("Configuration:");
@@ -873,6 +880,9 @@ fn cmd_bench(
     println!("  Load iterations:   {}", load_iterations);
     println!("  Query iterations:  {}", format_number(query_count));
     println!("  Hit rate:          {}%", hit_rate);
+    if db_type == "pattern" {
+        println!("  Pattern style:     {}", pattern_style);
+    }
     if trusted {
         println!("  Trust mode:        TRUSTED (UTF-8 validation disabled)");
     }
@@ -902,6 +912,7 @@ fn cmd_bench(
             query_count,
             hit_rate,
             trusted,
+            &pattern_style,
         ),
         "combined" => {
             bench_combined_database(count, &temp_file, keep, load_iterations, query_count)
@@ -1345,6 +1356,7 @@ fn bench_literal_database(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bench_pattern_database(
     count: usize,
     temp_file: &PathBuf,
@@ -1353,6 +1365,7 @@ fn bench_pattern_database(
     query_count: usize,
     hit_rate: usize,
     trusted: bool,
+    pattern_style: &str,
 ) -> Result<()> {
     use matchy::glob::MatchMode;
     use matchy::mmdb_builder::MmdbBuilder;
@@ -1366,8 +1379,7 @@ fn bench_pattern_database(
 
     let empty_data = HashMap::new();
 
-    // More realistic threat intel patterns with diverse domains
-    // Uses varied TLDs, domain names, and pattern structures
+    // Pattern generation based on style
     let tlds = [
         "com", "net", "org", "ru", "cn", "xyz", "tk", "info", "io", "cc",
     ];
@@ -1380,32 +1392,74 @@ fn bench_pattern_database(
     ];
 
     for i in 0..count {
-        // Generate varied patterns with diverse structure
-        let pattern = if i % 20 == 0 {
-            // ~5% complex patterns (multiple wildcards, character classes)
-            let word = malicious_words[i % malicious_words.len()];
-            let tld = tlds[(i / 20) % tlds.len()];
-            match (i / 20) % 4 {
-                0 => format!("*[0-9].*.{}-attack-{}.{}", word, i, tld),
-                1 => format!("{}-*-server[0-9][0-9].evil-{}.{}", word, i, tld),
-                2 => format!("*.{}-campaign-*-{}.{}", word, i, tld),
-                _ => format!("*bad*.{}-?.infection-{}.{}", word, i, tld),
+        // Generate patterns based on the requested style
+        let pattern = match pattern_style {
+            "prefix" => {
+                // Pure prefix patterns: "prefix-*"
+                let word = malicious_words[i % malicious_words.len()];
+                let domain_word = domains[(i / 7) % domains.len()];
+                let tld = tlds[i % tlds.len()];
+                match i % 4 {
+                    0 => format!("{}-{}-*", word, domain_word),
+                    1 => format!("{}-{}-{}-*", word, domain_word, i % 1000),
+                    2 => format!("threat-{}-*.{}", domain_word, tld),
+                    _ => format!("{}{}-*", word, i % 1000),
+                }
             }
-        } else {
-            // 95% simpler but still diverse patterns
-            let word = malicious_words[i % malicious_words.len()];
-            let domain_word = domains[(i / 7) % domains.len()];
-            let tld = tlds[i % tlds.len()];
+            "suffix" => {
+                // Pure suffix patterns: "*.domain.com"
+                let word = malicious_words[i % malicious_words.len()];
+                let domain_word = domains[(i / 7) % domains.len()];
+                let tld = tlds[i % tlds.len()];
+                match i % 4 {
+                    0 => format!("*.{}-{}-{}.{}", word, domain_word, i, tld),
+                    1 => format!("*.{}{}.{}", domain_word, i, tld),
+                    2 => format!("*.{}-threat.{}", word, tld),
+                    _ => format!("*.evil-{}.{}", i % 1000, tld),
+                }
+            }
+            "mixed" => {
+                // 50% prefix, 50% suffix
+                let word = malicious_words[i % malicious_words.len()];
+                let domain_word = domains[(i / 7) % domains.len()];
+                let tld = tlds[i % tlds.len()];
+                if i % 2 == 0 {
+                    // Prefix
+                    format!("{}-{}-*", word, domain_word)
+                } else {
+                    // Suffix
+                    format!("*.{}-{}.{}", word, domain_word, tld)
+                }
+            }
+            _ => {
+                // "complex" - original complex patterns with multiple wildcards
+                if i % 20 == 0 {
+                    // ~5% complex patterns (multiple wildcards, character classes)
+                    let word = malicious_words[i % malicious_words.len()];
+                    let tld = tlds[(i / 20) % tlds.len()];
+                    match (i / 20) % 4 {
+                        0 => format!("*[0-9].*.{}-attack-{}.{}", word, i, tld),
+                        1 => format!("{}-*-server[0-9][0-9].evil-{}.{}", word, i, tld),
+                        2 => format!("*.{}-campaign-*-{}.{}", word, i, tld),
+                        _ => format!("*bad*.{}-?.infection-{}.{}", word, i, tld),
+                    }
+                } else {
+                    // 95% simpler but still diverse patterns
+                    let word = malicious_words[i % malicious_words.len()];
+                    let domain_word = domains[(i / 7) % domains.len()];
+                    let tld = tlds[i % tlds.len()];
 
-            match i % 8 {
-                0 => format!("*.{}-{}-{}.{}", word, domain_word, i, tld),
-                1 => format!("{}-{}*.bad-{}.{}", word, domain_word, i, tld),
-                2 => format!("evil-{}-*.tracker-{}.{}", domain_word, i, tld),
-                3 => format!("*-{}-{}.threat{}.{}", word, domain_word, i, tld),
-                4 => format!("suspicious-*.{}-zone-{}.{}", domain_word, i, tld),
-                5 => format!("*.{}{}.{}-network.{}", word, i, domain_word, tld),
-                6 => format!("bad-{}-{}.*.{}", word, i, tld),
-                _ => format!("{}-threat-*.{}{}.{}", word, domain_word, i, tld),
+                    match i % 8 {
+                        0 => format!("*.{}-{}-{}.{}", word, domain_word, i, tld),
+                        1 => format!("{}-{}*.bad-{}.{}", word, domain_word, i, tld),
+                        2 => format!("evil-{}-*.tracker-{}.{}", domain_word, i, tld),
+                        3 => format!("*-{}-{}.threat{}.{}", word, domain_word, i, tld),
+                        4 => format!("suspicious-*.{}-zone-{}.{}", domain_word, i, tld),
+                        5 => format!("*.{}{}.{}-network.{}", word, i, domain_word, tld),
+                        6 => format!("bad-{}-{}.*.{}", word, i, tld),
+                        _ => format!("{}-threat-*.{}{}.{}", word, domain_word, i, tld),
+                    }
+                }
             }
         };
         builder.add_glob(&pattern, empty_data.clone())?;
@@ -1485,46 +1539,84 @@ fn bench_pattern_database(
             // Generate non-matching query (benign traffic)
             format!("benign-clean-traffic-{}.legitimate-site.com", i)
         } else {
-            // Generate matching query based on pattern_id
+            // Generate matching query based on pattern_id and style
             let pattern_id = (i * 43) % count;
+            let word = malicious_words[pattern_id % malicious_words.len()];
+            let domain_word = domains[(pattern_id / 7) % domains.len()];
+            let tld = tlds[pattern_id % tlds.len()];
 
-            if pattern_id.is_multiple_of(20) {
-                // Match complex patterns (~5%)
-                let word = malicious_words[pattern_id % malicious_words.len()];
-                let tld = tlds[(pattern_id / 20) % tlds.len()];
-                match (pattern_id / 20) % 4 {
-                    0 => format!("prefix5.middle.{}-attack-{}.{}", word, pattern_id, tld),
-                    1 => format!("{}-middle-server99.evil-{}.{}", word, pattern_id, tld),
-                    2 => format!("prefix.{}-campaign-middle-{}.{}", word, pattern_id, tld),
-                    _ => format!("firstbadsecond.{}-x.infection-{}.{}", word, pattern_id, tld),
+            match pattern_style {
+                "prefix" => {
+                    // Match prefix patterns
+                    match pattern_id % 4 {
+                        0 => format!("{}-{}-suffix-{}", word, domain_word, i),
+                        1 => format!("{}-{}-{}-end", word, domain_word, pattern_id % 1000),
+                        2 => format!("threat-{}-middle.{}", domain_word, tld),
+                        _ => format!("{}{}-anything", word, pattern_id % 1000),
+                    }
                 }
-            } else {
-                // Match simpler patterns (95%)
-                let word = malicious_words[pattern_id % malicious_words.len()];
-                let domain_word = domains[(pattern_id / 7) % domains.len()];
-                let tld = tlds[pattern_id % tlds.len()];
-
-                match pattern_id % 8 {
-                    0 => format!("prefix.{}-{}-{}.{}", word, domain_word, pattern_id, tld),
-                    1 => format!("{}-{}middle.bad-{}.{}", word, domain_word, pattern_id, tld),
-                    2 => format!("evil-{}-middle.tracker-{}.{}", domain_word, pattern_id, tld),
-                    3 => format!(
-                        "prefix-{}-{}.threat{}.{}",
-                        word, domain_word, pattern_id, tld
-                    ),
-                    4 => format!(
-                        "suspicious-middle.{}-zone-{}.{}",
-                        domain_word, pattern_id, tld
-                    ),
-                    5 => format!(
-                        "prefix.{}{}.{}-network.{}",
-                        word, pattern_id, domain_word, tld
-                    ),
-                    6 => format!("bad-{}-{}.middle.{}", word, pattern_id, tld),
-                    _ => format!(
-                        "{}-threat-middle.{}{}.{}",
-                        word, domain_word, pattern_id, tld
-                    ),
+                "suffix" => {
+                    // Match suffix patterns
+                    match pattern_id % 4 {
+                        0 => format!("prefix.{}-{}-{}.{}", word, domain_word, pattern_id, tld),
+                        1 => format!("subdomain.{}{}.{}", domain_word, pattern_id, tld),
+                        2 => format!("any.{}-threat.{}", word, tld),
+                        _ => format!("prefix.evil-{}.{}", pattern_id % 1000, tld),
+                    }
+                }
+                "mixed" => {
+                    // Match mixed patterns
+                    if pattern_id.is_multiple_of(2) {
+                        // Prefix pattern match
+                        format!("{}-{}-suffix", word, domain_word)
+                    } else {
+                        // Suffix pattern match
+                        format!("prefix.{}-{}.{}", word, domain_word, tld)
+                    }
+                }
+                _ => {
+                    // "complex" - match original complex patterns
+                    if pattern_id.is_multiple_of(20) {
+                        // Match complex patterns (~5%)
+                        match (pattern_id / 20) % 4 {
+                            0 => format!("prefix5.middle.{}-attack-{}.{}", word, pattern_id, tld),
+                            1 => format!("{}-middle-server99.evil-{}.{}", word, pattern_id, tld),
+                            2 => format!("prefix.{}-campaign-middle-{}.{}", word, pattern_id, tld),
+                            _ => format!(
+                                "firstbadsecond.{}-x.infection-{}.{}",
+                                word, pattern_id, tld
+                            ),
+                        }
+                    } else {
+                        // Match simpler patterns (95%)
+                        match pattern_id % 8 {
+                            0 => format!("prefix.{}-{}-{}.{}", word, domain_word, pattern_id, tld),
+                            1 => {
+                                format!("{}-{}middle.bad-{}.{}", word, domain_word, pattern_id, tld)
+                            }
+                            2 => format!(
+                                "evil-{}-middle.tracker-{}.{}",
+                                domain_word, pattern_id, tld
+                            ),
+                            3 => format!(
+                                "prefix-{}-{}.threat{}.{}",
+                                word, domain_word, pattern_id, tld
+                            ),
+                            4 => format!(
+                                "suspicious-middle.{}-zone-{}.{}",
+                                domain_word, pattern_id, tld
+                            ),
+                            5 => format!(
+                                "prefix.{}{}.{}-network.{}",
+                                word, pattern_id, domain_word, tld
+                            ),
+                            6 => format!("bad-{}-{}.middle.{}", word, pattern_id, tld),
+                            _ => format!(
+                                "{}-threat-middle.{}{}.{}",
+                                word, domain_word, pattern_id, tld
+                            ),
+                        }
+                    }
                 }
             }
         };
