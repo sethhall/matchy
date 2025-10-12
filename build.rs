@@ -2,6 +2,13 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // Skip header generation on docs.rs - the source directory is read-only
+    // The C API documentation doesn't need the generated header
+    if env::var("DOCS_RS").is_ok() {
+        println!("cargo:warning=Skipping cbindgen on docs.rs (read-only filesystem)");
+        return;
+    }
+
     // Get crate directory
     let crate_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
 
