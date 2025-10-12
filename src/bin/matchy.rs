@@ -9,6 +9,9 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Instant;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 #[derive(Parser)]
 #[command(name = "matchy")]
 #[command(about = "Fast multi-pattern glob matching with optional data associations", long_about = None)]
@@ -119,6 +122,29 @@ enum Commands {
         #[arg(long, default_value = "complex")]
         pattern_style: String,
     },
+}
+
+/// Set file permissions to read-only (0444 on Unix, read-only attribute on Windows)
+fn set_readonly(path: &PathBuf) -> Result<()> {
+    let mut perms = fs::metadata(path)
+        .with_context(|| format!("Failed to get metadata for: {}", path.display()))?
+        .permissions();
+    
+    #[cfg(unix)]
+    {
+        perms.set_mode(0o444); // r--r--r--
+    }
+    
+    #[cfg(not(unix))]
+    {
+        // On Windows and other platforms, use the cross-platform read-only API
+        perms.set_readonly(true);
+    }
+    
+    fs::set_permissions(path, perms)
+        .with_context(|| format!("Failed to set read-only permissions: {}", path.display()))?;
+    
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -653,6 +679,10 @@ fn cmd_build(
 
     fs::write(&output, &database_bytes)
         .with_context(|| format!("Failed to save database: {}", output.display()))?;
+
+    // Set file to read-only to protect mmap integrity
+    set_readonly(&output)
+        .with_context(|| format!("Failed to set read-only permissions on: {}", output.display()))?;
 
     // Always show success message
     println!("\n✓ Database built successfully!");
