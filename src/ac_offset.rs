@@ -439,34 +439,62 @@ impl ACAutomaton {
     /// Find a transition from a node for a character
     ///
     /// Returns the offset to the target node, or None if no transition exists.
+    ///
+    /// # Optimization Hints
+    /// 
+    /// This function is the hottest path during pattern matching and includes several
+    /// optimizations:
+    /// 
+    /// 1. `#[inline]` - Encourages inlining at call sites (reduce function call overhead)
+    /// 2. Early bounds check allows LLVM to eliminate redundant checks in loop
+    /// 3. Sorted edge list enables early exit when character is not found
+    /// 4. Zero-copy edge loading via zerocopy crate
+    /// 5. Simple loop structure allows LLVM auto-vectorization and unrolling
+    ///
+    /// In release builds with LTO, LLVM will typically:
+    /// - Unroll the loop for states with few edges (most common case)
+    /// - Vectorize edge comparisons when beneficial
+    /// - Eliminate redundant bounds checks
+    #[inline]
     fn find_transition(&self, node_offset: usize, ch: u8) -> Option<usize> {
+        // Load node metadata
         let node_slice = self.buffer.get(node_offset..)?;
         let (node_ref, _) = Ref::<_, ACNode>::from_prefix(node_slice).ok()?;
         let node = *node_ref;
 
+        // Fast path: no edges means no transition
         if node.edge_count == 0 {
             return None;
         }
 
-        // Read edges safely byte-by-byte (may not be aligned)
         let edges_offset = node.edges_offset as usize;
         let edge_size = mem::size_of::<ACEdge>();
+        let count = node.edge_count as usize;
 
-        // Binary search through edges (sorted by character)
-        for i in 0..node.edge_count as usize {
+        // Pre-check: ensure all edges are in bounds
+        // This check allows LLVM to eliminate bounds checks in the loop below
+        let total_edge_bytes = count * edge_size;
+        if edges_offset + total_edge_bytes > self.buffer.len() {
+            return None;
+        }
+
+        // Linear search through sorted edges
+        // LLVM will automatically unroll this for small counts (typical case)
+        for i in 0..count {
             let edge_offset = edges_offset + i * edge_size;
-            if edge_offset + edge_size > self.buffer.len() {
-                return None;
-            }
 
-            let edge_slice = self.buffer.get(edge_offset..)?;
+            // Safe to unwrap: bounds checked above
+            let edge_slice = &self.buffer[edge_offset..];
             let (edge_ref, _) = Ref::<_, ACEdge>::from_prefix(edge_slice).ok()?;
             let edge = *edge_ref;
 
+            // Match found
             if edge.character == ch {
                 return Some(edge.target_offset as usize);
-            } else if edge.character > ch {
-                // Edges are sorted, so we won't find it
+            }
+            
+            // Early exit: edges are sorted, so if we've passed ch, it doesn't exist
+            if edge.character > ch {
                 return None;
             }
         }

@@ -20,29 +20,39 @@ fi
 # Parse arguments
 BASELINE_NAME="${1:-pre-optimization}"
 
+# Setup symlink if not already set up
+if [[ ! -L "target/criterion" ]]; then
+    echo -e "${YELLOW}Setting up persistent benchmark storage...${NC}"
+    mkdir -p benchmarks/criterion_data
+    mkdir -p target
+    ln -s ../benchmarks/criterion_data target/criterion
+    echo
+fi
+
 # Check if baseline exists
 if [[ ! -d "target/criterion" ]]; then
-    echo -e "${RED}Error: No criterion directory found. Run benchmarks first.${NC}"
+    echo -e "${RED}Error: Benchmark directory not found${NC}"
+    echo "Run: ./scripts/benchmark_baseline.sh ${BASELINE_NAME}"
     exit 1
 fi
 
-# Find baseline data
+# Find baseline data (use find -L to follow symlinks)
 BASELINE_FOUND=false
-for dir in target/criterion/*/; do
-    if [[ -d "${dir}${BASELINE_NAME}" ]]; then
-        BASELINE_FOUND=true
-        break
-    fi
-done
+if find -L target/criterion -maxdepth 3 -type d -name "${BASELINE_NAME}" 2>/dev/null | grep -q "${BASELINE_NAME}"; then
+    BASELINE_FOUND=true
+fi
 
 if [[ "$BASELINE_FOUND" = false ]]; then
     echo -e "${RED}Error: Baseline '${BASELINE_NAME}' not found${NC}"
-    echo "Available baselines:"
-    for dir in target/criterion/*/; do
-        if [[ -d "$dir" ]]; then
-            basename "$dir"
-        fi
-    done | sort | uniq
+    echo
+    echo "Available baselines in benchmarks/criterion_data:"
+    find benchmarks/criterion_data -type d -name "*" -maxdepth 2 | 
+        xargs -I{} basename {} 2>/dev/null | 
+        grep -v "criterion_data" | 
+        sort | uniq | head -20
+    echo
+    echo "To create a baseline, run:"
+    echo "  ./scripts/benchmark_baseline.sh ${BASELINE_NAME}"
     exit 1
 fi
 
