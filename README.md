@@ -528,22 +528,51 @@ matchy_t *db = matchy_open_trusted("my-database.mxy");
 
 ## Performance
 
-Measured on M4 MacBook Air:
+All benchmarks measured on M4 MacBook Air (2024). See [DEVELOPMENT.md](./DEVELOPMENT.md) for comprehensive benchmarks and analysis.
 
-| Workload | Throughput | Notes |
-|----------|------------|-------|
-| IP lookups | **7.29M queries/sec** | Binary search tree |
-| IP lookups (1M entries) | **7.29M queries/sec** | Scales efficiently |
-| Pattern matching (10K patterns) | 1.4M queries/sec | Aho-Corasick |
-| Pattern matching (50K patterns) | 1M queries/sec | Extreme scale |
-| Pattern matching (200K, trusted) | **642 queries/sec** | 100% hit rate, complex patterns |
-| Pattern matching (200K, safe) | **500 queries/sec** | 100% hit rate, UTF-8 validation |
-| Database load time | **<1ms** | Memory-mapped, zero-copy |
-| Database load (1M IPs) | **<1ms** | Sub-millisecond regardless of size |
-| Build time (1K entries) | ~4ms | One-time cost |
-| Build time (1M IPs) | 210ms | 4.8M IPs/sec |
+### IP Lookups
 
-See [DEVELOPMENT.md](./DEVELOPMENT.md) for detailed benchmarks.
+| Database Size | Build Rate | Load Time | Query Throughput | Avg Latency |
+|--------------|------------|-----------|------------------|-------------|
+| 10K IPs | 2.65M/sec | 0.34ms | **4.00M q/s** | 0.25µs |
+| 100K IPs | 2.78M/sec | 0.72ms | **3.87M q/s** | 0.26µs |
+
+### String Literal Matching
+
+| Database Size | Build Rate | Load Time | Query Throughput | Avg Latency | Hit Rate |
+|--------------|------------|-----------|------------------|-------------|----------|
+| 10K strings | 1.96M/sec | 0.91ms | **1.14M q/s** | 0.88µs | 10% |
+| 100K strings | 2.31M/sec | 0.94ms | **165K q/s** | 6.07µs | 10% |
+
+### Pattern Matching (Glob Patterns)
+
+Performance varies dramatically by pattern complexity:
+
+| Pattern Style | 1K Patterns | 10K Patterns | 50K Patterns |
+|--------------|-------------|--------------|-------------|
+| **Suffix** (`*.domain.com`) | 3.38M q/s | **3.08M q/s** | **3.32M q/s** |
+| **Mixed** (50% prefix/suffix) | 1.96M q/s | **1.95M q/s** | **1.98M q/s** |
+| **Prefix** (`error-*`) | 939K q/s | **956K q/s** | **956K q/s** |
+| **Complex** (multi-wildcard) | 429K q/s | **59K q/s** | **12.7K q/s** |
+
+**Key Insights:** 
+- Simple suffix patterns like `*.malicious-domain.com` are **52× faster** than complex patterns with multiple wildcards
+- Suffix patterns maintain **~3M q/s** regardless of database size (1K-50K patterns)
+- Prefix patterns stay near **1M q/s** across all scales
+- Mixed workloads (50% prefix, 50% suffix) deliver **2M q/s** consistently
+
+### Load Time
+
+**<1ms load time** regardless of database size thanks to memory-mapped zero-copy access:
+- 10K entries: 0.34-0.91ms
+- 100K entries: 0.72-0.94ms  
+- Instant loading enables hot-reload of threat feeds
+
+### Memory Efficiency
+
+**99% memory savings** in multi-process environments:
+- Traditional: 50 processes × 100MB = 5GB RAM
+- Matchy (mmap): 50 processes sharing 100MB = **100MB RAM**
 
 ## Architecture
 
