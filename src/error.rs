@@ -25,6 +25,9 @@ pub enum ParaglobError {
     /// Serialization/deserialization errors
     SerializationError(String),
 
+    /// Resource limit exceeded (e.g., too many states, too much memory)
+    ResourceLimitExceeded(String),
+
     /// General errors
     Other(String),
 }
@@ -38,6 +41,9 @@ impl fmt::Display for ParaglobError {
             ParaglobError::Format(msg) => write!(f, "Format error: {}", msg),
             ParaglobError::Validation(msg) => write!(f, "Validation error: {}", msg),
             ParaglobError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
+            ParaglobError::ResourceLimitExceeded(msg) => {
+                write!(f, "Resource limit exceeded: {}", msg)
+            }
             ParaglobError::Other(msg) => write!(f, "{}", msg),
         }
     }
