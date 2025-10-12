@@ -224,12 +224,14 @@ pub unsafe extern "C" fn MMDB_lookup_string(
 
 /// Lookup an IP address from sockaddr
 ///
-/// Note: This function is only available on Unix platforms as it uses Unix-specific socket types.
-/// On Windows, use `MMDB_lookup_string` instead.
-///
 /// # Safety
 /// - `mmdb` must be a valid opened database
 /// - `sockaddr` must be a valid socket address
+///
+/// # Platform Support
+/// This function works on both Unix and Windows platforms.
+/// - On Unix: Uses libc's sockaddr types
+/// - On Windows: Uses Windows socket types (winsock2)
 #[cfg(unix)]
 #[no_mangle]
 pub unsafe extern "C" fn MMDB_lookup_sockaddr(
@@ -265,6 +267,65 @@ pub unsafe extern "C" fn MMDB_lookup_sockaddr(
         libc::AF_INET6 => {
             let sa = sockaddr as *const libc::sockaddr_in6;
             let addr = (*sa).sin6_addr.s6_addr;
+            IpAddr::V6(Ipv6Addr::from(addr))
+        }
+        _ => return set_error(MMDB_INVALID_DATA_ERROR),
+    };
+
+    let ip_str = ip_addr.to_string();
+    let ip_cstr = match CString::new(ip_str) {
+        Ok(s) => s,
+        Err(_) => return set_error(MMDB_OUT_OF_MEMORY_ERROR),
+    };
+
+    // Use MMDB_lookup_string
+    let mut gai_error = 0;
+    MMDB_lookup_string(mmdb, ip_cstr.as_ptr(), &mut gai_error, mmdb_error)
+}
+
+/// Lookup an IP address from sockaddr (Windows implementation)
+///
+/// # Safety
+/// - `mmdb` must be a valid opened database
+/// - `sockaddr` must be a valid Windows SOCKADDR structure
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn MMDB_lookup_sockaddr(
+    mmdb: *const MMDB_s,
+    sockaddr: *const winapi::shared::ws2def::SOCKADDR,
+    mmdb_error: *mut c_int,
+) -> MMDB_lookup_result_s {
+    let set_error = |err: c_int| {
+        if !mmdb_error.is_null() {
+            *mmdb_error = err;
+        }
+        MMDB_lookup_result_s {
+            found_entry: false,
+            entry: MMDB_entry_s {
+                mmdb: ptr::null(),
+                _matchy_entry: mem::zeroed(),
+            },
+            netmask: 0,
+        }
+    };
+
+    if mmdb.is_null() || sockaddr.is_null() {
+        return set_error(MMDB_INVALID_DATA_ERROR);
+    }
+
+    use winapi::shared::ws2def::{AF_INET, AF_INET6, SOCKADDR_IN};
+    use winapi::shared::ws2ipdef::SOCKADDR_IN6_LH;
+
+    // Convert sockaddr to IP string
+    let ip_addr = match (*sockaddr).sa_family as i32 {
+        AF_INET => {
+            let sa = sockaddr as *const SOCKADDR_IN;
+            let addr = u32::from_be(*(*sa).sin_addr.S_un.S_addr());
+            IpAddr::V4(Ipv4Addr::from(addr))
+        }
+        AF_INET6 => {
+            let sa = sockaddr as *const SOCKADDR_IN6_LH;
+            let addr = *(*sa).sin6_addr.u.Byte();
             IpAddr::V6(Ipv6Addr::from(addr))
         }
         _ => return set_error(MMDB_INVALID_DATA_ERROR),

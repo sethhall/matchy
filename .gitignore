@@ -1,6 +1,19 @@
 # Rust build artifacts
 /target
 
+# C/C++ test executables in tests/ directory
+/tests/test_c_api
+/tests/test_c_api_extensions
+/tests/test_cpp_api
+/tests/test_mmdb_compat
+
+# Object files and other C/C++ build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+*.a
+
 # IDE
 .vscode/
 .idea/

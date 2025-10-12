@@ -123,13 +123,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // === Test 3: Serialization ===
     println!("\n--- Serialization ---");
 
-    let temp_file = "/tmp/paraglob_production_test.pgb";
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join("paraglob_production_test.pgb");
 
     let start = Instant::now();
-    save(&pg, temp_file)?;
+    save(&pg, &temp_file)?;
     let save_time = start.elapsed();
 
-    let file_size = std::fs::metadata(temp_file)?.len();
+    let file_size = std::fs::metadata(&temp_file)?.len();
 
     println!(
         "  Save time: {:.2}ms",
@@ -151,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load multiple times to show consistency
     for i in 1..=5 {
         let start = Instant::now();
-        let mut pg_loaded = load(temp_file, MatchMode::CaseSensitive)?;
+        let mut pg_loaded = load(&temp_file, MatchMode::CaseSensitive)?;
         let load_time = start.elapsed();
 
         // Verify it works
@@ -254,7 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🎉 All tests passed! Ready for production!");
 
     // Cleanup
-    std::fs::remove_file(temp_file).ok();
+    std::fs::remove_file(&temp_file).ok();
 
     Ok(())
 }
