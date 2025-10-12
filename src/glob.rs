@@ -149,7 +149,10 @@ impl GlobPattern {
     /// # Ok::<(), matchy::ParaglobError>(())
     /// ```
     pub fn matches(&self, text: &str) -> bool {
-        self.matches_impl(text, 0, 0)
+        // Limit backtracking steps to prevent OOM with pathological patterns
+        // This prevents exponential backtracking in patterns like *a*b*c*d*e*
+        let mut steps_remaining = 100_000;
+        self.matches_impl(text, 0, 0, &mut steps_remaining)
     }
 
     /// Recursive matching implementation.
@@ -161,7 +164,20 @@ impl GlobPattern {
     /// * `text` - The text to match against
     /// * `text_pos` - Current position in the text (byte offset)
     /// * `seg_idx` - Current segment index in the pattern
-    fn matches_impl(&self, text: &str, text_pos: usize, seg_idx: usize) -> bool {
+    /// * `steps_remaining` - Mutable counter to limit backtracking steps
+    fn matches_impl(
+        &self,
+        text: &str,
+        text_pos: usize,
+        seg_idx: usize,
+        steps_remaining: &mut usize,
+    ) -> bool {
+        // Check step limit to prevent OOM from exponential backtracking
+        if *steps_remaining == 0 {
+            return false; // Exceeded step limit, treat as no match
+        }
+        *steps_remaining -= 1;
+
         // If we've consumed all segments, we match if we've also consumed all text
         if seg_idx >= self.segments.len() {
             return text_pos >= text.len();
@@ -180,7 +196,7 @@ impl GlobPattern {
                 };
 
                 if matches {
-                    self.matches_impl(text, text_pos + lit.len(), seg_idx + 1)
+                    self.matches_impl(text, text_pos + lit.len(), seg_idx + 1, steps_remaining)
                 } else {
                     false
                 }
@@ -189,7 +205,7 @@ impl GlobPattern {
             GlobSegment::Question => {
                 // Match exactly one character
                 if let Some(ch) = text[text_pos..].chars().next() {
-                    self.matches_impl(text, text_pos + ch.len_utf8(), seg_idx + 1)
+                    self.matches_impl(text, text_pos + ch.len_utf8(), seg_idx + 1, steps_remaining)
                 } else {
                     false
                 }
@@ -227,7 +243,7 @@ impl GlobPattern {
                     let matches = if *negated { !in_class } else { in_class };
 
                     if matches {
-                        self.matches_impl(text, text_pos + ch.len_utf8(), seg_idx + 1)
+                        self.matches_impl(text, text_pos + ch.len_utf8(), seg_idx + 1, steps_remaining)
                     } else {
                         false
                     }
@@ -247,9 +263,22 @@ impl GlobPattern {
 
                 // Try matching star with 0, 1, 2, ... characters
                 // We need to try all possibilities due to backtracking
-                for i in text_pos..=text.len() {
-                    if self.matches_impl(text, i, seg_idx + 1) {
+                // IMPORTANT: Iterate by char boundaries, not byte positions, to avoid
+                // slicing in the middle of UTF-8 characters
+                let mut pos = text_pos;
+                loop {
+                    if self.matches_impl(text, pos, seg_idx + 1, steps_remaining) {
                         return true;
+                    }
+                    
+                    // Advance to next character boundary
+                    if pos >= text.len() {
+                        break;
+                    }
+                    if let Some(ch) = text[pos..].chars().next() {
+                        pos += ch.len_utf8();
+                    } else {
+                        break;
                     }
                 }
                 false
@@ -606,5 +635,51 @@ mod tests {
         let pattern = GlobPattern::new("hello*", MatchMode::CaseSensitive).unwrap();
         assert!(pattern.matches("hello世界"));
         assert!(pattern.matches("hello🌍"));
+    }
+
+    #[test]
+    fn test_utf8_boundary_in_star_matching() {
+        // Regression test for UTF-8 boundary bug found by fuzzing
+        // The pattern has multiple stars and backslash-escaped characters,
+        // and the text contains multi-byte UTF-8 characters.
+        // Previously, this would panic when the star wildcard tried to iterate
+        // through byte positions that landed in the middle of UTF-8 characters.
+        let pattern = GlobPattern::new("*4**4\\4**4\\*", MatchMode::CaseSensitive).unwrap();
+        
+        // This text contains 'Ż' which is a 2-byte UTF-8 character (bytes 0xC5 0xBB)
+        // The bug occurred when iterating byte-by-byte through this text
+        let text = "*4**4\\4*\x01\x00\x00\x00*4\\\x00\x00=/?ŻDD0\x00";
+        
+        // Should not panic - just return false if it doesn't match
+        let _result = pattern.matches(text);
+        
+        // Additional tests with multi-byte characters and wildcards
+        let pattern2 = GlobPattern::new("*Ż*", MatchMode::CaseSensitive).unwrap();
+        assert!(pattern2.matches("fooŻbar"));
+        assert!(pattern2.matches("Żstart"));
+        assert!(pattern2.matches("endŻ"));
+        
+        // Test with multiple multi-byte characters
+        let pattern3 = GlobPattern::new("*世*界*", MatchMode::CaseSensitive).unwrap();
+        assert!(pattern3.matches("hello世foo界bar"));
+    }
+
+    #[test]
+    fn test_backtracking_limit() {
+        // Regression test for OOM from exponential backtracking
+        // Pattern with many stars and text that doesn't match will cause exponential behavior
+        let pattern = GlobPattern::new("*a*b*c*d*e*f*g*h*i*j*k*l*m*n*o*p*", MatchMode::CaseSensitive).unwrap();
+        
+        // This text doesn't contain all the required letters, so the pattern will
+        // try many backtracking combinations. Without the step limit, this would OOM.
+        let text = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+        
+        // Should complete without OOM and return false
+        let result = pattern.matches(text);
+        assert!(!result);
+        
+        // But it should still match valid text
+        let text2 = "abcdefghijklmnop";
+        assert!(pattern.matches(text2));
     }
 }

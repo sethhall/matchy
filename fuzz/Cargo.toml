@@ -26,3 +26,38 @@ path = "fuzz_targets/fuzz_database_load.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_pattern_matching"
+path = "fuzz_targets/fuzz_pattern_matching.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ip_lookup"
+path = "fuzz_targets/fuzz_ip_lookup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_glob_patterns"
+path = "fuzz_targets/fuzz_glob_patterns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_data_values"
+path = "fuzz_targets/fuzz_data_values.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_literal_exact_match"
+path = "fuzz_targets/fuzz_literal_exact_match.rs"
+test = false
+doc = false
+bench = false
