@@ -92,6 +92,8 @@ pub mod ac_offset;
 pub mod data_section;
 /// Unified database API
 pub mod database;
+/// Endianness handling for cross-platform zero-copy support
+pub mod endian;
 /// Error types for Paraglob operations
 pub mod error;
 pub mod glob;
