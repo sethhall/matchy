@@ -441,10 +441,10 @@ impl ACAutomaton {
     /// Returns the offset to the target node, or None if no transition exists.
     ///
     /// # Optimization Hints
-    /// 
+    ///
     /// This function is the hottest path during pattern matching and includes several
     /// optimizations:
-    /// 
+    ///
     /// 1. `#[inline]` - Encourages inlining at call sites (reduce function call overhead)
     /// 2. Early bounds check allows LLVM to eliminate redundant checks in loop
     /// 3. Sorted edge list enables early exit when character is not found
@@ -492,7 +492,7 @@ impl ACAutomaton {
             if edge.character == ch {
                 return Some(edge.target_offset as usize);
             }
-            
+
             // Early exit: edges are sorted, so if we've passed ch, it doesn't exist
             if edge.character > ch {
                 return None;
