@@ -15,7 +15,7 @@
 //! All operations (both building and matching) work directly on this buffer.
 
 use crate::error::ParaglobError;
-use crate::offset_format::{ACEdge, ACNode};
+use crate::offset_format::{ACEdge, ACNode, DenseLookup, StateKind};
 use std::collections::{HashMap, VecDeque};
 use std::mem;
 use zerocopy::Ref;
@@ -65,6 +65,23 @@ impl BuilderState {
 
     fn is_final(&self) -> bool {
         !self.outputs.is_empty()
+    }
+
+    /// Classify state encoding based on transition count
+    ///
+    /// # State Encoding Selection
+    ///
+    /// - **Empty** (0 transitions): Terminal states only, no lookups needed
+    /// - **One** (1 transition): Store inline, eliminates cache miss (75-80% of states)
+    /// - **Sparse** (2-8 transitions): Linear search is optimal for this range
+    /// - **Dense** (9+ transitions): O(1) lookup table worth the 1KB overhead
+    fn classify_state_kind(&self) -> StateKind {
+        match self.transitions.len() {
+            0 => StateKind::Empty,
+            1 => StateKind::One,
+            2..=8 => StateKind::Sparse,
+            _ => StateKind::Dense, // 9+ transitions
+        }
     }
 }
 
@@ -176,29 +193,52 @@ impl ACBuilder {
         }
     }
 
-    /// Serialize into offset-based format
+    /// Serialize into offset-based format with state-specific encoding
     fn serialize(self) -> Result<Vec<u8>, ParaglobError> {
         let mut buffer = Vec::new();
 
         // Calculate section sizes
         let node_size = mem::size_of::<ACNode>();
         let edge_size = mem::size_of::<ACEdge>();
+        let dense_size = mem::size_of::<DenseLookup>();
 
         let nodes_start = 0;
         let nodes_size = self.states.len() * node_size;
 
-        // Count total edges and patterns
-        let total_edges: usize = self.states.iter().map(|s| s.transitions.len()).sum();
+        // Classify states and count by type
+        let state_kinds: Vec<StateKind> = self
+            .states
+            .iter()
+            .map(|s| s.classify_state_kind())
+            .collect();
+
+        let dense_count = state_kinds
+            .iter()
+            .filter(|&&k| k == StateKind::Dense)
+            .count();
+        let sparse_edges: usize = self
+            .states
+            .iter()
+            .zip(&state_kinds)
+            .filter(|(_, &kind)| kind == StateKind::Sparse)
+            .map(|(s, _)| s.transitions.len())
+            .sum();
+
+        // ONE states don't need edge arrays!
         let total_patterns: usize = self.states.iter().map(|s| s.outputs.len()).sum();
 
+        // Layout: [Nodes][Sparse Edges][Dense Lookups][Patterns]
         let edges_start = nodes_size;
-        let edges_size = total_edges * edge_size;
+        let edges_size = sparse_edges * edge_size;
 
-        let patterns_start = edges_start + edges_size;
+        let dense_start = edges_start + edges_size;
+        let dense_size_total = dense_count * dense_size;
+
+        let patterns_start = dense_start + dense_size_total;
         let patterns_size = total_patterns * mem::size_of::<u32>();
 
         // Calculate total size
-        let total_size = nodes_size + edges_size + patterns_size;
+        let total_size = nodes_size + edges_size + dense_size_total + patterns_size;
 
         // Reasonable size limit to prevent pathological inputs from causing OOM
         // Set to 2GB which is large enough for legitimate databases but catches
@@ -207,12 +247,13 @@ impl ACBuilder {
 
         if total_size > MAX_BUFFER_SIZE {
             return Err(ParaglobError::ResourceLimitExceeded(format!(
-                "Pattern database too large: {} bytes ({} states, {} edges, {} patterns). \
+                "Pattern database too large: {} bytes ({} states, {} sparse edges, {} dense, {} patterns). \
                      Maximum allowed is {} bytes. This may be caused by pathological patterns \
                      with many null bytes or special characters.",
                 total_size,
                 self.states.len(),
-                total_edges,
+                sparse_edges,
+                dense_count,
                 total_patterns,
                 MAX_BUFFER_SIZE
             )));
@@ -221,43 +262,74 @@ impl ACBuilder {
         // Allocate buffer
         buffer.resize(total_size, 0);
 
-        // Track offsets for each node's data
+        // Track offsets for writing data
         let mut edge_offset = edges_start;
+        let mut dense_offset = dense_start;
         let mut pattern_offset = patterns_start;
+
         let node_offsets: Vec<usize> = (0..self.states.len())
             .map(|i| nodes_start + i * node_size)
             .collect();
 
-        // Write each node and its associated data
+        // Write each node with state-specific encoding
         for (i, state) in self.states.iter().enumerate() {
             let node_offset = node_offsets[i];
+            let kind = state_kinds[i];
 
-            // Create edges for this node
-            let edges_offset_for_node = if state.transitions.is_empty() {
-                0u32
-            } else {
-                edge_offset as u32
-            };
-
-            // Write edges
+            // Prepare sorted edges for this state
             let mut edges: Vec<(u8, u32)> = state
                 .transitions
                 .iter()
-                .map(|(&ch, &target)| (ch, target))
+                .map(|(&ch, &target)| (ch, node_offsets[target as usize] as u32))
                 .collect();
-            edges.sort_by_key(|(ch, _)| *ch); // Sort for binary search
+            edges.sort_by_key(|(ch, _)| *ch); // Sort for efficient lookup
 
-            for (ch, target_id) in &edges {
-                let target_offset = node_offsets[*target_id as usize];
-                let edge = ACEdge::new(*ch, target_offset as u32);
+            // Write state-specific transition data
+            let (edges_offset_for_node, one_char, _one_target) = match kind {
+                StateKind::Empty => (0u32, 0u8, 0u32),
 
-                unsafe {
-                    let ptr = buffer.as_mut_ptr().add(edge_offset) as *mut ACEdge;
-                    ptr.write(edge);
+                StateKind::One => {
+                    // Store single transition inline in node!
+                    let (ch, target) = edges[0];
+                    (target, ch, 0u32) // edges_offset stores target for ONE states
                 }
 
-                edge_offset += edge_size;
-            }
+                StateKind::Sparse => {
+                    // Write edges to sparse edge array
+                    let sparse_offset = edge_offset;
+
+                    for (ch, target) in &edges {
+                        let edge = ACEdge::new(*ch, *target);
+                        unsafe {
+                            let ptr = buffer.as_mut_ptr().add(edge_offset) as *mut ACEdge;
+                            ptr.write(edge);
+                        }
+                        edge_offset += edge_size;
+                    }
+
+                    (sparse_offset as u32, 0u8, 0u32)
+                }
+
+                StateKind::Dense => {
+                    // Write dense lookup table
+                    let lookup_offset = dense_offset;
+                    let mut lookup = DenseLookup {
+                        targets: [0u32; 256],
+                    };
+
+                    for (ch, target) in &edges {
+                        lookup.targets[*ch as usize] = *target;
+                    }
+
+                    unsafe {
+                        let ptr = buffer.as_mut_ptr().add(dense_offset) as *mut DenseLookup;
+                        ptr.write(lookup);
+                    }
+                    dense_offset += dense_size;
+
+                    (lookup_offset as u32, 0u8, 0u32)
+                }
+            };
 
             // Write pattern IDs
             let patterns_offset_for_node = if state.outputs.is_empty() {
@@ -274,7 +346,7 @@ impl ACBuilder {
                 pattern_offset += mem::size_of::<u32>();
             }
 
-            // Write node
+            // Write node with state-specific encoding
             let failure_offset = if state.failure == 0 {
                 0
             } else {
@@ -283,11 +355,17 @@ impl ACBuilder {
 
             let mut node = ACNode::new(state.id, state.depth);
             node.failure_offset = failure_offset;
+            node.state_kind = kind as u8;
+            node.is_final = if state.is_final() { 1 } else { 0 };
+
+            // State-specific fields
+            node.one_char = one_char;
             node.edges_offset = edges_offset_for_node;
             node.edge_count = state.transitions.len() as u16;
+
+            // Pattern data
             node.patterns_offset = patterns_offset_for_node;
             node.pattern_count = state.outputs.len() as u16;
-            node.is_final = if state.is_final() { 1 } else { 0 };
 
             unsafe {
                 let ptr = buffer.as_mut_ptr().add(node_offset) as *mut ACNode;
@@ -440,21 +518,18 @@ impl ACAutomaton {
     ///
     /// Returns the offset to the target node, or None if no transition exists.
     ///
-    /// # Optimization Hints
+    /// # State-Specific Optimizations
     ///
-    /// This function is the hottest path during pattern matching and includes several
-    /// optimizations:
+    /// This is the HOTTEST path in pattern matching. We use different lookup strategies
+    /// based on the state encoding:
     ///
-    /// 1. `#[inline]` - Encourages inlining at call sites (reduce function call overhead)
-    /// 2. Early bounds check allows LLVM to eliminate redundant checks in loop
-    /// 3. Sorted edge list enables early exit when character is not found
-    /// 4. Zero-copy edge loading via zerocopy crate
-    /// 5. Simple loop structure allows LLVM auto-vectorization and unrolling
+    /// - **EMPTY**: No transitions, immediate return
+    /// - **ONE** (75-80% of states): Single inline comparison, zero indirection!
+    /// - **SPARSE**: Linear search through edge array (2-8 edges)
+    /// - **DENSE**: O(1) lookup table access (9+ edges)
     ///
-    /// In release builds with LTO, LLVM will typically:
-    /// - Unroll the loop for states with few edges (most common case)
-    /// - Vectorize edge comparisons when beneficial
-    /// - Eliminate redundant bounds checks
+    /// The ONE encoding is the key optimization: by storing the single transition inline,
+    /// we eliminate a cache miss that would occur when loading the edge array.
     #[inline]
     fn find_transition(&self, node_offset: usize, ch: u8) -> Option<usize> {
         // Load node metadata
@@ -462,44 +537,82 @@ impl ACAutomaton {
         let (node_ref, _) = Ref::<_, ACNode>::from_prefix(node_slice).ok()?;
         let node = *node_ref;
 
-        // Fast path: no edges means no transition
-        if node.edge_count == 0 {
-            return None;
-        }
+        // Dispatch on state encoding
+        let kind = StateKind::from_u8(node.state_kind)?;
 
-        let edges_offset = node.edges_offset as usize;
-        let edge_size = mem::size_of::<ACEdge>();
-        let count = node.edge_count as usize;
-
-        // Pre-check: ensure all edges are in bounds
-        // This check allows LLVM to eliminate bounds checks in the loop below
-        let total_edge_bytes = count * edge_size;
-        if edges_offset + total_edge_bytes > self.buffer.len() {
-            return None;
-        }
-
-        // Linear search through sorted edges
-        // LLVM will automatically unroll this for small counts (typical case)
-        for i in 0..count {
-            let edge_offset = edges_offset + i * edge_size;
-
-            // Safe to unwrap: bounds checked above
-            let edge_slice = &self.buffer[edge_offset..];
-            let (edge_ref, _) = Ref::<_, ACEdge>::from_prefix(edge_slice).ok()?;
-            let edge = *edge_ref;
-
-            // Match found
-            if edge.character == ch {
-                return Some(edge.target_offset as usize);
+        match kind {
+            StateKind::Empty => {
+                // No transitions
+                None
             }
 
-            // Early exit: edges are sorted, so if we've passed ch, it doesn't exist
-            if edge.character > ch {
-                return None;
+            StateKind::One => {
+                // HOT PATH: Single inline comparison, no indirection!
+                // This eliminates a cache miss for 75-80% of transitions
+                if node.one_char == ch {
+                    Some(node.edges_offset as usize) // edges_offset stores target for ONE
+                } else {
+                    None
+                }
+            }
+
+            StateKind::Sparse => {
+                // Linear search through sparse edge array (2-8 edges)
+                let edges_offset = node.edges_offset as usize;
+                let edge_size = mem::size_of::<ACEdge>();
+                let count = node.edge_count as usize;
+
+                // Pre-check: ensure all edges are in bounds
+                let total_edge_bytes = count * edge_size;
+                if edges_offset + total_edge_bytes > self.buffer.len() {
+                    return None;
+                }
+
+                // Linear search through sorted edges
+                for i in 0..count {
+                    let edge_offset = edges_offset + i * edge_size;
+                    let edge_slice = &self.buffer[edge_offset..];
+                    let (edge_ref, _) = Ref::<_, ACEdge>::from_prefix(edge_slice).ok()?;
+                    let edge = *edge_ref;
+
+                    if edge.character == ch {
+                        return Some(edge.target_offset as usize);
+                    }
+
+                    // Early exit: edges are sorted
+                    if edge.character > ch {
+                        return None;
+                    }
+                }
+
+                None
+            }
+
+            StateKind::Dense => {
+                // O(1) lookup in dense table (9+ edges)
+                let lookup_offset = node.edges_offset as usize;
+                let target_offset_offset = lookup_offset + (ch as usize * 4);
+
+                // Bounds check
+                if target_offset_offset + 4 > self.buffer.len() {
+                    return None;
+                }
+
+                // Read target offset directly (4 bytes, little-endian)
+                let target = u32::from_le_bytes([
+                    self.buffer[target_offset_offset],
+                    self.buffer[target_offset_offset + 1],
+                    self.buffer[target_offset_offset + 2],
+                    self.buffer[target_offset_offset + 3],
+                ]);
+
+                if target != 0 {
+                    Some(target as usize)
+                } else {
+                    None
+                }
             }
         }
-
-        None
     }
 
     /// Get the buffer (for serialization)
