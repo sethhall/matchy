@@ -117,16 +117,6 @@ Real-world production usage example demonstrating:
 
 **Run:** `cargo run --release --example production_test`
 
-### `cpp_comparison_test.rs`
-Performance benchmark matching the C++ reference implementation:
-- 10K patterns, 20K queries (must exceed 100K qps)
-- 50K patterns, 10K queries (must exceed 100K qps)
-- Fixed seed for reproducibility
-- CI/CD regression testing
-- Verifies performance targets are met
-
-**Run:** `cargo run --release --example cpp_comparison_test`
-
 ### `matchy bench` (Built-in Benchmarking Tool)
 Comprehensive benchmarking tool for all database types:
 - **IP databases**: Measure build, load, and query performance for IP lookups
@@ -177,7 +167,6 @@ make -C examples
 
 # Performance validation
 cargo run --release --example production_test
-cargo run --release --example cpp_comparison_test
 
 # Benchmarking (built-in tool)
 cargo build --release
@@ -207,12 +196,7 @@ cargo test --test integration_tests
    cargo run --example build_misp_database -- threat-feed.json
    ```
 
-4. **Verify performance:**
-   ```bash
-   cargo run --release --example cpp_comparison_test
-   ```
-
-5. **Benchmark at scale:**
+4. **Benchmark at scale:**
    ```bash
    cargo build --release
    ./target/release/matchy bench pattern -n 50000
