@@ -7,6 +7,7 @@ use std::fs;
 use std::io::{self, BufRead};
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "matchy")]
@@ -21,7 +22,7 @@ struct Cli {
 enum Commands {
     /// Query a pattern database
     Query {
-        /// Path to the pattern database (.pgb file)
+        /// Path to the matchy database (.mxy file)
         #[arg(value_name = "DATABASE")]
         database: PathBuf,
 
@@ -36,7 +37,7 @@ enum Commands {
 
     /// Inspect a pattern database
     Inspect {
-        /// Path to the pattern database (.pgb file)
+        /// Path to the matchy database (.mxy file)
         #[arg(value_name = "DATABASE")]
         database: PathBuf,
 
@@ -55,7 +56,7 @@ enum Commands {
         #[arg(value_name = "INPUT", required = true)]
         inputs: Vec<PathBuf>,
 
-        /// Output database file (.mmdb extension recommended)
+        /// Output database file (.mxy extension)
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
 
@@ -78,6 +79,41 @@ enum Commands {
         /// Verbose output during build
         #[arg(short, long)]
         verbose: bool,
+    },
+
+    /// Benchmark database performance (build, load, query)
+    Bench {
+        /// Type of database to benchmark: ip, literal, pattern, or combined
+        #[arg(value_name = "TYPE", default_value = "ip")]
+        db_type: String,
+
+        /// Number of entries to test with
+        #[arg(short = 'n', long, default_value = "1000000")]
+        count: usize,
+
+        /// Output file for the test database (temp file if not specified)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Keep the generated database file after benchmarking
+        #[arg(short, long)]
+        keep: bool,
+
+        /// Number of load iterations to average (default: 3)
+        #[arg(long, default_value = "3")]
+        load_iterations: usize,
+
+        /// Number of queries for batch benchmark (default: 100000)
+        #[arg(long, default_value = "100000")]
+        query_count: usize,
+
+        /// Percentage of queries that should match (0-100, default: 10)
+        #[arg(long, default_value = "10")]
+        hit_rate: usize,
+
+        /// Trust database and skip UTF-8 validation (faster, only for trusted sources)
+        #[arg(long)]
+        trusted: bool,
     },
 }
 
@@ -111,6 +147,25 @@ fn main() -> Result<()> {
             description,
             desc_lang,
             verbose,
+        ),
+        Commands::Bench {
+            db_type,
+            count,
+            output,
+            keep,
+            load_iterations,
+            query_count,
+            hit_rate,
+            trusted,
+        } => cmd_bench(
+            db_type,
+            count,
+            output,
+            keep,
+            load_iterations,
+            query_count,
+            hit_rate,
+            trusted,
         ),
     }
 }
@@ -798,4 +853,903 @@ fn format_data_value(data: &DataValue, indent: &str) -> String {
         }
         DataValue::Pointer(_) => "<pointer>".to_string(),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_bench(
+    db_type: String,
+    count: usize,
+    output: Option<PathBuf>,
+    keep: bool,
+    load_iterations: usize,
+    query_count: usize,
+    hit_rate: usize,
+    trusted: bool,
+) -> Result<()> {
+    println!("=== Matchy Database Benchmark ===\n");
+    println!("Configuration:");
+    println!("  Database type:     {}", db_type);
+    println!("  Entry count:       {}", format_number(count));
+    println!("  Load iterations:   {}", load_iterations);
+    println!("  Query iterations:  {}", format_number(query_count));
+    println!("  Hit rate:          {}%", hit_rate);
+    if trusted {
+        println!("  Trust mode:        TRUSTED (UTF-8 validation disabled)");
+    }
+    println!();
+
+    // Determine output file
+    let temp_file = output
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("/tmp/matchy_bench_{}_{}.mxy", db_type, count)));
+
+    match db_type.as_str() {
+        "ip" => bench_ip_database(count, &temp_file, keep, load_iterations, query_count),
+        "literal" => bench_literal_database(
+            count,
+            &temp_file,
+            keep,
+            load_iterations,
+            query_count,
+            hit_rate,
+            trusted,
+        ),
+        "pattern" => bench_pattern_database(
+            count,
+            &temp_file,
+            keep,
+            load_iterations,
+            query_count,
+            hit_rate,
+            trusted,
+        ),
+        "combined" => {
+            bench_combined_database(count, &temp_file, keep, load_iterations, query_count)
+        }
+        _ => {
+            anyhow::bail!(
+                "Unknown database type: {}. Use 'ip', 'literal', 'pattern', or 'combined'",
+                db_type
+            );
+        }
+    }
+}
+
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
+fn format_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.2} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn format_qps(qps: f64) -> String {
+    if qps >= 1_000_000.0 {
+        format!("{:.2}M", qps / 1_000_000.0)
+    } else if qps >= 1_000.0 {
+        format!("{:.2}K", qps / 1_000.0)
+    } else {
+        format!("{:.2}", qps)
+    }
+}
+
+fn bench_ip_database(
+    count: usize,
+    temp_file: &PathBuf,
+    keep: bool,
+    load_iterations: usize,
+    query_count: usize,
+) -> Result<()> {
+    use matchy::glob::MatchMode;
+    use matchy::mmdb_builder::MmdbBuilder;
+    use matchy::Database;
+
+    println!("--- Phase 1: Build IP Database ---");
+    let build_start = Instant::now();
+    let mut builder = MmdbBuilder::new(MatchMode::CaseSensitive)
+        .with_database_type("Benchmark-IP")
+        .with_description("en", "IP database benchmark");
+
+    let empty_data = HashMap::new();
+    for i in 0..count {
+        let ip_num = i as u32;
+        let octet1 = (ip_num >> 24) & 0xFF;
+        let octet2 = (ip_num >> 16) & 0xFF;
+        let octet3 = (ip_num >> 8) & 0xFF;
+        let octet4 = ip_num & 0xFF;
+        let ip_str = format!("{}.{}.{}.{}", octet1, octet2, octet3, octet4);
+        builder.add_ip(&ip_str, empty_data.clone())?;
+
+        if count > 100_000 && (i + 1) % 1_000_000 == 0 {
+            println!(
+                "  Progress: {}/{}",
+                format_number(i + 1),
+                format_number(count)
+            );
+        }
+    }
+
+    let db_bytes = builder.build()?;
+    let build_time = build_start.elapsed();
+    let build_rate = count as f64 / build_time.as_secs_f64();
+
+    println!("  Build time:  {:.2}s", build_time.as_secs_f64());
+    println!("  Build rate:  {} IPs/sec", format_qps(build_rate));
+    println!("  DB size:     {}", format_bytes(db_bytes.len()));
+    println!();
+
+    println!("--- Phase 2: Save to Disk ---");
+    let save_start = Instant::now();
+    std::fs::write(temp_file, &db_bytes)?;
+    let save_time = save_start.elapsed();
+    println!("  Save time:   {:.2}s", save_time.as_secs_f64());
+    drop(db_bytes);
+    println!();
+
+    println!("--- Phase 3: Load Database (mmap) ---");
+    let mut load_times = Vec::new();
+    for i in 1..=load_iterations {
+        let load_start = Instant::now();
+        let _db = Database::open(temp_file.to_str().unwrap())?;
+        let load_time = load_start.elapsed();
+        load_times.push(load_time);
+        println!(
+            "  Load #{}: {:.3}ms",
+            i,
+            load_time.as_micros() as f64 / 1000.0
+        );
+    }
+    let avg_load = load_times.iter().sum::<std::time::Duration>() / load_iterations as u32;
+    println!("  Average:  {:.3}ms", avg_load.as_micros() as f64 / 1000.0);
+    println!();
+
+    println!("--- Phase 4: Query Performance ---");
+    let db = Database::open(temp_file.to_str().unwrap())?;
+    let bench_start = Instant::now();
+    let mut found = 0;
+
+    for i in 0..query_count {
+        let ip_num = ((i * 43) % count) as u32;
+        let octet1 = (ip_num >> 24) & 0xFF;
+        let octet2 = (ip_num >> 16) & 0xFF;
+        let octet3 = (ip_num >> 8) & 0xFF;
+        let octet4 = ip_num & 0xFF;
+        let ip = std::net::Ipv4Addr::new(octet1 as u8, octet2 as u8, octet3 as u8, octet4 as u8);
+
+        if let Some(matchy::QueryResult::Ip { .. }) = db.lookup_ip(std::net::IpAddr::V4(ip))? {
+            found += 1;
+        }
+    }
+
+    let bench_time = bench_start.elapsed();
+    let qps = query_count as f64 / bench_time.as_secs_f64();
+    let avg_query = bench_time / query_count as u32;
+
+    println!("  Query count: {}", format_number(query_count));
+    println!("  Total time:  {:.2}s", bench_time.as_secs_f64());
+    println!("  QPS:         {} queries/sec", format_qps(qps));
+    println!(
+        "  Avg latency: {:.2}µs",
+        avg_query.as_nanos() as f64 / 1000.0
+    );
+    println!(
+        "  Found:       {}/{}",
+        format_number(found),
+        format_number(query_count)
+    );
+    println!();
+
+    if !keep {
+        std::fs::remove_file(temp_file)?;
+        println!("✓ Benchmark complete (temp file removed)");
+    } else {
+        println!("✓ Benchmark complete (file kept: {})", temp_file.display());
+    }
+
+    Ok(())
+}
+
+fn bench_literal_database(
+    count: usize,
+    temp_file: &PathBuf,
+    keep: bool,
+    load_iterations: usize,
+    query_count: usize,
+    hit_rate: usize,
+    trusted: bool,
+) -> Result<()> {
+    use matchy::glob::MatchMode;
+    use matchy::mmdb_builder::MmdbBuilder;
+    use matchy::Database;
+
+    println!("--- Phase 1: Build Literal Database ---");
+    let build_start = Instant::now();
+    let mut builder = MmdbBuilder::new(MatchMode::CaseSensitive)
+        .with_database_type("Benchmark-Literal")
+        .with_description("en", "Literal database benchmark");
+
+    let empty_data = HashMap::new();
+
+    // Generate realistic literal strings (domains, URLs, file paths, identifiers)
+    let tlds = [
+        "com", "net", "org", "io", "co", "dev", "app", "tech", "xyz", "cloud",
+    ];
+    let categories = [
+        "api", "cdn", "web", "mail", "ftp", "vpn", "db", "auth", "admin", "test",
+    ];
+    let services = [
+        "service", "server", "endpoint", "gateway", "proxy", "router", "node", "host", "instance",
+        "cluster",
+    ];
+
+    for i in 0..count {
+        // Generate varied literal patterns without wildcards
+        let literal = match i % 10 {
+            0 => {
+                // Domain-style literals
+                let cat = categories[i % categories.len()];
+                let svc = services[(i / 10) % services.len()];
+                let tld = tlds[i % tlds.len()];
+                format!("{}-{}-{}.example.{}", cat, svc, i, tld)
+            }
+            1 => {
+                // URL path literals
+                let cat = categories[i % categories.len()];
+                format!("/api/v2/{}/endpoint/{}/resource", cat, i)
+            }
+            2 => {
+                // File path literals
+                let svc = services[i % services.len()];
+                format!("/var/log/{}/application-{}.log", svc, i)
+            }
+            3 => {
+                // Email-style literals
+                let cat = categories[i % categories.len()];
+                let tld = tlds[i % tlds.len()];
+                format!("{}user{}@domain{}.{}", cat, i, i % 100, tld)
+            }
+            4 => {
+                // UUID-style literals
+                format!(
+                    "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+                    i,
+                    (i >> 16) & 0xFFFF,
+                    (i >> 8) & 0xFFFF,
+                    i & 0xFFFF,
+                    i * 1000
+                )
+            }
+            5 => {
+                // Database table.column literals
+                let cat = categories[i % categories.len()];
+                let svc = services[i % services.len()];
+                format!("{}_table_{}.{}_column", cat, i, svc)
+            }
+            6 => {
+                // API key style literals
+                format!("sk_live_{:016x}_{:016x}", i, i * 7)
+            }
+            7 => {
+                // Container/image literals
+                let cat = categories[i % categories.len()];
+                format!(
+                    "docker.io/myorg/{}-image:v{}.{}.{}",
+                    cat,
+                    i / 100,
+                    i % 10,
+                    i % 5
+                )
+            }
+            8 => {
+                // Git branch/tag literals
+                let cat = categories[i % categories.len()];
+                format!("feature/{}-implementation-{}", cat, i)
+            }
+            _ => {
+                // Simple identifier literals
+                let cat = categories[i % categories.len()];
+                let svc = services[i % services.len()];
+                format!("{}_{}_{}", cat, svc, i)
+            }
+        };
+        builder.add_literal(&literal, empty_data.clone())?;
+
+        if count > 10_000 && (i + 1) % 10_000 == 0 {
+            println!(
+                "  Progress: {}/{}",
+                format_number(i + 1),
+                format_number(count)
+            );
+        }
+    }
+
+    let db_bytes = builder.build()?;
+    let build_time = build_start.elapsed();
+    let build_rate = count as f64 / build_time.as_secs_f64();
+
+    println!("  Build time:  {:.2}s", build_time.as_secs_f64());
+    println!("  Build rate:  {} literals/sec", format_qps(build_rate));
+    println!("  DB size:     {}", format_bytes(db_bytes.len()));
+    println!();
+
+    println!("--- Phase 2: Save to Disk ---");
+    let save_start = Instant::now();
+    std::fs::write(temp_file, &db_bytes)?;
+    let save_time = save_start.elapsed();
+    println!("  Save time:   {:.2}s", save_time.as_secs_f64());
+    drop(db_bytes);
+    println!();
+
+    println!("--- Phase 3: Load Database (mmap) ---");
+    let mut load_times = Vec::new();
+    for i in 1..=load_iterations {
+        let load_start = Instant::now();
+        let _db = if trusted {
+            Database::open_trusted(temp_file.to_str().unwrap())?
+        } else {
+            Database::open(temp_file.to_str().unwrap())?
+        };
+        let load_time = load_start.elapsed();
+        load_times.push(load_time);
+        println!(
+            "  Load #{}: {:.3}ms",
+            i,
+            load_time.as_micros() as f64 / 1000.0
+        );
+    }
+    let avg_load = load_times.iter().sum::<std::time::Duration>() / load_iterations as u32;
+    println!("  Average:  {:.3}ms", avg_load.as_micros() as f64 / 1000.0);
+    println!();
+
+    println!("--- Phase 4: Query Performance ---");
+    let db = if trusted {
+        Database::open_trusted(temp_file.to_str().unwrap())?
+    } else {
+        Database::open(temp_file.to_str().unwrap())?
+    };
+    let bench_start = Instant::now();
+    let mut found = 0;
+
+    let tlds = [
+        "com", "net", "org", "io", "co", "dev", "app", "tech", "xyz", "cloud",
+    ];
+    let categories = [
+        "api", "cdn", "web", "mail", "ftp", "vpn", "db", "auth", "admin", "test",
+    ];
+    let services = [
+        "service", "server", "endpoint", "gateway", "proxy", "router", "node", "host", "instance",
+        "cluster",
+    ];
+
+    for i in 0..query_count {
+        // Determine if this query should hit (match) based on hit_rate
+        let should_hit = (i * 100 / query_count) < hit_rate;
+
+        let test_str = if !should_hit {
+            // Generate non-matching query
+            format!("nomatch-query-string-{}", i)
+        } else {
+            // Generate matching query - must exactly match one of the patterns
+            let pattern_id = (i * 43) % count;
+
+            match pattern_id % 10 {
+                0 => {
+                    let cat = categories[pattern_id % categories.len()];
+                    let svc = services[(pattern_id / 10) % services.len()];
+                    let tld = tlds[pattern_id % tlds.len()];
+                    format!("{}-{}-{}.example.{}", cat, svc, pattern_id, tld)
+                }
+                1 => {
+                    let cat = categories[pattern_id % categories.len()];
+                    format!("/api/v2/{}/endpoint/{}/resource", cat, pattern_id)
+                }
+                2 => {
+                    let svc = services[pattern_id % services.len()];
+                    format!("/var/log/{}/application-{}.log", svc, pattern_id)
+                }
+                3 => {
+                    let cat = categories[pattern_id % categories.len()];
+                    let tld = tlds[pattern_id % tlds.len()];
+                    format!(
+                        "{}user{}@domain{}.{}",
+                        cat,
+                        pattern_id,
+                        pattern_id % 100,
+                        tld
+                    )
+                }
+                4 => format!(
+                    "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+                    pattern_id,
+                    (pattern_id >> 16) & 0xFFFF,
+                    (pattern_id >> 8) & 0xFFFF,
+                    pattern_id & 0xFFFF,
+                    pattern_id * 1000
+                ),
+                5 => {
+                    let cat = categories[pattern_id % categories.len()];
+                    let svc = services[pattern_id % services.len()];
+                    format!("{}_table_{}.{}_column", cat, pattern_id, svc)
+                }
+                6 => format!("sk_live_{:016x}_{:016x}", pattern_id, pattern_id * 7),
+                7 => {
+                    let cat = categories[pattern_id % categories.len()];
+                    format!(
+                        "docker.io/myorg/{}-image:v{}.{}.{}",
+                        cat,
+                        pattern_id / 100,
+                        pattern_id % 10,
+                        pattern_id % 5
+                    )
+                }
+                8 => {
+                    let cat = categories[pattern_id % categories.len()];
+                    format!("feature/{}-implementation-{}", cat, pattern_id)
+                }
+                _ => {
+                    let cat = categories[pattern_id % categories.len()];
+                    let svc = services[pattern_id % services.len()];
+                    format!("{}_{}_{}", cat, svc, pattern_id)
+                }
+            }
+        };
+
+        if let Some(matchy::QueryResult::Pattern { pattern_ids, .. }) = db.lookup(&test_str)? {
+            if !pattern_ids.is_empty() {
+                found += 1;
+            }
+        }
+    }
+
+    let bench_time = bench_start.elapsed();
+    let qps = query_count as f64 / bench_time.as_secs_f64();
+    let avg_query = bench_time / query_count as u32;
+
+    println!("  Query count: {}", format_number(query_count));
+    println!("  Total time:  {:.2}s", bench_time.as_secs_f64());
+    println!("  QPS:         {} queries/sec", format_qps(qps));
+    println!(
+        "  Avg latency: {:.2}µs",
+        avg_query.as_nanos() as f64 / 1000.0
+    );
+    println!(
+        "  Found:       {}/{}",
+        format_number(found),
+        format_number(query_count)
+    );
+    println!();
+
+    if !keep {
+        std::fs::remove_file(temp_file)?;
+        println!("✓ Benchmark complete (temp file removed)");
+    } else {
+        println!("✓ Benchmark complete (file kept: {})", temp_file.display());
+    }
+
+    Ok(())
+}
+
+fn bench_pattern_database(
+    count: usize,
+    temp_file: &PathBuf,
+    keep: bool,
+    load_iterations: usize,
+    query_count: usize,
+    hit_rate: usize,
+    trusted: bool,
+) -> Result<()> {
+    use matchy::glob::MatchMode;
+    use matchy::mmdb_builder::MmdbBuilder;
+    use matchy::Database;
+
+    println!("--- Phase 1: Build Pattern Database ---");
+    let build_start = Instant::now();
+    let mut builder = MmdbBuilder::new(MatchMode::CaseSensitive)
+        .with_database_type("Benchmark-Pattern")
+        .with_description("en", "Pattern database benchmark");
+
+    let empty_data = HashMap::new();
+
+    // More realistic threat intel patterns with diverse domains
+    // Uses varied TLDs, domain names, and pattern structures
+    let tlds = [
+        "com", "net", "org", "ru", "cn", "xyz", "tk", "info", "io", "cc",
+    ];
+    let malicious_words = [
+        "malware", "phishing", "trojan", "evil", "attack", "botnet", "spam", "scam", "fake",
+        "virus",
+    ];
+    let domains = [
+        "domain", "site", "server", "host", "web", "portal", "service", "cloud", "zone", "network",
+    ];
+
+    for i in 0..count {
+        // Generate varied patterns with diverse structure
+        let pattern = if i % 20 == 0 {
+            // ~5% complex patterns (multiple wildcards, character classes)
+            let word = malicious_words[i % malicious_words.len()];
+            let tld = tlds[(i / 20) % tlds.len()];
+            match (i / 20) % 4 {
+                0 => format!("*[0-9].*.{}-attack-{}.{}", word, i, tld),
+                1 => format!("{}-*-server[0-9][0-9].evil-{}.{}", word, i, tld),
+                2 => format!("*.{}-campaign-*-{}.{}", word, i, tld),
+                _ => format!("*bad*.{}-?.infection-{}.{}", word, i, tld),
+            }
+        } else {
+            // 95% simpler but still diverse patterns
+            let word = malicious_words[i % malicious_words.len()];
+            let domain_word = domains[(i / 7) % domains.len()];
+            let tld = tlds[i % tlds.len()];
+
+            match i % 8 {
+                0 => format!("*.{}-{}-{}.{}", word, domain_word, i, tld),
+                1 => format!("{}-{}*.bad-{}.{}", word, domain_word, i, tld),
+                2 => format!("evil-{}-*.tracker-{}.{}", domain_word, i, tld),
+                3 => format!("*-{}-{}.threat{}.{}", word, domain_word, i, tld),
+                4 => format!("suspicious-*.{}-zone-{}.{}", domain_word, i, tld),
+                5 => format!("*.{}{}.{}-network.{}", word, i, domain_word, tld),
+                6 => format!("bad-{}-{}.*.{}", word, i, tld),
+                _ => format!("{}-threat-*.{}{}.{}", word, domain_word, i, tld),
+            }
+        };
+        builder.add_glob(&pattern, empty_data.clone())?;
+
+        if count > 10_000 && (i + 1) % 10_000 == 0 {
+            println!(
+                "  Progress: {}/{}",
+                format_number(i + 1),
+                format_number(count)
+            );
+        }
+    }
+
+    let db_bytes = builder.build()?;
+    let build_time = build_start.elapsed();
+    let build_rate = count as f64 / build_time.as_secs_f64();
+
+    println!("  Build time:  {:.2}s", build_time.as_secs_f64());
+    println!("  Build rate:  {} patterns/sec", format_qps(build_rate));
+    println!("  DB size:     {}", format_bytes(db_bytes.len()));
+    println!();
+
+    println!("--- Phase 2: Save to Disk ---");
+    let save_start = Instant::now();
+    std::fs::write(temp_file, &db_bytes)?;
+    let save_time = save_start.elapsed();
+    println!("  Save time:   {:.2}s", save_time.as_secs_f64());
+    drop(db_bytes);
+    println!();
+
+    println!("--- Phase 3: Load Database (mmap) ---");
+    let mut load_times = Vec::new();
+    for i in 1..=load_iterations {
+        let load_start = Instant::now();
+        let _db = if trusted {
+            Database::open_trusted(temp_file.to_str().unwrap())?
+        } else {
+            Database::open(temp_file.to_str().unwrap())?
+        };
+        let load_time = load_start.elapsed();
+        load_times.push(load_time);
+        println!(
+            "  Load #{}: {:.3}ms",
+            i,
+            load_time.as_micros() as f64 / 1000.0
+        );
+    }
+    let avg_load = load_times.iter().sum::<std::time::Duration>() / load_iterations as u32;
+    println!("  Average:  {:.3}ms", avg_load.as_micros() as f64 / 1000.0);
+    println!();
+
+    println!("--- Phase 4: Query Performance ---");
+    let db = if trusted {
+        Database::open_trusted(temp_file.to_str().unwrap())?
+    } else {
+        Database::open(temp_file.to_str().unwrap())?
+    };
+    let bench_start = Instant::now();
+    let mut found = 0;
+
+    let tlds = [
+        "com", "net", "org", "ru", "cn", "xyz", "tk", "info", "io", "cc",
+    ];
+    let malicious_words = [
+        "malware", "phishing", "trojan", "evil", "attack", "botnet", "spam", "scam", "fake",
+        "virus",
+    ];
+    let domains = [
+        "domain", "site", "server", "host", "web", "portal", "service", "cloud", "zone", "network",
+    ];
+
+    for i in 0..query_count {
+        // Determine if this query should hit (match) based on hit_rate
+        let should_hit = (i * 100 / query_count) < hit_rate;
+
+        let test_str = if !should_hit {
+            // Generate non-matching query (benign traffic)
+            format!("benign-clean-traffic-{}.legitimate-site.com", i)
+        } else {
+            // Generate matching query based on pattern_id
+            let pattern_id = (i * 43) % count;
+
+            if pattern_id.is_multiple_of(20) {
+                // Match complex patterns (~5%)
+                let word = malicious_words[pattern_id % malicious_words.len()];
+                let tld = tlds[(pattern_id / 20) % tlds.len()];
+                match (pattern_id / 20) % 4 {
+                    0 => format!("prefix5.middle.{}-attack-{}.{}", word, pattern_id, tld),
+                    1 => format!("{}-middle-server99.evil-{}.{}", word, pattern_id, tld),
+                    2 => format!("prefix.{}-campaign-middle-{}.{}", word, pattern_id, tld),
+                    _ => format!("firstbadsecond.{}-x.infection-{}.{}", word, pattern_id, tld),
+                }
+            } else {
+                // Match simpler patterns (95%)
+                let word = malicious_words[pattern_id % malicious_words.len()];
+                let domain_word = domains[(pattern_id / 7) % domains.len()];
+                let tld = tlds[pattern_id % tlds.len()];
+
+                match pattern_id % 8 {
+                    0 => format!("prefix.{}-{}-{}.{}", word, domain_word, pattern_id, tld),
+                    1 => format!("{}-{}middle.bad-{}.{}", word, domain_word, pattern_id, tld),
+                    2 => format!("evil-{}-middle.tracker-{}.{}", domain_word, pattern_id, tld),
+                    3 => format!(
+                        "prefix-{}-{}.threat{}.{}",
+                        word, domain_word, pattern_id, tld
+                    ),
+                    4 => format!(
+                        "suspicious-middle.{}-zone-{}.{}",
+                        domain_word, pattern_id, tld
+                    ),
+                    5 => format!(
+                        "prefix.{}{}.{}-network.{}",
+                        word, pattern_id, domain_word, tld
+                    ),
+                    6 => format!("bad-{}-{}.middle.{}", word, pattern_id, tld),
+                    _ => format!(
+                        "{}-threat-middle.{}{}.{}",
+                        word, domain_word, pattern_id, tld
+                    ),
+                }
+            }
+        };
+
+        if let Some(matchy::QueryResult::Pattern { pattern_ids, .. }) = db.lookup(&test_str)? {
+            if !pattern_ids.is_empty() {
+                found += 1;
+            }
+        }
+    }
+
+    let bench_time = bench_start.elapsed();
+    let qps = query_count as f64 / bench_time.as_secs_f64();
+    let avg_query = bench_time / query_count as u32;
+
+    println!("  Query count: {}", format_number(query_count));
+    println!("  Total time:  {:.2}s", bench_time.as_secs_f64());
+    println!("  QPS:         {} queries/sec", format_qps(qps));
+    println!(
+        "  Avg latency: {:.2}µs",
+        avg_query.as_nanos() as f64 / 1000.0
+    );
+    println!(
+        "  Found:       {}/{}",
+        format_number(found),
+        format_number(query_count)
+    );
+    println!();
+
+    if !keep {
+        std::fs::remove_file(temp_file)?;
+        println!("✓ Benchmark complete (temp file removed)");
+    } else {
+        println!("✓ Benchmark complete (file kept: {})", temp_file.display());
+    }
+
+    Ok(())
+}
+
+fn bench_combined_database(
+    count: usize,
+    temp_file: &PathBuf,
+    keep: bool,
+    load_iterations: usize,
+    query_count: usize,
+) -> Result<()> {
+    use matchy::glob::MatchMode;
+    use matchy::mmdb_builder::MmdbBuilder;
+    use matchy::Database;
+
+    println!("--- Phase 1: Build Combined Database ---");
+    let build_start = Instant::now();
+    let mut builder = MmdbBuilder::new(MatchMode::CaseSensitive)
+        .with_database_type("Benchmark-Combined")
+        .with_description("en", "Combined IP+Pattern benchmark");
+
+    let empty_data = HashMap::new();
+
+    // Add IPs (half the count)
+    let ip_count = count / 2;
+    for i in 0..ip_count {
+        let ip_num = i as u32;
+        let octet1 = (ip_num >> 24) & 0xFF;
+        let octet2 = (ip_num >> 16) & 0xFF;
+        let octet3 = (ip_num >> 8) & 0xFF;
+        let octet4 = ip_num & 0xFF;
+        let ip_str = format!("{}.{}.{}.{}", octet1, octet2, octet3, octet4);
+        builder.add_ip(&ip_str, empty_data.clone())?;
+
+        if ip_count > 100_000 && (i + 1) % 500_000 == 0 {
+            println!(
+                "  IP progress: {}/{}",
+                format_number(i + 1),
+                format_number(ip_count)
+            );
+        }
+    }
+
+    // Add patterns (other half)
+    let pattern_count = count - ip_count;
+    for i in 0..pattern_count {
+        // Generate varied patterns with ~5% complex ones
+        let pattern = if i % 20 == 0 {
+            // ~5% complex patterns
+            match (i / 20) % 4 {
+                0 => format!("*[0-9].*.attacker{}.com", i),
+                1 => format!("evil-*-[a-z][a-z].*.domain{}.net", i),
+                2 => "*.malware-[0-9][0-9][0-9]-*.com".to_string(),
+                _ => "*bad*.phishing-?.*.org".to_string(),
+            }
+        } else {
+            match i % 4 {
+                0 => format!("*.domain{}.com", i),
+                1 => format!("subdomain{}.*.com", i),
+                2 => format!("test-{}-*.com", i),
+                _ => format!("*-{}.net", i),
+            }
+        };
+        builder.add_glob(&pattern, empty_data.clone())?;
+
+        if pattern_count > 10_000 && (i + 1) % 5_000 == 0 {
+            println!(
+                "  Pattern progress: {}/{}",
+                format_number(i + 1),
+                format_number(pattern_count)
+            );
+        }
+    }
+
+    let db_bytes = builder.build()?;
+    let build_time = build_start.elapsed();
+    let build_rate = count as f64 / build_time.as_secs_f64();
+
+    println!("  Build time:  {:.2}s", build_time.as_secs_f64());
+    println!("  Build rate:  {} entries/sec", format_qps(build_rate));
+    println!("  DB size:     {}", format_bytes(db_bytes.len()));
+    println!("  IPs:         {}", format_number(ip_count));
+    println!("  Patterns:    {}", format_number(pattern_count));
+    println!();
+
+    println!("--- Phase 2: Save to Disk ---");
+    let save_start = Instant::now();
+    std::fs::write(temp_file, &db_bytes)?;
+    let save_time = save_start.elapsed();
+    println!("  Save time:   {:.2}s", save_time.as_secs_f64());
+    drop(db_bytes);
+    println!();
+
+    println!("--- Phase 3: Load Database (mmap) ---");
+    let mut load_times = Vec::new();
+    for i in 1..=load_iterations {
+        let load_start = Instant::now();
+        let _db = Database::open(temp_file.to_str().unwrap())?;
+        let load_time = load_start.elapsed();
+        load_times.push(load_time);
+        println!(
+            "  Load #{}: {:.3}ms",
+            i,
+            load_time.as_micros() as f64 / 1000.0
+        );
+    }
+    let avg_load = load_times.iter().sum::<std::time::Duration>() / load_iterations as u32;
+    println!("  Average:  {:.3}ms", avg_load.as_micros() as f64 / 1000.0);
+    println!();
+
+    println!("--- Phase 4: Query Performance ---");
+    let db = Database::open(temp_file.to_str().unwrap())?;
+
+    // Query both IPs and patterns
+    let bench_start = Instant::now();
+    let mut ip_found = 0;
+    let mut pattern_found = 0;
+
+    let half_queries = query_count / 2;
+
+    // Query IPs
+    for i in 0..half_queries {
+        let ip_num = ((i * 43) % ip_count) as u32;
+        let octet1 = (ip_num >> 24) & 0xFF;
+        let octet2 = (ip_num >> 16) & 0xFF;
+        let octet3 = (ip_num >> 8) & 0xFF;
+        let octet4 = ip_num & 0xFF;
+        let ip = std::net::Ipv4Addr::new(octet1 as u8, octet2 as u8, octet3 as u8, octet4 as u8);
+
+        if let Some(matchy::QueryResult::Ip { .. }) = db.lookup_ip(std::net::IpAddr::V4(ip))? {
+            ip_found += 1;
+        }
+    }
+
+    // Query patterns
+    for i in 0..(query_count - half_queries) {
+        let pattern_id = (i * 43) % pattern_count;
+        let test_str = if pattern_id.is_multiple_of(20) {
+            // Match complex patterns (~5%)
+            match (pattern_id / 20) % 4 {
+                0 => format!("prefix5.suffix.attacker{}.com", pattern_id),
+                1 => format!("evil-middle-ab.end.domain{}.net", pattern_id),
+                2 => "prefix.malware-123-suffix.com".to_string(),
+                _ => "firstbadsecond.phishing-x.end.org".to_string(),
+            }
+        } else {
+            match pattern_id % 4 {
+                0 => format!("prefix.domain{}.com", pattern_id),
+                1 => format!("subdomain{}.middle.com", pattern_id),
+                2 => format!("test-{}-suffix.com", pattern_id),
+                _ => format!("prefix-{}.net", pattern_id),
+            }
+        };
+
+        if let Some(matchy::QueryResult::Pattern { pattern_ids, .. }) = db.lookup(&test_str)? {
+            if !pattern_ids.is_empty() {
+                pattern_found += 1;
+            }
+        }
+    }
+
+    let bench_time = bench_start.elapsed();
+    let qps = query_count as f64 / bench_time.as_secs_f64();
+    let avg_query = bench_time / query_count as u32;
+
+    println!("  Query count: {}", format_number(query_count));
+    println!("  Total time:  {:.2}s", bench_time.as_secs_f64());
+    println!("  QPS:         {} queries/sec", format_qps(qps));
+    println!(
+        "  Avg latency: {:.2}µs",
+        avg_query.as_nanos() as f64 / 1000.0
+    );
+    println!(
+        "  IP found:    {}/{}",
+        format_number(ip_found),
+        format_number(half_queries)
+    );
+    println!(
+        "  Pattern found: {}/{}",
+        format_number(pattern_found),
+        format_number(query_count - half_queries)
+    );
+    println!();
+
+    if !keep {
+        std::fs::remove_file(temp_file)?;
+        println!("✓ Benchmark complete (temp file removed)");
+    } else {
+        println!("✓ Benchmark complete (file kept: {})", temp_file.display());
+    }
+
+    Ok(())
 }

@@ -127,15 +127,34 @@ Performance benchmark matching the C++ reference implementation:
 
 **Run:** `cargo run --release --example cpp_comparison_test`
 
-### `test_v3_performance.rs`
-Tests zero-copy loading performance of the v3 format:
-- Scales from 1K to 50K patterns
-- Measures build time vs load time
-- Demonstrates O(1) loading time
-- Shows massive improvement over v2 format
-- Critical for multi-process deployments
+### `matchy bench` (Built-in Benchmarking Tool)
+Comprehensive benchmarking tool for all database types:
+- **IP databases**: Measure build, load, and query performance for IP lookups
+- **Pattern databases**: Test glob pattern matching at scale
+- **Combined databases**: Benchmark mixed IP + pattern databases
+- Configurable entry counts and query iterations
+- Multiple load iterations for averaging
+- Memory-mapped (mmap) load time measurement
+- Queries per second (QPS) metrics
+- Optional database file retention for inspection
 
-**Run:** `cargo run --release --example test_v3_performance`
+**Examples:**
+```bash
+# Quick pattern test (1K patterns)
+cargo build --release && ./target/release/matchy bench pattern -n 1000
+
+# Large IP test (1M IPs)
+./target/release/matchy bench ip -n 1000000
+
+# Combined database (50K IPs + 50K patterns)
+./target/release/matchy bench combined -n 100000
+
+# Custom query count and keep the database
+./target/release/matchy bench pattern -n 10000 --query-count 50000 --keep -o test.mmdb
+
+# See all options
+./target/release/matchy bench --help
+```
 
 ## Quick Start
 
@@ -159,7 +178,12 @@ make -C examples
 # Performance validation
 cargo run --release --example production_test
 cargo run --release --example cpp_comparison_test
-cargo run --release --example test_v3_performance
+
+# Benchmarking (built-in tool)
+cargo build --release
+./target/release/matchy bench pattern -n 10000
+./target/release/matchy bench ip -n 100000
+./target/release/matchy bench combined -n 50000
 
 # Run integration tests
 cargo test --test integration_tests
@@ -186,4 +210,12 @@ cargo test --test integration_tests
 4. **Verify performance:**
    ```bash
    cargo run --release --example cpp_comparison_test
+   ```
+
+5. **Benchmark at scale:**
+   ```bash
+   cargo build --release
+   ./target/release/matchy bench pattern -n 50000
+   ./target/release/matchy bench ip -n 1000000
+   ./target/release/matchy bench combined -n 100000
    ```

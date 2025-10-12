@@ -4,9 +4,9 @@
 [![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
-**Fast database for IP address and pattern matching with rich data storage.**
+**Fast database for IP address and string matching with rich data storage.**
 
-Match IP addresses, CIDR ranges, and thousands of glob patterns in microseconds. Perfect for threat intelligence, GeoIP, domain categorization, and network security applications.
+Match IP addresses, CIDR ranges, exact strings, and thousands of glob patterns (like `*.evil.com`) in microseconds. Perfect for threat intelligence, GeoIP, domain categorization, and network security applications.
 
 ## Why Matchy?
 
@@ -16,18 +16,19 @@ Traditional IP/domain lookups fall apart at scale:
 - 💾 Loading databases takes hundreds of milliseconds
 - 📈 Running 50 worker processes means loading the same data 50 times
 
-**Matchy solves these problems with a unified database that supports both IP addresses and patterns.**
+**Matchy solves these problems with a unified database that supports IP addresses, exact string matches, and glob patterns.**
 
 ### Real-World Use Cases
 
 **🛡️ Threat Intelligence**
 
-Query malicious IPs (`1.2.3.4`), suspicious domains (`*.phishing-site.com`), and URL patterns (`http://*/admin/config.php`) from a single database. Check every user interaction against 50,000+ threat indicators in ~20 microseconds.
+Query malicious IPs (`1.2.3.4`), exact domains (`evil.example.com`), and glob patterns (`*.phishing-site.com`, `http://*/admin/config.php`) from a single database. Check every user interaction against 50,000+ threat indicators in microseconds.
 
 ```rust
-// Check both IPs and domains with one database
-db.lookup("1.2.3.4")?;           // IP lookup
-db.lookup("evil.malicious.com")?; // Pattern match
+// Check IPs, exact strings, and patterns with one database
+db.lookup("1.2.3.4")?;              // IP lookup
+db.lookup("evil.example.com")?;     // Exact string match
+db.lookup("sub.evil.example.com")?; // Matches *.example.com pattern
 ```
 
 **🌍 GeoIP with Custom Data**
@@ -49,27 +50,29 @@ Run 64 worker processes with the same 100MB database? Matchy uses memory mapping
 
 **🔥 Instant Loading**
 
-Memory-mapped databases load in <100 microseconds regardless of size. No deserialization overhead—direct access to on-disk structures.
+Memory-mapped databases load in <1 millisecond regardless of size. No deserialization overhead—direct access to on-disk structures.
 
 ## Key Features
 
 ### Unified Database
 - **IP addresses & CIDR ranges**: Binary search tree for O(log n) lookups
-- **String literal matching**: Exact string matches for domains, URLs, and any text
-- **Glob patterns**: Aho-Corasick automaton for O(n) matching
+- **Exact string matching**: Literal matches for domains, URLs, file paths (`evil.example.com`)
+- **Glob pattern matching**: Wildcard patterns for flexible matching (`*.evil.com`, `http://*/admin/*`)
 - **Auto-detection**: One query function handles all types
 - **Rich data**: Store JSON-like structured data with each entry
 
 ### Performance
-- **1M+ queries/second** even with 50,000 patterns
-- **<100μs loading time** via memory mapping
+- **7M+ IP queries/second** on modern hardware
+- **1M+ pattern queries/second** even with 50,000 glob patterns
+- **<1ms loading time** via memory mapping (tested with 180M+ entries)
 - **Zero-copy**: Direct access to on-disk structures
 - **Memory sharing**: Automatic OS-level page sharing across processes
 
 ### Compatibility
-- **libmaxminddb compatible** (planned): Drop-in replacement for existing GeoIP code
-- **C/C++/Rust APIs**: Stable FFI for any language
-- **MMDB format**: Compatible with MaxMind database tools
+- **MaxMind MMDB format extension**: Matchy databases use an extended MMDB format
+- **Backward compatible**: IP-only `.mxy` databases work with standard MaxMind tools
+- **Forward compatible**: Standard `.mmdb` files work perfectly with Matchy
+- **C/Rust APIs**: Stable FFI with MaxMind-compatible C API
 
 ## Quick Start
 
@@ -101,10 +104,10 @@ builder.add_entry("*.evil.com", pattern_data)?;
 
 // Build and save
 let database_bytes = builder.build()?;
-std::fs::write("threats.db", &database_bytes)?;
+std::fs::write("threats.mxy", &database_bytes)?;
 
-// Query the database (auto-detects IP vs pattern)
-let db = Database::open("threats.db")?;
+// Query the database (auto-detects IP vs string vs pattern)
+let db = Database::open("threats.mxy")?;
 
 // IP lookup
 match db.lookup("8.8.8.8")? {
@@ -141,11 +144,11 @@ int main() {
     matchy_builder_t *builder = matchy_builder_new();
     matchy_builder_add(builder, "1.2.3.4", "{\"threat\": \"high\"}");
     matchy_builder_add(builder, "*.evil.com", "{\"category\": \"malware\"}");
-    matchy_builder_save(builder, "threats.db");
+    matchy_builder_save(builder, "threats.mxy");
     matchy_builder_free(builder);
     
     // Query database
-    matchy_t *db = matchy_open("threats.db");
+    matchy_t *db = matchy_open("threats.mxy");
     if (!db) {
         fprintf(stderr, "Failed to open database\n");
         return 1;
@@ -175,7 +178,9 @@ int main() {
 
 ## Building Databases
 
-Matchy provides a command-line tool to build databases from various input formats. The tool automatically detects whether entries are IP addresses, CIDR ranges, exact string literals, or glob patterns.
+Matchy provides a command-line tool to build databases (`.mxy` files) from various input formats. The tool automatically detects whether entries are IP addresses, CIDR ranges, exact string literals, or glob patterns.
+
+**Note:** Matchy databases use the `.mxy` extension to distinguish them from standard MaxMind `.mmdb` files. While the format is based on and compatible with MMDB, the `.mxy` extension signals that the database may contain string and pattern matching features not available in standard MMDB readers.
 
 ### Installation
 
@@ -210,7 +215,7 @@ http://*/admin/config.php
 
 **Build command:**
 ```bash
-matchy build -o database.mmdb entries.txt
+matchy build -o database.mxy entries.txt
 ```
 
 #### CSV Format (With Metadata)
@@ -229,7 +234,7 @@ http://*/admin/config.php,medium,scanning,2024-11-20,false
 
 **Build command:**
 ```bash
-matchy build -o threats.mmdb --format csv threats.csv
+matchy build -o threats.mxy --format csv threats.csv
 ```
 
 **Example: `geoip.csv`**
@@ -241,11 +246,67 @@ entry,country,city,latitude,longitude
 ```
 
 ```bash
-matchy build -o geoip.mmdb --format csv \
+matchy build -o geoip.mxy --format csv \
   --database-type "GeoIP-Lite" \
   --description "Custom GeoIP database" \
   geoip.csv
 ```
+
+#### Controlling Entry Type (Optional)
+
+By default, Matchy automatically detects whether entries are IP addresses, literal strings, or glob patterns. In most cases, this works perfectly. However, for edge cases where you need explicit control, you can use type prefixes:
+
+| Prefix | Purpose | Example |
+|--------|---------|----------|
+| `literal:` | Force exact string matching | `literal:*.actually-in-domain.com` |
+| `glob:` | Force glob pattern matching | `glob:test.com` |
+| `ip:` | Force IP address parsing | `ip:10.0.0.0/8` |
+
+**When you might need this:**
+
+- **Domain names with wildcard characters**: If a domain literally contains `*`, `?`, or `[` characters
+  ```csv
+  entry,category,note
+  literal:*.cdn.example.com,infrastructure,Asterisk is part of the domain name
+  literal:file[1].txt,testing,Brackets are literal characters
+  ```
+
+- **Testing glob behavior**: Force glob matching without wildcards
+  ```csv
+  entry,category,note
+  glob:test.com,testing,Force glob even without wildcards
+  ```
+
+- **Explicit IP parsing**: Rarely needed, but available
+  ```csv
+  entry,category,note
+  ip:192.168.1.0/24,network,Explicitly marked as IP
+  ```
+
+**Example CSV with prefixes:**
+```csv
+entry,threat_level,category,notes
+# Normal entries - auto-detected
+evil.example.com,high,malware,Exact string match
+*.phishing.com,critical,phishing,Glob pattern (has wildcard)
+1.2.3.4,high,scanner,IP address
+
+# Edge cases - explicit prefixes
+literal:*.weird-domain.com,medium,suspicious,Domain contains literal asterisk
+glob:no-wildcards.com,low,test,Force glob matching for testing
+```
+
+**Example JSON with prefixes:**
+```json
+[
+  {"key": "evil.example.com", "data": {"note": "auto-detected literal"}},
+  {"key": "*.phishing.com", "data": {"note": "auto-detected glob"}},
+  {"key": "literal:*.in-domain.com", "data": {"note": "forced literal"}},
+  {"key": "glob:test.com", "data": {"note": "forced glob"}}
+]
+```
+
+**Note:** The prefix is stripped before storage, so queries use the actual key without the prefix.
 
 #### JSON Format (With Complex Metadata)
 
@@ -262,7 +323,7 @@ JSON array with entries containing a `key` (IP/CIDR/pattern) and optional `data`
       "first_seen": "2025-01-01",
       "tags": ["botnet", "ddos"],
       "attribution": {
-        "actor": "APT28",
+        "actor": "Storm-0558",
         "confidence": 0.85
       }
     }
@@ -287,24 +348,16 @@ JSON array with entries containing a `key` (IP/CIDR/pattern) and optional `data`
 
 **Build command:**
 ```bash
-matchy build -o threats.mmdb --format json threats.json
+matchy build -o threats.mxy --format json threats.json
 ```
 
 #### MISP Format (Threat Intelligence)
 
 MISP (Malware Information Sharing Platform) JSON format for threat intelligence feeds. The tool automatically extracts IP addresses, domains, and URLs with their associated threat data.
 
-**Example MISP export files:**
-```bash
-# Files from ~/MISP-data/ directory
-003a6daa-ac91-4718-862b-efc4369a1eee.json
-00993a8e-64c7-4036-8238-ef7f955222b3.json
-014e94ba-9857-49c1-9dc8-a7975a4d530e.json
-```
-
 **Build command:**
 ```bash
-matchy build -o threats.mmdb --format misp ~/MISP-data/003a6daa-ac91-4718-862b-efc4369a1eee.json
+matchy build -o threats.mxy --format misp ./misp-exports/*.json
 ```
 
 ### Build Options
@@ -313,7 +366,7 @@ matchy build -o threats.mmdb --format misp ~/MISP-data/003a6daa-ac91-4718-862b-e
 matchy build [OPTIONS] <INPUT>... -o <OUTPUT>
 
 Options:
-  -o, --output <FILE>          Output database file (.mmdb extension recommended)
+  -o, --output <FILE>          Output database file (.mxy extension)
   -f, --format <FORMAT>        Input format: text, csv, json, or misp [default: text]
   -t, --database-type <TYPE>   Database type name (e.g., "MyCompany-ThreatIntel")
   -d, --description <TEXT>     Description text
@@ -327,16 +380,16 @@ You can specify multiple input files to combine entries:
 
 ```bash
 # Combine multiple text files
-matchy build -o combined.mmdb ips.txt domains.txt urls.txt
+matchy build -o combined.mxy ips.txt domains.txt urls.txt
 
 # Combine multiple CSV files
-matchy build -o threats.mmdb --format csv threats1.csv threats2.csv threats3.csv
+matchy build -o threats.mxy --format csv threats1.csv threats2.csv threats3.csv
 
 # Combine multiple JSON files
-matchy build -o threats.mmdb --format json threat1.json threat2.json threat3.json
+matchy build -o threats.mxy --format json threat1.json threat2.json threat3.json
 
 # Combine multiple MISP exports
-matchy build -o misp-threats.mmdb --format misp ~/MISP-data/*.json
+matchy build -o misp-threats.mxy --format misp ./misp-exports/*.json
 ```
 
 ### Examples
@@ -344,12 +397,12 @@ matchy build -o misp-threats.mmdb --format misp ~/MISP-data/*.json
 **Simple blocklist (no metadata):**
 ```bash
 # Just match IPs and domains, no data attached
-matchy build -o blocklist.mmdb blocklist.txt
+matchy build -o blocklist.mxy blocklist.txt
 ```
 
 **Threat intelligence database with metadata:**
 ```bash
-matchy build -o threats.mmdb --format csv \
+matchy build -o threats.mxy --format csv \
   --database-type "ThreatIntel" \
   --description "Combined IP and domain threat indicators" \
   --verbose \
@@ -358,7 +411,7 @@ matchy build -o threats.mmdb --format csv \
 
 **GeoIP-style database:**
 ```bash
-matchy build -o geoip.mmdb --format csv \
+matchy build -o geoip.mxy --format csv \
   --database-type "GeoIP-Lite" \
   --description "Custom GeoIP database" \
   geoip.csv
@@ -366,8 +419,8 @@ matchy build -o geoip.mmdb --format csv \
 
 **Build from MISP export:**
 ```bash
-matchy build -o misp-threats.mmdb --format misp --verbose \
-  ~/MISP-data/003a6daa-ac91-4718-862b-efc4369a1eee.json
+matchy build -o misp-threats.mxy --format misp --verbose \
+  ./misp-exports/*.json
 ```
 
 ### Querying Databases
@@ -376,19 +429,19 @@ Once built, query your database using the CLI:
 
 ```bash
 # Query an IP address
-matchy query threats.mmdb 1.2.3.4
+matchy query threats.mxy 1.2.3.4
 # Output: [{"threat_level":"high","category":"malware","first_seen":"2025-01-01","blocked":true}]
 
-# Query a domain (pattern matching)
-matchy query threats.mmdb evil.malicious.com
+# Query a domain (exact match or pattern matching)
+matchy query threats.mxy evil.malicious.com
 # Output: [{"threat_level":"critical","category":"phishing","blocked":true}]
 
 # Query with no match returns empty array
-matchy query threats.mmdb benign.example.com
+matchy query threats.mxy benign.example.com
 # Output: []
 
 # Quiet mode (exit code only: 0=found, 1=not found)
-matchy query threats.mmdb 1.2.3.4 --quiet
+matchy query threats.mxy 1.2.3.4 --quiet
 echo $?  # 0 if found, 1 if not found
 ```
 
@@ -398,18 +451,18 @@ View database information and statistics:
 
 ```bash
 # Human-readable output
-matchy inspect threats.mmdb
+matchy inspect threats.mxy
 
 # JSON output
-matchy inspect threats.mmdb --json
+matchy inspect threats.mxy --json
 
 # Verbose output with full metadata
-matchy inspect threats.mmdb --verbose
+matchy inspect threats.mxy --verbose
 ```
 
 **Example output:**
 ```
-Database: threats.mmdb
+Database: threats.mxy
 Format:   Combined IP+String database
 
 Capabilities:
@@ -426,17 +479,69 @@ Metadata:
   Build time:      2025-01-15 10:30:45 UTC (1736936445)
 ```
 
+## Security
+
+### Trust Mode for Performance
+
+Matchy provides two database loading modes:
+
+**Safe Mode (Default)** - Validates UTF-8 on every pattern string read
+- Use for databases from untrusted or external sources
+- Prevents undefined behavior from malicious databases
+- Performance: baseline
+
+**Trusted Mode** - Skips UTF-8 validation for better performance
+- **~15-20% faster** for pattern-heavy workloads
+- **Only use for databases you built yourself or trust completely**
+- Undefined behavior if database contains invalid UTF-8
+
+#### Using Trusted Mode
+
+**Rust API:**
+```rust
+// Safe mode (default) - for external databases
+let db = Database::open("external-threats.mxy")?;
+
+// Trusted mode - only for databases you control
+let db = Database::open_trusted("my-threats.mxy")?;
+```
+
+**C API:**
+```c
+// Safe mode (default)
+matchy_t *db = matchy_open("external.mxy");
+
+// Trusted mode - faster but ONLY for trusted sources
+matchy_t *db = matchy_open_trusted("my-database.mxy");
+```
+
+**CLI:**
+```bash
+# Safe mode
+./matchy bench pattern --count 200000
+
+# Trusted mode - 28% faster
+./matchy bench pattern --count 200000 --trusted
+```
+
+**Security Recommendation:** Always use safe mode (default) unless you control the database build process and can guarantee its integrity.
+
 ## Performance
 
 Measured on M4 MacBook Air:
 
 | Workload | Throughput | Notes |
 |----------|------------|-------|
-| IP lookups | 1.5M queries/sec | Binary tree search |
+| IP lookups | **7.29M queries/sec** | Binary search tree |
+| IP lookups (1M entries) | **7.29M queries/sec** | Scales efficiently |
 | Pattern matching (10K patterns) | 1.4M queries/sec | Aho-Corasick |
 | Pattern matching (50K patterns) | 1M queries/sec | Extreme scale |
-| Database load time | <150μs | Memory-mapped |
+| Pattern matching (200K, trusted) | **642 queries/sec** | 100% hit rate, complex patterns |
+| Pattern matching (200K, safe) | **500 queries/sec** | 100% hit rate, UTF-8 validation |
+| Database load time | **<1ms** | Memory-mapped, zero-copy |
+| Database load (1M IPs) | **<1ms** | Sub-millisecond regardless of size |
 | Build time (1K entries) | ~4ms | One-time cost |
+| Build time (1M IPs) | 210ms | 4.8M IPs/sec |
 
 See [DEVELOPMENT.md](./DEVELOPMENT.md) for detailed benchmarks.
 
@@ -444,24 +549,30 @@ See [DEVELOPMENT.md](./DEVELOPMENT.md) for detailed benchmarks.
 
 ```mermaid
 flowchart TD
-    App["Application<br/>(C, C++, or Rust)"] --> CPP["C++ Wrapper<br/>(RAII)"] & CAPI["C API<br/>(matchy_*)"] & Rust["Rust API"]
-    CPP --> Core
+    App["Application<br/>(C or Rust)"] --> CAPI["C API<br/>(matchy_* / MaxMind-compatible)"] & Rust["Rust API"]
     CAPI --> Core
     Rust --> Core
     Core["Rust Core"] --> IPTree["IP Search Tree<br/>(Binary Trie)"]
-    Core --> AC["Aho-Corasick<br/>(Pattern Matching)"]
-    Core --> Data["Data Section<br/>(MMDB Format)"]
+    Core --> Literals["String Literals<br/>(Hash Table)"]
+    Core --> AC["Aho-Corasick<br/>(Glob Patterns)"]
+    Core --> Data["Data Section<br/>(Extended MMDB Format)"]
     Core --> Mmap["Memory Mapping"]
     
     style App fill:#e1f5ff
     style Core fill:#fff3e0
     style IPTree fill:#f5f5f5
+    style Literals fill:#f5f5f5
     style AC fill:#f5f5f5
     style Data fill:#f5f5f5
     style Mmap fill:#f5f5f5
 ```
 
-**Hybrid approach**: IP addresses use a binary search tree for O(log n) lookups. Patterns use Aho-Corasick for O(n) simultaneous matching. Both share the same data section with automatic deduplication.
+**Unified approach**: 
+- **IP addresses**: Binary search tree for O(log n) lookups
+- **Exact strings**: Hash table for O(1) literal matching (internal optimization)
+- **Glob patterns**: Aho-Corasick automaton for O(n) simultaneous pattern matching
+- **Data storage**: Extended MMDB format with automatic deduplication
+- **Loading**: Memory-mapped for instant access and cross-process sharing
 
 ## Building
 
@@ -490,7 +601,8 @@ The build process automatically generates `include/matchy.h` for C/C++ integrati
 - `target/release/libmatchy.dylib` (macOS)
 - `target/release/libmatchy.so` (Linux)
 - `target/release/libmatchy.a` (static library)
-- `include/matchy.h` (C header, auto-generated)
+- `include/matchy/matchy.h` (C API header, auto-generated)
+- `include/matchy/maxminddb.h` (MaxMind-compatible C API header, auto-generated)
 
 ## API Reference
 
@@ -505,7 +617,8 @@ The build process automatically generates `include/matchy.h` for C/C++ integrati
 - `void matchy_builder_free(builder)` - Free builder
 
 **Query API:**
-- `matchy_t* matchy_open(filename)` - Open database (memory-mapped)
+- `matchy_t* matchy_open(filename)` - Open database (memory-mapped, safe mode)
+- `matchy_t* matchy_open_trusted(filename)` - Open database (trusted mode, faster but only for trusted sources)
 - `matchy_t* matchy_open_buffer(buffer, size)` - Open from memory buffer
 - `void matchy_close(db)` - Close database
 - `matchy_result_t matchy_query(db, query)` - **Unified query** (auto-detects IP vs pattern)
@@ -547,38 +660,68 @@ export LD_LIBRARY_PATH=./target/release:$LD_LIBRARY_PATH
 
 ## Database Format
 
-Matchy uses a hybrid binary format:
+Matchy databases (`.mxy` files) use an extended MMDB format:
 
 ```
 ┌──────────────────────────────────────┐
-│  IP Search Tree (binary trie)        │  ← Fast IP lookups
+│  MMDB Metadata Section               │  ← Database info, type, description
 ├──────────────────────────────────────┤
-│  Data Section (MMDB-compatible)      │  ← Shared rich data
+│  IP Search Tree (binary trie)        │  ← MMDB-standard IP lookups
 ├──────────────────────────────────────┤
-│  Pattern Matcher (Aho-Corasick)      │  ← Fast pattern matching
+│  Data Section (MMDB format)          │  ← Shared rich data storage
 ├──────────────────────────────────────┤
-│  Metadata                            │  ← Database info
+│  String Literals (hash table)        │  ← Extension: exact string matching
+├──────────────────────────────────────┤
+│  Glob Patterns (Aho-Corasick)        │  ← Extension: wildcard matching
 └──────────────────────────────────────┘
 ```
 
-All structures use file offsets (not pointers) for:
-- Direct memory mapping without deserialization
-- Cross-process page sharing via shared memory
-- Safety validation before dereferencing
+**Compatibility:**
+- IP-only databases created by Matchy can be read by standard MaxMind tools
+- Standard `.mmdb` files work perfectly with Matchy
+- String/pattern sections are Matchy extensions—gracefully ignored by standard readers
+- All structures use file offsets (not pointers) enabling:
+  - Direct memory mapping without deserialization
+  - Cross-process page sharing via shared memory
+  - Safe zero-copy access with validation
 
-## Pattern Syntax
+## String Matching
 
-Supported glob patterns:
+Matchy supports two types of string matching:
+
+### Exact String Matching (Literals)
+Direct string comparisons for precise matches:
+- `evil.example.com` - Only matches exactly this domain
+- `http://evil.com/malware.exe` - Matches only this exact URL
+- Best for known bad domains, file paths, or specific indicators
+
+**Performance:** O(1) hash table lookup (internal optimization)
+
+### Glob Pattern Matching (Wildcards)
+Flexible wildcard patterns for families of matches:
 - `*` - Match zero or more characters
 - `?` - Match exactly one character  
 - `[abc]` - Match any character in set
 - `[a-z]` - Match any character in range
 - `[!abc]` - Match any character not in set
 
-Examples:
+**Examples:**
 - `*.evil.com` - Matches `www.evil.com`, `malware.evil.com`
 - `test_*.log` - Matches `test_001.log`, `test_debug.log`
 - `http://*/admin/*` - Matches any URL with `/admin/` path
+
+**Performance:** O(n) Aho-Corasick simultaneous matching across all patterns
+
+### Auto-Detection vs Explicit Control
+
+**Auto-detection (default):** The database builder automatically determines whether a string is a literal or pattern based on the presence of wildcard characters (`*`, `?`, `[`). This works for 99% of use cases.
+
+**Explicit control (edge cases):** For strings that literally contain wildcard characters or when you need to force a specific type, use prefixes:
+- `literal:*.domain.com` - Force literal matching (asterisk is part of the domain)
+- `glob:test.com` - Force glob matching (no wildcards, but treat as pattern)
+- `ip:192.168.1.0/24` - Force IP parsing (rarely needed)
+
+See [Controlling Entry Type](#controlling-entry-type-optional) for detailed examples.
 
 ## Documentation
 
@@ -603,13 +746,6 @@ Contributions welcome! Please:
 - Add tests for new features
 - Update documentation
 
-## Roadmap
-
-- [ ] libmaxminddb compatibility layer (drop-in replacement)
-- [ ] C++ RAII wrapper for modern C++
-- [ ] Python bindings
-- [ ] Streaming database updates (append-only)
-- [ ] Compression support
 
 ## License
 
@@ -617,4 +753,10 @@ BSD-2-Clause
 
 ## Acknowledgments
 
-Built on the Paraglob pattern matching algorithm with extensions for IP address lookups and rich data storage.
+Matchy represents the evolution of decades of network security data matching experience:
+
+In 2007, I integrated [libmaxminddb](https://github.com/maxmind/libmaxminddb) into [Zeek](https://zeek.org) (then called Bro) for GeoIP enrichment—adding location data to network logs proved invaluable for detection and analysis. Fast forward to the early 2010s, I developed Zeek's Intelligence Framework to efficiently match threat indicators against network traffic. It handled IP addresses and exact string matches well, but had limitations: glob pattern matching wasn't possible, and memory consumption was problematic since every Zeek worker process needed its own copy of the data.
+
+Years later, an intern at the Zeek project created [Paraglob](https://github.com/zeek/paraglob), bringing efficient multi-pattern glob matching to Zeek. I began modifying Paraglob to use memory-mapped structures instead of heap memory, enabling instant loading and automatic sharing between processes. During this work, I realized these pieces—IP matching, string matching, pattern matching, and rich data storage—could be unified into a single, efficient database format.
+
+Matchy is that unification: it extends MaxMind's MMDB format with Paraglob's pattern matching algorithm, creating a database that handles IPs, exact strings, and glob patterns with memory efficiency and performance that scales to hundreds of worker processes. The result maintains backward compatibility with the MaxMind ecosystem while adding capabilities that make it suitable for modern threat intelligence and network security applications.

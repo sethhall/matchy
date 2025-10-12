@@ -270,7 +270,58 @@ impl MmdbBuilder {
     }
 
     /// Auto-detect if key is an IP/CIDR, literal, or glob pattern
-    fn detect_entry_type(key: &str) -> Result<EntryType, ParaglobError> {
+    ///
+    /// Supports explicit type prefixes for disambiguation:
+    /// - `literal:` - Force literal string matching (strips prefix)
+    /// - `glob:` - Force glob pattern matching (strips prefix)
+    /// - `ip:` - Force IP address parsing (strips prefix)
+    ///
+    /// Without a prefix, auto-detection is used:
+    /// 1. Try parsing as IP address/CIDR
+    /// 2. If contains glob chars (*, ?, [), validate as glob pattern
+    /// 3. Otherwise treat as literal string
+    ///
+    /// # Examples
+    /// ```
+    /// # use matchy::mmdb_builder::{MmdbBuilder, EntryType};
+    /// # use matchy::glob::MatchMode;
+    /// // Auto-detection
+    /// assert!(matches!(MmdbBuilder::detect_entry_type("1.2.3.4"), Ok(EntryType::IpAddress { .. })));
+    /// assert!(matches!(MmdbBuilder::detect_entry_type("*.example.com"), Ok(EntryType::Glob(_))));
+    /// assert!(matches!(MmdbBuilder::detect_entry_type("evil.com"), Ok(EntryType::Literal(_))));
+    ///
+    /// // Explicit type control
+    /// assert!(matches!(MmdbBuilder::detect_entry_type("literal:*.not-a-glob.com"), Ok(EntryType::Literal(_))));
+    /// assert!(matches!(MmdbBuilder::detect_entry_type("glob:no-wildcards.com"), Ok(EntryType::Glob(_))));
+    /// ```
+    pub fn detect_entry_type(key: &str) -> Result<EntryType, ParaglobError> {
+        // Check for explicit type prefixes first
+        if let Some(stripped) = key.strip_prefix("literal:") {
+            // Force literal matching - strip prefix and treat as literal
+            return Ok(EntryType::Literal(stripped.to_string()));
+        }
+
+        if let Some(stripped) = key.strip_prefix("glob:") {
+            // Force glob matching - strip prefix and validate as glob
+            // Use CaseSensitive for validation (mode doesn't matter for syntax checking)
+            if crate::glob::GlobPattern::new(stripped, crate::glob::MatchMode::CaseSensitive)
+                .is_ok()
+            {
+                return Ok(EntryType::Glob(stripped.to_string()));
+            }
+            // If explicitly marked as glob but invalid syntax, return error
+            return Err(ParaglobError::InvalidPattern(format!(
+                "Invalid glob pattern syntax: {}",
+                stripped
+            )));
+        }
+
+        if let Some(stripped) = key.strip_prefix("ip:") {
+            // Force IP parsing - strip prefix and parse as IP
+            return Self::parse_ip_entry(stripped);
+        }
+
+        // No prefix - use auto-detection
         // Try parsing as IP address first (most specific)
         if Self::parse_ip_entry(key).is_ok() {
             return Self::parse_ip_entry(key);
@@ -432,6 +483,14 @@ impl MmdbBuilder {
         // Data section
         database.extend_from_slice(&data_section);
 
+        // Add padding to ensure paraglob section (if present) starts at 4-byte aligned offset
+        // ParaglobHeader requires 4-byte alignment for zerocopy
+        if has_globs {
+            let current_offset = database.len() + 16; // +16 for "MMDB_PATTERN" separator
+            let padding_needed = (4 - (current_offset % 4)) % 4;
+            database.extend(std::iter::repeat_n(0u8, padding_needed));
+        }
+
         // Add MMDB metadata section (always present)
         {
             // Build metadata map
@@ -521,10 +580,19 @@ impl MmdbBuilder {
             let tree_and_separator_size = ip_tree_bytes.len() + 16;
             let data_section_size = data_section.len();
 
-            // Pattern section offset (after tree + separator + data section)
+            // Calculate padding before paraglob section for 4-byte alignment
+            let padding_before_paraglob = if has_globs {
+                let current_offset = tree_and_separator_size + data_section_size + 16; // +16 for separator
+                (4 - (current_offset % 4)) % 4
+            } else {
+                0
+            };
+
+            // Pattern section offset (after tree + separator + data section + padding)
             // 0 means no pattern section present
             let pattern_offset = if has_globs {
-                tree_and_separator_size + data_section_size + 16 // +16 for "MMDB_PATTERN" separator
+                tree_and_separator_size + data_section_size + padding_before_paraglob + 16
+            // +16 for "MMDB_PATTERN" separator
             } else {
                 0 // No pattern section
             };
@@ -537,7 +605,12 @@ impl MmdbBuilder {
             // 0 means no literal section present
             let literal_offset = if has_literals {
                 if has_globs {
-                    tree_and_separator_size + data_section_size + 16 + glob_section_bytes.len() + 16
+                    tree_and_separator_size
+                        + data_section_size
+                        + padding_before_paraglob
+                        + 16
+                        + glob_section_bytes.len()
+                        + 16
                 } else {
                     tree_and_separator_size + data_section_size + 16 // +16 for "MMDB_LITERAL" separator
                 }
@@ -669,6 +742,179 @@ mod tests {
         match result {
             EntryType::Literal(p) => assert_eq!(p, "evil.com"),
             _ => panic!("Expected literal pattern"),
+        }
+    }
+
+    // ========== Prefix Convention Tests ==========
+
+    #[test]
+    fn test_literal_prefix_forces_literal() {
+        // String with glob chars should normally be a glob, but prefix forces literal
+        let result = MmdbBuilder::detect_entry_type("literal:*.not-a-glob.com").unwrap();
+        match result {
+            EntryType::Literal(p) => assert_eq!(p, "*.not-a-glob.com"),
+            _ => panic!("Expected literal, got: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_literal_prefix_strips_correctly() {
+        let result = MmdbBuilder::detect_entry_type("literal:evil.example.com").unwrap();
+        match result {
+            EntryType::Literal(p) => {
+                assert_eq!(p, "evil.example.com");
+                assert!(!p.starts_with("literal:"));
+            }
+            _ => panic!("Expected literal"),
+        }
+    }
+
+    #[test]
+    fn test_glob_prefix_forces_glob() {
+        // String without wildcards should normally be literal, but prefix forces glob
+        let result = MmdbBuilder::detect_entry_type("glob:no-wildcards.com").unwrap();
+        match result {
+            EntryType::Glob(p) => assert_eq!(p, "no-wildcards.com"),
+            _ => panic!("Expected glob, got: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_glob_prefix_with_wildcards() {
+        let result = MmdbBuilder::detect_entry_type("glob:*.evil.com").unwrap();
+        match result {
+            EntryType::Glob(p) => {
+                assert_eq!(p, "*.evil.com");
+                assert!(!p.starts_with("glob:"));
+            }
+            _ => panic!("Expected glob"),
+        }
+    }
+
+    #[test]
+    fn test_glob_prefix_invalid_pattern() {
+        // If explicitly marked as glob but has invalid glob syntax, should error
+        let result = MmdbBuilder::detect_entry_type("glob:[unclosed");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid glob pattern syntax"));
+    }
+
+    #[test]
+    fn test_ip_prefix_forces_ip() {
+        let result = MmdbBuilder::detect_entry_type("ip:8.8.8.8").unwrap();
+        match result {
+            EntryType::IpAddress { addr, prefix_len } => {
+                assert_eq!(addr.to_string(), "8.8.8.8");
+                assert_eq!(prefix_len, 32);
+            }
+            _ => panic!("Expected IP address"),
+        }
+    }
+
+    #[test]
+    fn test_ip_prefix_with_cidr() {
+        let result = MmdbBuilder::detect_entry_type("ip:10.0.0.0/8").unwrap();
+        match result {
+            EntryType::IpAddress { addr, prefix_len } => {
+                assert_eq!(addr.to_string(), "10.0.0.0");
+                assert_eq!(prefix_len, 8);
+            }
+            _ => panic!("Expected CIDR"),
+        }
+    }
+
+    #[test]
+    fn test_ip_prefix_invalid_ip() {
+        let result = MmdbBuilder::detect_entry_type("ip:not-an-ip");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_auto_detection_still_works() {
+        // Without prefix, auto-detection should work as before
+        assert!(matches!(
+            MmdbBuilder::detect_entry_type("1.2.3.4"),
+            Ok(EntryType::IpAddress { .. })
+        ));
+        assert!(matches!(
+            MmdbBuilder::detect_entry_type("*.example.com"),
+            Ok(EntryType::Glob(_))
+        ));
+        assert!(matches!(
+            MmdbBuilder::detect_entry_type("example.com"),
+            Ok(EntryType::Literal(_))
+        ));
+    }
+
+    #[test]
+    fn test_prefix_case_sensitive() {
+        // Prefixes should be case-sensitive
+        let result = MmdbBuilder::detect_entry_type("LITERAL:test.com").unwrap();
+        // Should not match prefix, should auto-detect as literal
+        match result {
+            EntryType::Literal(p) => {
+                // Should include the LITERAL: prefix since it wasn't recognized
+                assert_eq!(p, "LITERAL:test.com");
+            }
+            _ => panic!("Expected literal"),
+        }
+    }
+
+    #[test]
+    fn test_literal_prefix_with_question_mark() {
+        let result = MmdbBuilder::detect_entry_type("literal:file?.txt").unwrap();
+        match result {
+            EntryType::Literal(p) => assert_eq!(p, "file?.txt"),
+            _ => panic!("Expected literal"),
+        }
+    }
+
+    #[test]
+    fn test_literal_prefix_with_brackets() {
+        let result = MmdbBuilder::detect_entry_type("literal:file[1].txt").unwrap();
+        match result {
+            EntryType::Literal(p) => assert_eq!(p, "file[1].txt"),
+            _ => panic!("Expected literal"),
+        }
+    }
+
+    #[test]
+    fn test_builder_add_entry_with_prefix() {
+        // Integration test: add_entry should respect prefixes
+        let mut builder = MmdbBuilder::new(MatchMode::CaseSensitive);
+
+        // Force literal for a string that looks like a glob
+        builder
+            .add_entry("literal:*.test.com", HashMap::new())
+            .unwrap();
+
+        let stats = builder.stats();
+        assert_eq!(stats.literal_entries, 1);
+        assert_eq!(stats.glob_entries, 0);
+    }
+
+    #[test]
+    fn test_builder_add_entry_glob_prefix() {
+        let mut builder = MmdbBuilder::new(MatchMode::CaseSensitive);
+
+        // Force glob for a string without wildcards
+        builder.add_entry("glob:test.com", HashMap::new()).unwrap();
+
+        let stats = builder.stats();
+        assert_eq!(stats.glob_entries, 1);
+        assert_eq!(stats.literal_entries, 0);
+    }
+
+    #[test]
+    fn test_empty_prefix_value() {
+        // Edge case: what if someone uses "literal:" with nothing after?
+        let result = MmdbBuilder::detect_entry_type("literal:").unwrap();
+        match result {
+            EntryType::Literal(p) => assert_eq!(p, ""),
+            _ => panic!("Expected literal"),
         }
     }
 }

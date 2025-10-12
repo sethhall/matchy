@@ -369,14 +369,14 @@ RUST_LOG=matchy=trace cargo run --release
 ### Inspecting Binary Format
 
 ```bash
-# Hex dump of .pgb file
-hexdump -C patterns.pgb | head -20
+# Hex dump of matchy database (shows internal PARAGLOB section if present)
+hexdump -C patterns.mxy | head -20
 
-# Check magic bytes (should be "PARAGLOB")
-xxd patterns.pgb | head -1
+# Check magic bytes (MMDB metadata marker)
+xxd patterns.mxy | head -1
 
-# Compare Rust vs C++ output
-diff <(xxd rust.pgb) <(xxd cpp.pgb)
+# Compare two database files
+diff <(xxd db1.mxy) <(xxd db2.mxy)
 ```
 
 ### Memory Debugging

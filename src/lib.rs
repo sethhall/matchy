@@ -85,6 +85,8 @@
 #![warn(clippy::all)]
 
 // Module declarations
+/// AC literal ID hash table for O(1) lookups
+pub mod ac_literal_hash;
 pub mod ac_offset;
 /// Data section encoding/decoding for v2 format
 pub mod data_section;
@@ -150,6 +152,13 @@ pub use crate::glob::MatchMode;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub use crate::mmdb_builder::MmdbBuilder as DatabaseBuilder;
+
+/// Entry type classification for database builder
+///
+/// Represents whether an entry should be treated as an IP address, literal string,
+/// or glob pattern. Used with [`DatabaseBuilder::detect_entry_type`] for explicit
+/// type control.
+pub use crate::mmdb_builder::EntryType;
 
 // Legacy pattern-only APIs - kept for internal use and backward compatibility
 // These are not the primary public API anymore. Use Database and DatabaseBuilder instead.

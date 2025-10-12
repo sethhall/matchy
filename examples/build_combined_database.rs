@@ -151,8 +151,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("     • Shared memory across processes");
 
     println!("\n  💾 Storage:");
-    println!("     • Single file format (.mmdb extension)");
-    println!("     • Compatible with existing MMDB readers (for IP part)");
+    println!("     • Single file format (.mxy extension)");
+    println!("     • Based on MMDB format, compatible with MMDB readers (for IP part)");
     println!("     • Extended with pattern matching capability");
 
     println!("\n{}", "=".repeat(80));
@@ -166,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Optionally save to disk
-    let output_file = "combined_database.mmdb";
+    let output_file = "combined_database.mxy";
     std::fs::write(output_file, &database_bytes)?;
     println!("\n💾 Saved to: {}", output_file);
     println!("   Ready to load and query!");

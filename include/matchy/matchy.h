@@ -56,6 +56,11 @@ namespace matchy {
 #define VERSION_PATCH 0
 
 /*
+ Current version of the AC literal hash format
+ */
+#define AC_LITERAL_HASH_VERSION 1
+
+/*
  Current version of the literal hash format
  */
 #define LITERAL_HASH_VERSION 1
@@ -421,10 +426,12 @@ int32_t matchy_builder_build(struct matchy_builder_t *builder, uint8_t **buffer,
 void matchy_builder_free(struct matchy_builder_t *builder);
 
 /*
- Open database from file (memory-mapped)
+ Open database from file (memory-mapped) - SAFE mode
 
  Opens a database file using memory mapping for optimal performance.
  The file is not loaded into memory - it's accessed on-demand.
+
+ This validates UTF-8 on pattern string reads. Use for untrusted databases.
 
  # Parameters
  * `filename` - Path to database file (null-terminated C string, must not be NULL)
@@ -446,6 +453,38 @@ void matchy_builder_free(struct matchy_builder_t *builder);
  ```
  */
 struct matchy_t *matchy_open(const char *filename);
+
+/*
+ Open database from file (memory-mapped) - TRUSTED mode
+
+ **SECURITY WARNING**: Only use for databases from trusted sources!
+ Skips UTF-8 validation for ~15-20% performance improvement.
+
+ Opens a database file using memory mapping for optimal performance.
+ The file is not loaded into memory - it's accessed on-demand.
+
+ # Parameters
+ * `filename` - Path to database file (null-terminated C string, must not be NULL)
+
+ # Returns
+ * Non-null pointer on success
+ * NULL on failure
+
+ # Safety
+ * `filename` must be a valid null-terminated C string
+ * Database must be from a trusted source (undefined behavior if malicious)
+
+ # Example
+ ```c
+ // Only for databases you built yourself or trust completely
+ matchy_t *db = matchy_open_trusted("my-threats.db");
+ if (db == NULL) {
+     fprintf(stderr, "Failed to open database\n");
+     return 1;
+ }
+ ```
+ */
+struct matchy_t *matchy_open_trusted(const char *filename);
 
 /*
  Open database from memory buffer (zero-copy)

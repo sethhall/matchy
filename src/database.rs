@@ -14,7 +14,6 @@ use crate::mmdb::{MmdbError, MmdbHeader, SearchTree};
 use crate::paraglob_offset::Paraglob;
 use memmap2::Mmap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fs::File;
 use std::net::IpAddr;
 
@@ -89,6 +88,36 @@ impl DatabaseStorage {
     }
 }
 
+/// Lazy pattern data mappings for O(1) load time
+/// Stores offset range instead of parsing all mappings eagerly
+struct PatternDataMappings {
+    /// Offset to start of mapping data (after pattern_count u32)
+    mappings_offset: usize,
+    /// Number of patterns (and thus offsets)
+    pattern_count: usize,
+}
+
+impl PatternDataMappings {
+    /// Get data offset for a specific pattern_id by parsing only that entry
+    fn get_offset(&self, pattern_id: u32, data: &[u8]) -> Option<u32> {
+        if pattern_id as usize >= self.pattern_count {
+            return None;
+        }
+
+        let offset_pos = self.mappings_offset + (pattern_id as usize * 4);
+        if offset_pos + 4 > data.len() {
+            return None;
+        }
+
+        Some(u32::from_le_bytes([
+            data[offset_pos],
+            data[offset_pos + 1],
+            data[offset_pos + 2],
+            data[offset_pos + 3],
+        ]))
+    }
+}
+
 /// Unified database for IP and pattern lookups
 pub struct Database {
     data: DatabaseStorage,
@@ -99,27 +128,45 @@ pub struct Database {
     /// Pattern matcher for glob patterns (Combined or PatternOnly databases)
     /// Uses RefCell for interior mutability since find_all needs &mut self
     pattern_matcher: Option<RefCell<Paraglob>>,
-    /// For combined databases: mapping from pattern_id -> data offset in MMDB data section
+    /// For combined databases: lazy mapping from pattern_id -> data offset in MMDB data section
     /// None for pattern-only databases (which use Paraglob's internal data)
-    pattern_data_mappings: Option<HashMap<u32, u32>>,
+    pattern_data_mappings: Option<PatternDataMappings>,
 }
 
 impl Database {
-    /// Open a database file using memory mapping for optimal performance
+    /// Open a database file using memory mapping - SAFE mode (validates UTF-8)
     ///
     /// This uses mmap for zero-copy file access, which is much faster than
     /// loading the entire file into memory, especially for large databases.
     ///
+    /// Validates UTF-8 on pattern string reads. Use for untrusted databases.
+    ///
     /// Automatically detects the database format and initializes
     /// the appropriate lookup structures.
     pub fn open(path: &str) -> Result<Self, DatabaseError> {
+        Self::open_with_trust(path, false)
+    }
+
+    /// Open a database file using memory mapping - TRUSTED mode (skips UTF-8 validation)
+    ///
+    /// **SECURITY WARNING**: Only use for databases from trusted sources!
+    /// Skips UTF-8 validation for ~15-20% performance improvement.
+    ///
+    /// This uses mmap for zero-copy file access, which is much faster than
+    /// loading the entire file into memory, especially for large databases.
+    pub fn open_trusted(path: &str) -> Result<Self, DatabaseError> {
+        Self::open_with_trust(path, true)
+    }
+
+    /// Internal: Open database with explicit trust mode
+    fn open_with_trust(path: &str, trusted: bool) -> Result<Self, DatabaseError> {
         let file = File::open(path)
             .map_err(|e| DatabaseError::Io(format!("Failed to open {}: {}", path, e)))?;
 
         let mmap = unsafe { Mmap::map(&file) }
             .map_err(|e| DatabaseError::Io(format!("Failed to mmap {}: {}", path, e)))?;
 
-        Self::from_storage(DatabaseStorage::Mmap(mmap))
+        Self::from_storage_with_trust(DatabaseStorage::Mmap(mmap), trusted)
     }
 
     /// Create database from raw bytes (for testing)
@@ -127,71 +174,73 @@ impl Database {
         Self::from_storage(DatabaseStorage::Owned(data))
     }
 
-    /// Internal: Create database from storage
+    /// Internal: Create database from storage (safe mode - validates UTF-8)
     fn from_storage(storage: DatabaseStorage) -> Result<Self, DatabaseError> {
-        let data = storage.as_slice();
+        Self::from_storage_with_trust(storage, false)
+    }
+
+    /// Internal: Create database from storage with explicit trust mode
+    fn from_storage_with_trust(
+        storage: DatabaseStorage,
+        trusted: bool,
+    ) -> Result<Self, DatabaseError> {
+        // First, create the struct with minimal initialization
+        let mut db = Self {
+            data: storage,
+            format: DatabaseFormat::IpOnly, // Temporary, will be set below
+            ip_header: None,
+            literal_hash: None,
+            pattern_matcher: None,
+            pattern_data_mappings: None,
+        };
+
+        // Now we can safely get 'static reference since db owns the data
+        let data: &'static [u8] = unsafe { std::mem::transmute(db.data.as_slice()) };
+
         // Detect format
-        let format = Self::detect_format(data)?;
+        db.format = Self::detect_format(data)?;
 
         // Parse based on format
-        let (ip_header, pattern_matcher, pattern_data_mappings) = match format {
+        match db.format {
             DatabaseFormat::IpOnly => {
-                let header = MmdbHeader::from_file(data).map_err(DatabaseError::Format)?;
-                (Some(header), None, None)
+                db.ip_header = Some(MmdbHeader::from_file(data).map_err(DatabaseError::Format)?);
             }
             DatabaseFormat::PatternOnly => {
                 // Pattern-only: load from start of file
-                let pg = Self::load_pattern_section(data, 0).map_err(|e| {
+                let pg = Self::load_pattern_section(data, 0, trusted).map_err(|e| {
                     DatabaseError::Unsupported(format!("Failed to load pattern section: {}", e))
                 })?;
-                (None, Some(RefCell::new(pg)), None)
+                db.pattern_matcher = Some(RefCell::new(pg));
             }
             DatabaseFormat::Combined => {
                 // Parse IP header first
-                let header = MmdbHeader::from_file(data).map_err(DatabaseError::Format)?;
+                db.ip_header = Some(MmdbHeader::from_file(data).map_err(DatabaseError::Format)?);
 
                 // Find and load pattern section after MMDB_PATTERN separator
-                let (pattern_matcher, mappings) =
-                    if let Some(offset) = Self::find_pattern_section_fast(data) {
-                        let (pg, map) =
-                            Self::load_combined_pattern_section(data, offset).map_err(|e| {
-                                DatabaseError::Unsupported(format!(
-                                    "Failed to load pattern section: {}",
-                                    e
-                                ))
-                            })?;
-                        (Some(RefCell::new(pg)), Some(map))
-                    } else {
-                        (None, None)
-                    };
-                (Some(header), pattern_matcher, mappings)
+                if let Some(offset) = Self::find_pattern_section_fast(data) {
+                    let (pg, map) = Self::load_combined_pattern_section(data, offset, trusted)
+                        .map_err(|e| {
+                            DatabaseError::Unsupported(format!(
+                                "Failed to load pattern section: {}",
+                                e
+                            ))
+                        })?;
+                    db.pattern_matcher = Some(RefCell::new(pg));
+                    db.pattern_data_mappings = Some(map);
+                }
             }
-        };
+        }
 
         // Load literal hash section if present (MMDB_LITERAL marker)
-        let literal_hash = if let Some(offset) = Self::find_literal_section_fast(data) {
+        if let Some(offset) = Self::find_literal_section_fast(data) {
             // Skip the 16-byte marker
             let literal_data = &data[offset + 16..];
-            // SAFETY: We're extending the lifetime to 'static because the data is either:
-            // 1. In a mmap which lives as long as the Database struct
-            // 2. In owned Vec<u8> which also lives as long as Database
-            // The LiteralHash only holds a reference, so it won't outlive the data
-            let literal_data_static: &'static [u8] = unsafe { std::mem::transmute(literal_data) };
-            Some(LiteralHash::from_buffer(literal_data_static).map_err(|e| {
+            db.literal_hash = Some(LiteralHash::from_buffer(literal_data).map_err(|e| {
                 DatabaseError::Unsupported(format!("Failed to load literal hash: {}", e))
-            })?)
-        } else {
-            None
-        };
+            })?);
+        }
 
-        Ok(Self {
-            data: storage,
-            format,
-            ip_header,
-            literal_hash,
-            pattern_matcher,
-            pattern_data_mappings,
-        })
+        Ok(db)
     }
 
     /// Look up a query string (IP address or string pattern)
@@ -276,16 +325,17 @@ impl Database {
                 // For combined databases, use mappings to decode from MMDB data section
                 // For pattern-only databases, use Paraglob's internal data cache
                 let data = if let Some(mappings) = &self.pattern_data_mappings {
-                    // Combined database: decode from MMDB data section
-                    if let Some(&data_offset) = mappings.get(&pattern_id) {
+                    // Combined database: decode from MMDB data section using lazy lookup
+                    if let Some(data_offset) = mappings.get_offset(pattern_id, self.data.as_slice())
+                    {
                         let header = self.ip_header.as_ref().unwrap();
                         Some(self.decode_ip_data(header, data_offset)?)
                     } else {
                         None
                     }
                 } else {
-                    // Pattern-only database: use Paraglob's cache
-                    pg.get_pattern_data(pattern_id).cloned()
+                    // Pattern-only database: use Paraglob's lazy data lookup
+                    pg.get_pattern_data(pattern_id)
                 };
                 all_pattern_ids.push(pattern_id);
                 all_data_values.push(data);
@@ -591,9 +641,13 @@ impl Database {
 
     /// Load pattern section from data at given offset (for pattern-only databases)
     /// The format at offset is: PARAGLOB magic + data
-    fn load_pattern_section(data: &[u8], offset: usize) -> Result<Paraglob, String> {
+    /// Uses zero-copy from_mmap for O(1) loading
+    fn load_pattern_section(
+        data: &'static [u8],
+        offset: usize,
+        trusted: bool,
+    ) -> Result<Paraglob, String> {
         use crate::glob::MatchMode;
-        use crate::serialization::from_bytes;
 
         if offset >= data.len() {
             return Err("Pattern section offset out of bounds".to_string());
@@ -601,9 +655,14 @@ impl Database {
 
         // For pattern-only databases, data starts with PARAGLOB magic
         if offset == 0 && data.len() >= 8 && &data[0..8] == b"PARAGLOB" {
-            // Standard .pgb format - load directly
-            return from_bytes(data, MatchMode::CaseSensitive)
-                .map_err(|e| format!("Failed to parse pattern-only database: {}", e));
+            // Standard .pgb format - load with zero-copy
+            // SAFETY: data is 'static lifetime from mmap, valid for entire Database lifetime
+            let result = if trusted {
+                unsafe { Paraglob::from_mmap_trusted(data, MatchMode::CaseSensitive) }
+            } else {
+                unsafe { Paraglob::from_mmap(data, MatchMode::CaseSensitive) }
+            };
+            return result.map_err(|e| format!("Failed to parse pattern-only database: {}", e));
         }
 
         Err("Invalid pattern-only database format".to_string())
@@ -611,13 +670,14 @@ impl Database {
 
     /// Load combined pattern section from data at given offset
     /// The format at offset is: `[total_size][paraglob_size][PARAGLOB data][pattern_count][data_offsets...]`
-    /// Returns (Paraglob matcher, HashMap of pattern_id -> data_offset)
+    /// Returns (Paraglob matcher, lazy PatternDataMappings)
+    /// Uses zero-copy and deferred parsing for O(1) load time
     fn load_combined_pattern_section(
-        data: &[u8],
+        data: &'static [u8],
         offset: usize,
-    ) -> Result<(Paraglob, HashMap<u32, u32>), String> {
+        trusted: bool,
+    ) -> Result<(Paraglob, PatternDataMappings), String> {
         use crate::glob::MatchMode;
-        use crate::serialization::from_bytes;
 
         if offset >= data.len() {
             return Err("Pattern section offset out of bounds".to_string());
@@ -655,12 +715,17 @@ impl Database {
             ));
         }
 
-        // Extract and load paraglob data
+        // Extract and load paraglob data with zero-copy
         let paraglob_data = &data[paraglob_start..paraglob_end];
-        let paraglob = from_bytes(paraglob_data, MatchMode::CaseSensitive)
-            .map_err(|e| format!("Failed to parse paraglob section: {}", e))?;
+        // SAFETY: data is 'static lifetime from mmap, valid for entire Database lifetime
+        let paraglob = if trusted {
+            unsafe { Paraglob::from_mmap_trusted(paraglob_data, MatchMode::CaseSensitive) }
+        } else {
+            unsafe { Paraglob::from_mmap(paraglob_data, MatchMode::CaseSensitive) }
+        };
+        let paraglob = paraglob.map_err(|e| format!("Failed to parse paraglob section: {}", e))?;
 
-        // Load mappings: [pattern_count][offset1][offset2]...
+        // Store mapping metadata WITHOUT parsing all offsets (O(1) instead of O(n))
         let mappings_start = paraglob_end;
         if mappings_start + 4 > data.len() {
             return Err("Pattern mappings section truncated".to_string());
@@ -673,24 +738,21 @@ impl Database {
             data[mappings_start + 3],
         ]) as usize;
 
-        let mut mappings = HashMap::new();
         let offsets_start = mappings_start + 4;
 
-        for i in 0..pattern_count {
-            let offset_pos = offsets_start + (i * 4);
-            if offset_pos + 4 > data.len() {
-                return Err(format!("Pattern mapping {} out of bounds", i));
-            }
-
-            let data_offset = u32::from_le_bytes([
-                data[offset_pos],
-                data[offset_pos + 1],
-                data[offset_pos + 2],
-                data[offset_pos + 3],
-            ]);
-
-            mappings.insert(i as u32, data_offset);
+        // Validate the mapping section exists, but don't parse it
+        let total_mapping_bytes = pattern_count * 4;
+        if offsets_start + total_mapping_bytes > data.len() {
+            return Err(format!(
+                "Pattern mappings section out of bounds (need {} bytes)",
+                total_mapping_bytes
+            ));
         }
+
+        let mappings = PatternDataMappings {
+            mappings_offset: offsets_start,
+            pattern_count,
+        };
 
         Ok((paraglob, mappings))
     }
