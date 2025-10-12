@@ -227,18 +227,24 @@ impl ACBuilder {
         // ONE states don't need edge arrays!
         let total_patterns: usize = self.states.iter().map(|s| s.outputs.len()).sum();
 
-        // Layout: [Nodes][Sparse Edges][Dense Lookups][Patterns]
+        // Layout: [Nodes][Sparse Edges][Padding][Dense Lookups][Patterns]
         let edges_start = nodes_size;
         let edges_size = sparse_edges * edge_size;
 
-        let dense_start = edges_start + edges_size;
+        // Calculate padding to align dense section to 64-byte boundary
+        // DenseLookup now has #[repr(C, align(64))] for cache-line alignment
+        let unaligned_dense_start = edges_start + edges_size;
+        let dense_alignment = mem::align_of::<DenseLookup>(); // 64 bytes
+        let dense_padding =
+            (dense_alignment - (unaligned_dense_start % dense_alignment)) % dense_alignment;
+        let dense_start = unaligned_dense_start + dense_padding;
         let dense_size_total = dense_count * dense_size;
 
         let patterns_start = dense_start + dense_size_total;
         let patterns_size = total_patterns * mem::size_of::<u32>();
 
-        // Calculate total size
-        let total_size = nodes_size + edges_size + dense_size_total + patterns_size;
+        // Calculate total size (including alignment padding)
+        let total_size = nodes_size + edges_size + dense_padding + dense_size_total + patterns_size;
 
         // Reasonable size limit to prevent pathological inputs from causing OOM
         // Set to 2GB which is large enough for legitimate databases but catches
@@ -261,6 +267,16 @@ impl ACBuilder {
 
         // Allocate buffer
         buffer.resize(total_size, 0);
+
+        // Verify alignment of dense section
+        debug_assert_eq!(
+            dense_start % dense_alignment,
+            0,
+            "Dense section must be {}-byte aligned, but starts at offset {} ({}% alignment)",
+            dense_alignment,
+            dense_start,
+            dense_start % dense_alignment
+        );
 
         // Track offsets for writing data
         let mut edge_offset = edges_start;
