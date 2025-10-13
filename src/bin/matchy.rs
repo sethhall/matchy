@@ -82,6 +82,10 @@ enum Commands {
         /// Verbose output during build
         #[arg(short, long)]
         verbose: bool,
+
+        /// Use case-insensitive matching for patterns (default: case-sensitive)
+        #[arg(short = 'i', long)]
+        case_insensitive: bool,
     },
 
     /// Benchmark database performance (build, load, query)
@@ -169,6 +173,7 @@ fn main() -> Result<()> {
             description,
             desc_lang,
             verbose,
+            case_insensitive,
         } => cmd_build(
             inputs,
             output,
@@ -177,6 +182,7 @@ fn main() -> Result<()> {
             description,
             desc_lang,
             verbose,
+            case_insensitive,
         ),
         Commands::Bench {
             db_type,
@@ -432,9 +438,16 @@ fn cmd_build(
     description: Option<String>,
     desc_lang: String,
     verbose: bool,
+    case_insensitive: bool,
 ) -> Result<()> {
     use matchy::glob::MatchMode;
     use matchy::mmdb_builder::MmdbBuilder;
+
+    let match_mode = if case_insensitive {
+        MatchMode::CaseInsensitive
+    } else {
+        MatchMode::CaseSensitive
+    };
 
     if verbose {
         println!("Building unified MMDB database (IP + patterns)...");
@@ -444,10 +457,11 @@ fn cmd_build(
         }
         println!("  Output: {}", output.display());
         println!("  Format: {}", format);
+        println!("  Match mode: {}", if case_insensitive { "case-insensitive" } else { "case-sensitive" });
         println!();
     }
 
-    let mut builder = MmdbBuilder::new(MatchMode::CaseSensitive);
+    let mut builder = MmdbBuilder::new(match_mode);
 
     // Apply metadata if provided
     if let Some(db_type) = database_type {

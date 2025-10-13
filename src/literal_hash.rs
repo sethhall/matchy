@@ -32,6 +32,7 @@
 //! ```
 
 use crate::error::ParaglobError;
+use crate::glob::MatchMode;
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 use std::mem;
@@ -102,19 +103,26 @@ pub struct PatternMapping {
 /// Builder for literal hash table
 pub struct LiteralHashBuilder {
     patterns: Vec<(String, u32)>, // (pattern, pattern_id)
+    mode: MatchMode,
 }
 
 impl LiteralHashBuilder {
     /// Create a new builder
-    pub fn new() -> Self {
+    pub fn new(mode: MatchMode) -> Self {
         Self {
             patterns: Vec::new(),
+            mode,
         }
     }
 
     /// Add a literal pattern
     pub fn add_pattern(&mut self, pattern: String, pattern_id: u32) {
-        self.patterns.push((pattern, pattern_id));
+        // Normalize pattern based on match mode
+        let normalized = match self.mode {
+            MatchMode::CaseSensitive => pattern,
+            MatchMode::CaseInsensitive => pattern.to_lowercase(),
+        };
+        self.patterns.push((normalized, pattern_id));
     }
 
     /// Build the hash table
@@ -219,7 +227,7 @@ impl LiteralHashBuilder {
 
 impl Default for LiteralHashBuilder {
     fn default() -> Self {
-        Self::new()
+        Self::new(MatchMode::CaseSensitive)
     }
 }
 
@@ -230,11 +238,12 @@ pub struct LiteralHash<'a> {
     table_start: usize,
     strings_start: usize,
     mappings_start: usize,
+    mode: MatchMode,
 }
 
 impl<'a> LiteralHash<'a> {
     /// Load from memory-mapped buffer
-    pub fn from_buffer(buffer: &'a [u8]) -> Result<Self, ParaglobError> {
+    pub fn from_buffer(buffer: &'a [u8], mode: MatchMode) -> Result<Self, ParaglobError> {
         if buffer.len() < mem::size_of::<LiteralHashHeader>() {
             return Err(ParaglobError::InvalidPattern(
                 "Buffer too small for literal hash header".to_string(),
@@ -282,6 +291,7 @@ impl<'a> LiteralHash<'a> {
             table_start,
             strings_start,
             mappings_start,
+            mode,
         })
     }
 
@@ -289,7 +299,12 @@ impl<'a> LiteralHash<'a> {
     ///
     /// Returns the pattern ID if found, None otherwise
     pub fn lookup(&self, query: &str) -> Option<u32> {
-        let hash = compute_hash(query);
+        // Normalize query based on match mode
+        let normalized_query = match self.mode {
+            MatchMode::CaseSensitive => query.to_string(),
+            MatchMode::CaseInsensitive => query.to_lowercase(),
+        };
+        let hash = compute_hash(&normalized_query);
         let table_size = self.header.table_size as usize;
         let mut slot = (hash as usize) % table_size;
 
@@ -315,7 +330,7 @@ impl<'a> LiteralHash<'a> {
             // Hash matches - verify string
             if entry_hash == hash {
                 if let Some(stored_string) = self.read_string(string_offset as usize) {
-                    if stored_string == query {
+                    if stored_string == normalized_query {
                         return Some(pattern_id);
                     }
                 }
@@ -401,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_basic_hash_table() {
-        let mut builder = LiteralHashBuilder::new();
+        let mut builder = LiteralHashBuilder::new(MatchMode::CaseSensitive);
         builder.add_pattern("test1".to_string(), 0);
         builder.add_pattern("test2".to_string(), 1);
         builder.add_pattern("test3".to_string(), 2);
@@ -409,7 +424,7 @@ mod tests {
         let pattern_data = vec![(0, 100), (1, 200), (2, 300)];
         let bytes = builder.build(&pattern_data).unwrap();
 
-        let hash = LiteralHash::from_buffer(&bytes).unwrap();
+        let hash = LiteralHash::from_buffer(&bytes, MatchMode::CaseSensitive).unwrap();
         assert_eq!(hash.lookup("test1"), Some(0));
         assert_eq!(hash.lookup("test2"), Some(1));
         assert_eq!(hash.lookup("test3"), Some(2));
@@ -422,7 +437,7 @@ mod tests {
 
     #[test]
     fn test_hash_collisions() {
-        let mut builder = LiteralHashBuilder::new();
+        let mut builder = LiteralHashBuilder::new(MatchMode::CaseSensitive);
         // Add many patterns to force collisions
         for i in 0..100 {
             builder.add_pattern(format!("pattern_{}", i), i);
@@ -431,7 +446,7 @@ mod tests {
         let pattern_data: Vec<_> = (0..100).map(|i| (i, i * 10)).collect();
         let bytes = builder.build(&pattern_data).unwrap();
 
-        let hash = LiteralHash::from_buffer(&bytes).unwrap();
+        let hash = LiteralHash::from_buffer(&bytes, MatchMode::CaseSensitive).unwrap();
         for i in 0..100 {
             assert_eq!(hash.lookup(&format!("pattern_{}", i)), Some(i));
         }

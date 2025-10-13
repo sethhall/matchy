@@ -458,7 +458,7 @@ impl MmdbBuilder {
 
         // Build literal hash table section for literal_entries
         let (has_literals, literal_section_bytes) = if !literal_entries.is_empty() {
-            let mut literal_builder = LiteralHashBuilder::new();
+            let mut literal_builder = LiteralHashBuilder::new(self.match_mode);
             let mut literal_pattern_data = Vec::new();
 
             for (next_pattern_id, (literal, data_offset)) in literal_entries.iter().enumerate() {
@@ -573,6 +573,16 @@ impl MmdbBuilder {
             metadata.insert(
                 "glob_entry_count".to_string(),
                 DataValue::Uint32(glob_entries.len() as u32),
+            );
+
+            // Store match mode (0 = CaseSensitive, 1 = CaseInsensitive)
+            let match_mode_value = match self.match_mode {
+                MatchMode::CaseSensitive => 0u16,
+                MatchMode::CaseInsensitive => 1u16,
+            };
+            metadata.insert(
+                "match_mode".to_string(),
+                DataValue::Uint16(match_mode_value),
             );
 
             // ALWAYS write section offset fields for fast loading (0 = not present)
