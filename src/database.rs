@@ -235,7 +235,9 @@ impl Database {
         if let Some(offset) = Self::find_literal_section_fast(data) {
             // Skip the 16-byte marker
             let literal_data = &data[offset + 16..];
-            db.literal_hash = Some(LiteralHash::from_buffer(literal_data).map_err(|e| {
+            // Read match mode from metadata
+            let match_mode = Self::read_match_mode_from_metadata(data);
+            db.literal_hash = Some(LiteralHash::from_buffer(literal_data, match_mode).map_err(|e| {
                 DatabaseError::Unsupported(format!("Failed to load literal hash: {}", e))
             })?);
         }
@@ -647,20 +649,21 @@ impl Database {
         offset: usize,
         trusted: bool,
     ) -> Result<Paraglob, String> {
-        use crate::glob::MatchMode;
-
         if offset >= data.len() {
             return Err("Pattern section offset out of bounds".to_string());
         }
+
+        // Try to read match mode from metadata
+        let match_mode = Self::read_match_mode_from_metadata(data);
 
         // For pattern-only databases, data starts with PARAGLOB magic
         if offset == 0 && data.len() >= 8 && &data[0..8] == b"PARAGLOB" {
             // Standard .pgb format - load with zero-copy
             // SAFETY: data is 'static lifetime from mmap, valid for entire Database lifetime
             let result = if trusted {
-                unsafe { Paraglob::from_mmap_trusted(data, MatchMode::CaseSensitive) }
+                unsafe { Paraglob::from_mmap_trusted(data, match_mode) }
             } else {
-                unsafe { Paraglob::from_mmap(data, MatchMode::CaseSensitive) }
+                unsafe { Paraglob::from_mmap(data, match_mode) }
             };
             return result.map_err(|e| format!("Failed to parse pattern-only database: {}", e));
         }
@@ -677,11 +680,12 @@ impl Database {
         offset: usize,
         trusted: bool,
     ) -> Result<(Paraglob, PatternDataMappings), String> {
-        use crate::glob::MatchMode;
-
         if offset >= data.len() {
             return Err("Pattern section offset out of bounds".to_string());
         }
+
+        // Try to read match mode from metadata
+        let match_mode = Self::read_match_mode_from_metadata(data);
 
         // Read section header
         if offset + 8 > data.len() {
@@ -719,9 +723,9 @@ impl Database {
         let paraglob_data = &data[paraglob_start..paraglob_end];
         // SAFETY: data is 'static lifetime from mmap, valid for entire Database lifetime
         let paraglob = if trusted {
-            unsafe { Paraglob::from_mmap_trusted(paraglob_data, MatchMode::CaseSensitive) }
+            unsafe { Paraglob::from_mmap_trusted(paraglob_data, match_mode) }
         } else {
-            unsafe { Paraglob::from_mmap(paraglob_data, MatchMode::CaseSensitive) }
+            unsafe { Paraglob::from_mmap(paraglob_data, match_mode) }
         };
         let paraglob = paraglob.map_err(|e| format!("Failed to parse paraglob section: {}", e))?;
 
@@ -755,6 +759,27 @@ impl Database {
         };
 
         Ok((paraglob, mappings))
+    }
+
+    /// Read match mode from database metadata
+    /// Returns CaseSensitive as default if not found or on error
+    fn read_match_mode_from_metadata(data: &[u8]) -> crate::glob::MatchMode {
+        use crate::glob::MatchMode;
+
+        // Try to read metadata
+        if let Ok(metadata) = crate::mmdb::MmdbMetadata::from_file(data) {
+            if let Ok(DataValue::Map(map)) = metadata.as_value() {
+                if let Some(DataValue::Uint16(mode_val)) = map.get("match_mode") {
+                    return match *mode_val {
+                        1 => MatchMode::CaseInsensitive,
+                        _ => MatchMode::CaseSensitive, // 0 or unknown = CaseSensitive (default)
+                    };
+                }
+            }
+        }
+
+        // Default to case-sensitive for backward compatibility with old databases
+        MatchMode::CaseSensitive
     }
 }
 
