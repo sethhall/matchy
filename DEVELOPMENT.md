@@ -256,6 +256,97 @@ Offset-based with mmap:
 
 This approach provides a stable C API that can be consumed from any language.
 
+## Database Validation
+
+Matchy provides comprehensive validation for `.mxy` database files to ensure safety before loading, especially important for untrusted sources.
+
+### Validation Module (`src/validation.rs`)
+
+The validation module performs thorough checks without loading the database into the query engine:
+
+**Validated Components:**
+- Binary format integrity (magic bytes, version, alignment)
+- All offsets are within buffer bounds
+- UTF-8 validity of all string data
+- AC automaton structure (nodes, edges, transitions)
+- Graph integrity (no cycles, valid failure links)
+- Pattern entries and data mappings
+- Data section consistency (if present)
+
+### Validation Levels
+
+**Basic** (~1ms):
+- Magic bytes and version check
+- Critical offset validation
+- Fast failure for obviously corrupt files
+
+**Standard** (~5ms, default):
+- All offset bounds checking
+- UTF-8 validation for all strings
+- Structure integrity (arrays, mappings)
+- AC automaton basic validation
+
+**Strict** (~10ms):
+- Deep graph analysis
+- Cycle detection in failure links
+- State encoding distribution analysis
+- Efficiency warnings (old format, suspicious sizes)
+
+### Validation Report
+
+Validation produces a detailed report with:
+- **Errors**: Critical issues that make the database unsafe
+- **Warnings**: Non-fatal issues (old format, inefficiencies)
+- **Info**: Database properties and statistics
+- **Stats**: Version, node count, pattern count, encoding distribution
+
+### CLI Usage
+
+```bash
+# Validate before using
+matchy validate untrusted.mxy
+
+# Strict validation
+matchy validate untrusted.mxy --level strict
+
+# JSON output for automation
+matchy validate untrusted.mxy --json
+```
+
+### API Usage
+
+```rust
+use matchy::validation::{validate_database, ValidationLevel};
+
+let report = validate_database(
+    Path::new("database.mxy"),
+    ValidationLevel::Standard
+)?;
+
+if !report.is_valid() {
+    eprintln!("Database validation failed:");
+    for error in &report.errors {
+        eprintln!("  - {}", error);
+    }
+    return Err("Unsafe database");
+}
+```
+
+### Security Model
+
+**Safe Mode (default):**
+- Validates UTF-8 on every string read
+- Safe for untrusted databases
+- ~15-20% slower than trusted mode
+
+**Trusted Mode:**
+- Skips UTF-8 validation
+- **Only for validated or self-built databases**
+- Undefined behavior if database has invalid UTF-8
+
+**Validation Recommendation:**
+Always validate external databases with `matchy validate` before using `Database::open_trusted()` for better performance.
+
 ## Optimization Opportunities
 
 ### Pattern-Specific Optimizations

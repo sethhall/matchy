@@ -26,17 +26,17 @@
 //! #include <matchy/matchy.h>
 //!
 //! // ============ BUILD PHASE (create new database) ============
-//! 
+//!
 //! // 1. Create a builder
 //! matchy_builder_t *builder = matchy_builder_new();
 //! if (builder == NULL) { /* handle error */ }
 //!
 //! // 2. Add entries with JSON data
-//! matchy_builder_add(builder, "1.2.3.4", 
+//! matchy_builder_add(builder, "1.2.3.4",
 //!     "{\"threat_level\": \"high\", \"score\": 95}");
-//! matchy_builder_add(builder, "10.0.0.0/8", 
+//! matchy_builder_add(builder, "10.0.0.0/8",
 //!     "{\"type\": \"internal\"}");
-//! matchy_builder_add(builder, "*.evil.com", 
+//! matchy_builder_add(builder, "*.evil.com",
 //!     "{\"category\": \"malware\"}");
 //!
 //! // 3. Set optional metadata

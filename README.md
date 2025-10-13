@@ -479,6 +479,82 @@ Metadata:
   Build time:      2025-01-15 10:30:45 UTC (1736936445)
 ```
 
+### Validating Databases
+
+Before using a `.mxy` database from an untrusted source, you should validate it for safety and correctness:
+
+```bash
+# Standard validation (recommended)
+matchy validate database.mxy
+
+# Strict validation (thorough checks)
+matchy validate database.mxy --level strict
+
+# Basic validation (faster, fewer checks)
+matchy validate database.mxy --level basic
+
+# JSON output for automation
+matchy validate database.mxy --json
+
+# Verbose output with warnings and info
+matchy validate database.mxy --verbose
+```
+
+**Example output:**
+```
+Validating: database.mxy
+Level:      standard
+
+Statistics:
+  Version: v3, Nodes: 1234, Patterns: 567 (123 literal, 444 glob), IPs: 890, Size: 2048 KB
+  Validation time: 5.23ms
+
+ℹ️  INFORMATION (3):
+  • Format version: v3 (latest - with AC literal mapping)
+  • Endianness: little-endian
+  • AC automaton: 1234 nodes, max depth 15, encodings: Empty=200, One=900, Sparse=120, Dense=14
+
+✅ VALIDATION PASSED
+   Database is safe to use.
+```
+
+**Validation levels:**
+- **basic**: Quick check of magic bytes, version, and critical offsets (~1ms)
+- **standard** (default): All offsets, UTF-8 validation, structure integrity (~5ms)
+- **strict**: Deep graph analysis, cycle detection, efficiency checks (~10ms)
+- **audit**: All strict checks PLUS unsafe code tracking and trust mode analysis (~12ms)
+
+**Audit mode** is especially useful for security analysis:
+```bash
+# See all unsafe operations and what --trusted mode bypasses
+matchy validate database.mxy --level audit
+
+# Or use the dedicated audit example
+cargo run --example audit_database -- database.mxy
+```
+
+Audit mode reports:
+- All locations where unsafe code is used in the codebase
+- What validation checks are bypassed in `--trusted` mode
+- Security risks of using trusted mode with untrusted databases
+- Complete justification for each unsafe operation
+
+**What is validated:**
+- ✓ Binary format integrity (magic bytes, version compatibility)
+- ✓ All offsets are within bounds and properly aligned
+- ✓ UTF-8 validity of all strings (prevents undefined behavior)
+- ✓ Graph structure integrity (no invalid references or cycles)
+- ✓ Data consistency (arrays, mappings, pattern IDs)
+- ✓ AC automaton structure (nodes, edges, transitions)
+- ✓ **Data section pointers** (cycle detection, depth limits, valid targets)
+- ✓ **Pointer chain safety** (prevents infinite loops and stack overflow)
+
+**Exit codes:**
+- `0`: Validation passed - database is safe to use
+- `1`: Validation failed - DO NOT use the database
+
+**Security recommendation:** Always validate databases from external sources before loading them, especially if you plan to use `--trusted` mode for better performance.
+
 ## Security
 
 ### Trust Mode for Performance

@@ -88,6 +88,25 @@ enum Commands {
         case_insensitive: bool,
     },
 
+    /// Validate a database file for safety and correctness
+    Validate {
+        /// Path to the matchy database (.mxy file)
+        #[arg(value_name = "DATABASE")]
+        database: PathBuf,
+
+        /// Validation level: standard, strict (default), or audit
+        #[arg(short, long, default_value = "strict")]
+        level: String,
+
+        /// Output results as JSON
+        #[arg(short, long)]
+        json: bool,
+
+        /// Show detailed information (warnings and info messages)
+        #[arg(short, long)]
+        verbose: bool,
+    },
+
     /// Benchmark database performance (build, load, query)
     Bench {
         /// Type of database to benchmark: ip, literal, pattern, or combined
@@ -133,21 +152,21 @@ fn set_readonly(path: &PathBuf) -> Result<()> {
     let mut perms = fs::metadata(path)
         .with_context(|| format!("Failed to get metadata for: {}", path.display()))?
         .permissions();
-    
+
     #[cfg(unix)]
     {
         perms.set_mode(0o444); // r--r--r--
     }
-    
+
     #[cfg(not(unix))]
     {
         // On Windows and other platforms, use the cross-platform read-only API
         perms.set_readonly(true);
     }
-    
+
     fs::set_permissions(path, perms)
         .with_context(|| format!("Failed to set read-only permissions: {}", path.display()))?;
-    
+
     Ok(())
 }
 
@@ -165,6 +184,12 @@ fn main() -> Result<()> {
             json,
             verbose,
         } => cmd_inspect(database, json, verbose),
+        Commands::Validate {
+            database,
+            level,
+            json,
+            verbose,
+        } => cmd_validate(database, level, json, verbose),
         Commands::Build {
             inputs,
             output,
@@ -430,6 +455,122 @@ fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()
     Ok(())
 }
 
+fn cmd_validate(
+    database: PathBuf,
+    level_str: String,
+    json_output: bool,
+    verbose: bool,
+) -> Result<()> {
+    use matchy::validation::{validate_database, ValidationLevel};
+
+    // Parse validation level
+    let level = match level_str.to_lowercase().as_str() {
+        "standard" => ValidationLevel::Standard,
+        "strict" => ValidationLevel::Strict,
+        "audit" => ValidationLevel::Audit,
+        _ => {
+            anyhow::bail!(
+                "Invalid validation level: '{}'. Must be: standard, strict, or audit",
+                level_str
+            );
+        }
+    };
+
+    // Validate the database
+    let start = Instant::now();
+    let report = validate_database(&database, level)
+        .with_context(|| format!("Validation failed: {}", database.display()))?;
+    let duration = start.elapsed();
+
+    // Output results
+    if json_output {
+        let output = json!({
+            "database": database.display().to_string(),
+            "validation_level": level_str,
+            "is_valid": report.is_valid(),
+            "duration_ms": duration.as_millis(),
+            "errors": report.errors,
+            "warnings": report.warnings,
+            "info": report.info,
+            "stats": {
+                "file_size": report.stats.file_size,
+                "version": report.stats.version,
+                "ac_node_count": report.stats.ac_node_count,
+                "pattern_count": report.stats.pattern_count,
+                "ip_entry_count": report.stats.ip_entry_count,
+                "literal_count": report.stats.literal_count,
+                "glob_count": report.stats.glob_count,
+                "has_data_section": report.stats.has_data_section,
+                "has_ac_literal_mapping": report.stats.has_ac_literal_mapping,
+                "max_ac_depth": report.stats.max_ac_depth,
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        // Human-readable output
+        println!("Validating: {}", database.display());
+        println!("Level:      {}", level_str);
+        println!();
+
+        // Statistics
+        println!("Statistics:");
+        println!("  {}", report.stats.summary());
+        println!("  Validation time: {:.2}ms", duration.as_millis());
+        println!();
+
+        // Errors
+        if !report.errors.is_empty() {
+            println!("❌ ERRORS ({}):", report.errors.len());
+            for error in &report.errors {
+                println!("  • {}", error);
+            }
+            println!();
+        }
+
+        // Warnings
+        if !report.warnings.is_empty() && verbose {
+            println!("⚠️  WARNINGS ({}):", report.warnings.len());
+            for warning in &report.warnings {
+                println!("  • {}", warning);
+            }
+            println!();
+        } else if !report.warnings.is_empty() {
+            println!(
+                "⚠️  {} warning(s) (use --verbose to show)",
+                report.warnings.len()
+            );
+            println!();
+        }
+
+        // Info messages
+        if verbose && !report.info.is_empty() {
+            println!("ℹ️  INFORMATION ({}):", report.info.len());
+            for info in &report.info {
+                println!("  • {}", info);
+            }
+            println!();
+        }
+
+        // Final verdict
+        if report.is_valid() {
+            println!("✅ VALIDATION PASSED");
+            println!("   Database is safe to use.");
+        } else {
+            println!("❌ VALIDATION FAILED");
+            println!("   Database has {} critical error(s).", report.errors.len());
+            println!("   DO NOT use this database without fixing the errors.");
+        }
+    }
+
+    // Exit with appropriate code
+    if report.is_valid() {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_build(
     inputs: Vec<PathBuf>,
     output: PathBuf,
@@ -457,7 +598,14 @@ fn cmd_build(
         }
         println!("  Output: {}", output.display());
         println!("  Format: {}", format);
-        println!("  Match mode: {}", if case_insensitive { "case-insensitive" } else { "case-sensitive" });
+        println!(
+            "  Match mode: {}",
+            if case_insensitive {
+                "case-insensitive"
+            } else {
+                "case-sensitive"
+            }
+        );
         println!();
     }
 
@@ -695,8 +843,12 @@ fn cmd_build(
         .with_context(|| format!("Failed to save database: {}", output.display()))?;
 
     // Set file to read-only to protect mmap integrity
-    set_readonly(&output)
-        .with_context(|| format!("Failed to set read-only permissions on: {}", output.display()))?;
+    set_readonly(&output).with_context(|| {
+        format!(
+            "Failed to set read-only permissions on: {}",
+            output.display()
+        )
+    })?;
 
     // Always show success message
     println!("\n✓ Database built successfully!");

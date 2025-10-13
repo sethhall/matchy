@@ -237,9 +237,9 @@ impl Database {
             let literal_data = &data[offset + 16..];
             // Read match mode from metadata
             let match_mode = Self::read_match_mode_from_metadata(data);
-            db.literal_hash = Some(LiteralHash::from_buffer(literal_data, match_mode).map_err(|e| {
-                DatabaseError::Unsupported(format!("Failed to load literal hash: {}", e))
-            })?);
+            db.literal_hash = Some(LiteralHash::from_buffer(literal_data, match_mode).map_err(
+                |e| DatabaseError::Unsupported(format!("Failed to load literal hash: {}", e)),
+            )?);
         }
 
         Ok(db)

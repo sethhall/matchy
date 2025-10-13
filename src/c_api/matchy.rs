@@ -1448,3 +1448,102 @@ pub unsafe extern "C" fn matchy_result_to_json(result: *const matchy_result_t) -
         Err(_) => ptr::null_mut(),
     }
 }
+
+// ============================================================================
+// VALIDATION API
+// ============================================================================
+
+/// Standard validation level - all offsets, UTF-8, basic structure
+pub const MATCHY_VALIDATION_STANDARD: i32 = 0;
+/// Strict validation level - standard plus deep graph analysis and consistency checks (default)
+pub const MATCHY_VALIDATION_STRICT: i32 = 1;
+/// Audit validation level - strict plus unsafe code tracking for security reviews
+pub const MATCHY_VALIDATION_AUDIT: i32 = 2;
+
+/// Validate a database file
+///
+/// Validates a .mxy database file to ensure it's safe to use.
+/// Returns MATCHY_SUCCESS if the database is valid, or an error code if invalid.
+///
+/// # Parameters
+/// * `filename` - Path to database file (null-terminated C string, must not be NULL)
+/// * `level` - Validation level (MATCHY_VALIDATION_STANDARD, _STRICT, or _AUDIT)
+/// * `error_message` - Pointer to receive error message (may be NULL if not needed)
+///   If non-NULL and validation fails, receives a string that must be freed with matchy_free_string
+///
+/// # Returns
+/// * MATCHY_SUCCESS (0) if database is valid
+/// * Error code < 0 if validation failed or parameters invalid
+///
+/// # Safety
+/// * `filename` must be a valid null-terminated C string
+/// * If `error_message` is non-NULL, caller must free the returned string
+///
+/// # Example
+/// ```c
+/// char *error = NULL;
+/// int result = matchy_validate("/path/to/database.mxy", MATCHY_VALIDATION_STRICT, &error);
+/// if (result != MATCHY_SUCCESS) {
+///     fprintf(stderr, "Validation failed: %s\n", error ? error : "unknown error");
+///     if (error) matchy_free_string(error);
+///     return 1;
+/// }
+/// printf("Database is valid and safe to use!\n");
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_validate(
+    filename: *const c_char,
+    level: i32,
+    error_message: *mut *mut c_char,
+) -> i32 {
+    use crate::validation::{validate_database, ValidationLevel};
+    use std::path::Path;
+
+    if filename.is_null() {
+        return MATCHY_ERROR_INVALID_PARAM;
+    }
+
+    let path_str = match CStr::from_ptr(filename).to_str() {
+        Ok(s) => s,
+        Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+    };
+
+    let validation_level = match level {
+        MATCHY_VALIDATION_STANDARD => ValidationLevel::Standard,
+        MATCHY_VALIDATION_STRICT => ValidationLevel::Strict,
+        MATCHY_VALIDATION_AUDIT => ValidationLevel::Audit,
+        _ => return MATCHY_ERROR_INVALID_PARAM,
+    };
+
+    match validate_database(Path::new(path_str), validation_level) {
+        Ok(report) => {
+            if report.is_valid() {
+                MATCHY_SUCCESS
+            } else {
+                // Validation failed - populate error message if requested
+                if !error_message.is_null() {
+                    let error_text = if report.errors.is_empty() {
+                        "Validation failed (no error details)".to_string()
+                    } else {
+                        report.errors.join("; ")
+                    };
+
+                    if let Ok(c_str) = CString::new(error_text) {
+                        *error_message = c_str.into_raw();
+                    } else {
+                        *error_message = ptr::null_mut();
+                    }
+                }
+                MATCHY_ERROR_CORRUPT_DATA
+            }
+        }
+        Err(_) => {
+            if !error_message.is_null() {
+                if let Ok(c_str) = CString::new("Failed to validate database") {
+                    *error_message = c_str.into_raw();
+                }
+            }
+            MATCHY_ERROR_IO
+        }
+    }
+}

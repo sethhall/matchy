@@ -203,6 +203,21 @@ namespace matchy {
 #define MATCHY_ERROR_DATA_PARSE -9
 
 /*
+ Standard validation level - all offsets, UTF-8, basic structure
+ */
+#define MATCHY_VALIDATION_STANDARD 0
+
+/*
+ Strict validation level - standard plus deep graph analysis and consistency checks (default)
+ */
+#define MATCHY_VALIDATION_STRICT 1
+
+/*
+ Audit validation level - strict plus unsafe code tracking for security reviews
+ */
+#define MATCHY_VALIDATION_AUDIT 2
+
+/*
  Opaque database builder handle
  */
 typedef struct matchy_builder_t {
@@ -882,6 +897,40 @@ void matchy_free_entry_data_list(struct matchy_entry_data_list_t *list);
  ```
  */
 char *matchy_result_to_json(const struct matchy_result_t *result);
+
+/*
+ Validate a database file
+
+ Validates a .mxy database file to ensure it's safe to use.
+ Returns MATCHY_SUCCESS if the database is valid, or an error code if invalid.
+
+ # Parameters
+ * `filename` - Path to database file (null-terminated C string, must not be NULL)
+ * `level` - Validation level (MATCHY_VALIDATION_STANDARD, _STRICT, or _AUDIT)
+ * `error_message` - Pointer to receive error message (may be NULL if not needed)
+   If non-NULL and validation fails, receives a string that must be freed with matchy_free_string
+
+ # Returns
+ * MATCHY_SUCCESS (0) if database is valid
+ * Error code < 0 if validation failed or parameters invalid
+
+ # Safety
+ * `filename` must be a valid null-terminated C string
+ * If `error_message` is non-NULL, caller must free the returned string
+
+ # Example
+ ```c
+ char *error = NULL;
+ int result = matchy_validate("/path/to/database.mxy", MATCHY_VALIDATION_STRICT, &error);
+ if (result != MATCHY_SUCCESS) {
+     fprintf(stderr, "Validation failed: %s\n", error ? error : "unknown error");
+     if (error) matchy_free_string(error);
+     return 1;
+ }
+ printf("Database is valid and safe to use!\n");
+ ```
+ */
+int32_t matchy_validate(const char *filename, int32_t level, char **error_message);
 
 #ifdef __cplusplus
 }  // extern "C"
