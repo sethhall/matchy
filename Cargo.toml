@@ -9,6 +9,30 @@ repository = "https://github.com/sethhall/matchy"
 readme = "README.md"
 keywords = ["ip", "pattern", "database", "geoip", "matching"]
 categories = ["network-programming", "database", "algorithms"]
+include = [
+    # Source code
+    "src/**/*",
+    "benches/**/*",
+    "examples/**/*",
+    "tests/*.rs",
+    "tests/*.c",
+    "include/**/*",
+    
+    # Build configuration
+    "build.rs",
+    "cbindgen.toml",
+    "Cargo.toml",
+    "Cargo.lock",
+    
+    # Documentation
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    
+    # Assets
+    "logo.jpg",
+]
 
 # cargo-c configuration for C/C++ library installation
 [package.metadata.capi]
