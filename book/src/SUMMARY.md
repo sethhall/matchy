@@ -52,6 +52,7 @@
     * [Benchmarking](dev/benchmarking.md)
     * [Fuzzing](dev/fuzzing.md)
     * [CI Checks](dev/ci-checks.md)
+    * [Releasing](dev/releasing.md)
 
 * [FAQ](faq.md)
 * [Changelog](changelog.md)
