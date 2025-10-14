@@ -380,6 +380,7 @@ impl ParaglobBuilder {
             pattern_data_map,
             candidate_buffer: HashSet::new(),
             ac_literal_buffer: HashSet::new(),
+            result_buffer: Vec::new(),
         })
     }
 
@@ -713,6 +714,8 @@ pub struct Paraglob {
     candidate_buffer: HashSet<u32>,
     /// Reusable buffer for AC literal IDs (avoids allocation on every query)
     ac_literal_buffer: HashSet<u32>,
+    /// Reusable buffer for result pattern IDs (avoids allocation on every query)
+    result_buffer: Vec<u32>,
 }
 
 impl Paraglob {
@@ -732,6 +735,7 @@ impl Paraglob {
             pattern_data_map: None,
             candidate_buffer: HashSet::new(),
             ac_literal_buffer: HashSet::new(),
+            result_buffer: Vec::new(),
         }
     }
 
@@ -787,6 +791,9 @@ impl Paraglob {
     }
 
     /// Find all matching pattern IDs
+    ///
+    /// Returns an owned Vec of pattern IDs. This allocates a new Vec for each call.
+    /// For zero-allocation queries, use `find_all_ref()` or `find_all_into()`.
     pub fn find_all(&mut self, text: &str) -> Vec<u32> {
         let buffer = self.buffer.as_slice();
         if buffer.is_empty() {
@@ -822,18 +829,19 @@ impl Paraglob {
             );
 
             // Map AC literal IDs to pattern IDs using hash table lookup (O(1))
+            // Use zero-copy lookup_into to avoid allocations
             if !self.ac_literal_buffer.is_empty() {
                 if let Some(ref ac_hash) = self.ac_literal_hash {
                     for &literal_id in &self.ac_literal_buffer {
-                        let pattern_ids = ac_hash.lookup_slice(literal_id);
-                        self.candidate_buffer.extend(pattern_ids);
+                        ac_hash.lookup_into(literal_id, &mut self.candidate_buffer);
                     }
                 }
             }
         }
 
         // Phase 2: Verify candidates (or all patterns if no AC)
-        let mut matching_ids = Vec::new();
+        // Reuse result buffer to avoid allocation
+        self.result_buffer.clear();
 
         // CRITICAL: Always check pure wildcards first (patterns with no literals)
         // These must be checked on every query regardless of AC results
@@ -905,7 +913,7 @@ impl Paraglob {
                     });
 
                 if glob.matches(text) {
-                    matching_ids.push(wildcard.pattern_id);
+                    self.result_buffer.push(wildcard.pattern_id);
                 }
             }
         }
@@ -929,7 +937,7 @@ impl Paraglob {
             if entry.pattern_type == 0 {
                 // Literal pattern - AC automaton already confirmed this matches!
                 // No need to read string or verify, just add to results.
-                matching_ids.push(entry.pattern_id);
+                self.result_buffer.push(entry.pattern_id);
             } else {
                 // Glob pattern - need to read pattern string and do glob matching
                 let pattern_str = if self.trusted {
@@ -961,14 +969,248 @@ impl Paraglob {
                 });
 
                 if glob.matches(text) {
-                    matching_ids.push(entry.pattern_id);
+                    self.result_buffer.push(entry.pattern_id);
                 }
             }
         }
 
-        matching_ids.sort_unstable();
-        matching_ids.dedup();
-        matching_ids
+        self.result_buffer.sort_unstable();
+        self.result_buffer.dedup();
+        // Clone the result (caller owns it)
+        // Note: This still allocates once per query, but it's unavoidable
+        // without changing the API to return &[u32] or using arena allocation
+        self.result_buffer.clone()
+    }
+
+    /// Find all matching pattern IDs (zero-allocation variant)
+    ///
+    /// Returns a borrowed slice of pattern IDs. This does NOT allocate.
+    /// The slice is valid until the next call to any `find_all*` method.
+    ///
+    /// # Example
+    /// ```
+    /// use matchy::{Paraglob, glob::MatchMode};
+    ///
+    /// let patterns = vec!["*.txt", "test_*"];
+    /// let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    ///
+    /// // Zero allocation!
+    /// let matches = pg.find_all_ref("test_file.txt");
+    /// assert_eq!(matches.len(), 2);
+    /// # Ok::<(), matchy::ParaglobError>(())
+    /// ```
+    pub fn find_all_ref(&mut self, text: &str) -> &[u32] {
+        let buffer = self.buffer.as_slice();
+        if buffer.is_empty() {
+            return &[];
+        }
+
+        let (header_ref, _) = match Ref::<_, ParaglobHeader>::from_prefix(buffer) {
+            Ok(r) => r,
+            Err(_) => return &[], // Invalid header, return empty
+        };
+        let header = *header_ref;
+
+        // Phase 1: Use AC automaton to find literal matches and candidate patterns
+        let ac_start = header.ac_nodes_offset as usize;
+        let ac_size = header.ac_edges_size as usize;
+
+        // Reuse buffers (clear from previous query)
+        self.candidate_buffer.clear();
+        self.ac_literal_buffer.clear();
+
+        if ac_size > 0 {
+            // Extract AC buffer and run AC matching on it
+            let ac_buffer = &buffer[ac_start..ac_start + ac_size];
+
+            // Run AC automaton matching directly on text bytes (AC handles case-insensitivity)
+            let text_bytes = text.as_bytes();
+            let mode = self.mode;
+            Self::run_ac_matching_into_static(
+                ac_buffer,
+                text_bytes,
+                mode,
+                &mut self.ac_literal_buffer,
+            );
+
+            // Map AC literal IDs to pattern IDs using hash table lookup (O(1))
+            // Use zero-copy lookup_into to avoid allocations
+            if !self.ac_literal_buffer.is_empty() {
+                if let Some(ref ac_hash) = self.ac_literal_hash {
+                    for &literal_id in &self.ac_literal_buffer {
+                        ac_hash.lookup_into(literal_id, &mut self.candidate_buffer);
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Verify candidates (or all patterns if no AC)
+        // Reuse result buffer to avoid allocation
+        self.result_buffer.clear();
+
+        // CRITICAL: Always check pure wildcards first (patterns with no literals)
+        // These must be checked on every query regardless of AC results
+        // Wildcards are stored after pattern strings with 8-byte alignment padding
+        let unaligned_offset =
+            (header.pattern_strings_offset + header.pattern_strings_size) as usize;
+        let alignment = 8;
+        let padding = (alignment - (unaligned_offset % alignment)) % alignment;
+        let wildcards_offset = unaligned_offset + padding;
+        let wildcard_count = header.wildcard_count as usize;
+
+        if wildcard_count > 0 {
+            for i in 0..wildcard_count {
+                let wildcard_offset_val = wildcards_offset + i * mem::size_of::<SingleWildcard>();
+                let buffer_slice = match buffer.get(wildcard_offset_val..) {
+                    Some(s) => s,
+                    None => continue, // Skip corrupted wildcard
+                };
+                let (wildcard_ref, _) = match Ref::<_, SingleWildcard>::from_prefix(buffer_slice) {
+                    Ok(r) => r,
+                    Err(_) => continue, // Skip corrupted wildcard
+                };
+                let wildcard = *wildcard_ref;
+
+                // Look up PatternEntry to get the string length
+                let patterns_offset = header.patterns_offset as usize;
+                let entry_offset = patterns_offset
+                    + (wildcard.pattern_id as usize) * mem::size_of::<PatternEntry>();
+                let entry_slice = match buffer.get(entry_offset..) {
+                    Some(s) => s,
+                    None => continue, // Skip corrupted entry
+                };
+                let (entry_ref, _) = match Ref::<_, PatternEntry>::from_prefix(entry_slice) {
+                    Ok(r) => r,
+                    Err(_) => continue, // Skip corrupted entry
+                };
+                let entry = *entry_ref;
+
+                let pattern_str = if self.trusted {
+                    // TRUSTED mode: Skip UTF-8 validation (fast)
+                    // SAFETY: We trust the database source to have valid UTF-8
+                    unsafe {
+                        read_str_unchecked(
+                            buffer,
+                            entry.pattern_string_offset as usize,
+                            entry.pattern_string_length as usize,
+                        )
+                    }
+                } else {
+                    // SAFE mode: Validate UTF-8 on untrusted databases
+                    match unsafe {
+                        read_str_checked(
+                            buffer,
+                            entry.pattern_string_offset as usize,
+                            entry.pattern_string_length as usize,
+                        )
+                    } {
+                        Ok(s) => s,
+                        Err(_) => continue, // Skip corrupted pattern
+                    }
+                };
+
+                // Check glob pattern
+                let glob = self
+                    .glob_cache
+                    .entry(wildcard.pattern_id)
+                    .or_insert_with(|| {
+                        GlobPattern::new(pattern_str, self.mode).expect("Invalid wildcard pattern")
+                    });
+
+                if glob.matches(text) {
+                    self.result_buffer.push(wildcard.pattern_id);
+                }
+            }
+        }
+
+        // Check AC candidates (patterns that have literals that were found)
+        for &pattern_id in &self.candidate_buffer {
+            let patterns_offset = header.patterns_offset as usize;
+            let entry_offset =
+                patterns_offset + (pattern_id as usize) * mem::size_of::<PatternEntry>();
+            let entry_slice = match buffer.get(entry_offset..) {
+                Some(s) => s,
+                None => continue, // Skip corrupted pattern
+            };
+            let entry_ref = match Ref::<_, PatternEntry>::from_prefix(entry_slice) {
+                Ok((r, _)) => r,
+                Err(_) => continue, // Skip corrupted pattern
+            };
+            let entry = *entry_ref;
+
+            // Check if pattern matches
+            if entry.pattern_type == 0 {
+                // Literal pattern - AC automaton already confirmed this matches!
+                // No need to read string or verify, just add to results.
+                self.result_buffer.push(entry.pattern_id);
+            } else {
+                // Glob pattern - need to read pattern string and do glob matching
+                let pattern_str = if self.trusted {
+                    // TRUSTED mode: Skip UTF-8 validation (fast)
+                    // SAFETY: We trust the database source to have valid UTF-8
+                    unsafe {
+                        read_str_unchecked(
+                            buffer,
+                            entry.pattern_string_offset as usize,
+                            entry.pattern_string_length as usize,
+                        )
+                    }
+                } else {
+                    // SAFE mode: Validate UTF-8 on untrusted databases
+                    match unsafe {
+                        read_str_checked(
+                            buffer,
+                            entry.pattern_string_offset as usize,
+                            entry.pattern_string_length as usize,
+                        )
+                    } {
+                        Ok(s) => s,
+                        Err(_) => continue, // Skip corrupted pattern
+                    }
+                };
+
+                let glob = self.glob_cache.entry(entry.pattern_id).or_insert_with(|| {
+                    GlobPattern::new(pattern_str, self.mode).expect("Invalid cached glob pattern")
+                });
+
+                if glob.matches(text) {
+                    self.result_buffer.push(entry.pattern_id);
+                }
+            }
+        }
+
+        self.result_buffer.sort_unstable();
+        self.result_buffer.dedup();
+        // Return slice (zero allocation!)
+        &self.result_buffer
+    }
+
+    /// Find all matching pattern IDs and write into caller's buffer (zero-allocation variant)
+    ///
+    /// Writes pattern IDs into the provided buffer. The buffer is cleared first.
+    /// This does NOT allocate (assuming buffer has sufficient capacity).
+    ///
+    /// # Example
+    /// ```
+    /// use matchy::{Paraglob, glob::MatchMode};
+    ///
+    /// let patterns = vec!["*.txt", "test_*"];
+    /// let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    ///
+    /// // Reuse buffer across queries - zero allocation!
+    /// let mut results = Vec::with_capacity(100);
+    /// pg.find_all_into("test_file.txt", &mut results);
+    /// assert_eq!(results.len(), 2);
+    ///
+    /// // Reuse same buffer for next query
+    /// pg.find_all_into("another.txt", &mut results);
+    /// # Ok::<(), matchy::ParaglobError>(())
+    /// ```
+    pub fn find_all_into(&mut self, text: &str, output: &mut Vec<u32>) {
+        // Use find_all_ref to do the work, then copy to output
+        let results = self.find_all_ref(text);
+        output.clear();
+        output.extend_from_slice(results);
     }
 
     /// Run AC automaton matching on the offset-based buffer
@@ -1214,6 +1456,7 @@ impl Paraglob {
             pattern_data_map,
             candidate_buffer: HashSet::new(),
             ac_literal_buffer: HashSet::new(),
+            result_buffer: Vec::new(),
         })
     }
 
@@ -1306,6 +1549,7 @@ impl Paraglob {
             pattern_data_map,
             candidate_buffer: HashSet::new(),
             ac_literal_buffer: HashSet::new(),
+            result_buffer: Vec::new(),
         })
     }
 
