@@ -1,0 +1,34 @@
+=== Matchy Database Benchmark ===
+
+Configuration:
+  Database type:     combined
+  Entry count:       300
+  Load iterations:   3
+  Query iterations:  100,000
+  Hit rate:          10%
+
+--- Phase 1: Build Combined Database ---
+  Build time:  0.00s
+  Build rate:  527.90K entries/sec
+  DB size:     35.69 KB
+  IPs:         150
+  Patterns:    150
+
+--- Phase 2: Save to Disk ---
+  Save time:   0.00s
+
+--- Phase 3: Load Database (mmap) ---
+  Load #1: 0.346ms
+  Load #2: 0.322ms
+  Load #3: 0.323ms
+  Average:  0.330ms
+
+--- Phase 4: Query Performance ---
+  Query count: 100,000
+  Total time:  0.19s
+  QPS:         517.71K queries/sec
+  Avg latency: 1.93µs
+  IP found:    50,000/50,000
+  Pattern found: 50,000/50,000
+
+✓ Benchmark complete (temp file removed)

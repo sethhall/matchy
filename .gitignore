@@ -28,3 +28,7 @@ Thumbs.db
 # Benchmarks - keep baselines, ignore runtime data
 /benchmarks/criterion_data/
 /benchmarks/comparison_*/
+
+# mdbook cmdrun wrapper (generated on build)
+/book/.cmdrun-wrapper/
+# Note: /book/command-outputs/ IS committed to repo

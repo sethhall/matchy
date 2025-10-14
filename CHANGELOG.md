@@ -7,6 +7,189 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2025-10-13
+
+### 🎉 Major Release - Production Ready
+
+This is the first stable release of matchy, representing a production-ready unified database for IP addresses, string literals, and glob pattern matching. The 1.0.0 release includes database format changes and comprehensive validation infrastructure.
+
+### 🚨 Breaking Changes
+- **Database Format**: Updated binary format with new validation metadata (databases must be rebuilt)
+- **Match Mode Storage**: Case sensitivity now stored in database metadata (format incompatibility)
+
+### Added
+- **Comprehensive Validation System** (`validation.rs` - 3,200+ lines)
+  - Three validation levels: Standard (basic checks), Strict (deep analysis), Audit (security review)
+  - MMDB format validation: header integrity, metadata consistency, IP tree structure
+  - PARAGLOB section validation: AC automaton integrity, pattern consistency checks
+  - Safety-critical checks: UTF-8 validation, pointer cycle detection, depth limits, bounds checking
+  - IP tree traversal: full recursive validation detecting cycles and orphaned nodes
+  - Data section pointer validation: prevents infinite loops from malicious databases
+  - CLI commands: `matchy validate` (with `--level` and `--json` flags), `matchy audit` for security analysis
+  - C API: `matchy_validate()` function with validation level constants
+  - Example: `examples/audit_database.rs` demonstrating validation API usage
+
+- **Case-Insensitive Matching Support**
+  - Build-time flag: `-i/--case-insensitive` for `matchy build` command
+  - Match mode (case-sensitive/insensitive) persisted in database metadata
+  - Case-insensitive literal hash table with automatic query normalization
+  - Automatic deduplication of case variants (smaller databases)
+  - Zero query-time overhead (simple lowercase conversion)
+  - Backward compatible (defaults to case-sensitive)
+
+### Changed
+- **CLI Security**: Generated database files now set to read-only (0444 permissions) to protect memory-mapped integrity
+- **Database Loader**: Automatically reads and applies match_mode from metadata (no query-time flags needed)
+- **Format Version**: Database format updated to support validation metadata and match mode
+
+### Performance
+- Validation overhead: ~18-20ms on 193MB database (minimal impact, <0.01% of query time)
+- Case-insensitive matching: Zero query-time overhead (normalization at build and lookup)
+- All existing performance characteristics maintained from 0.5.x releases
+
+### Testing
+- 21 new unit tests for validation system
+- All 163 tests passing (increased from 142 in v0.5.x)
+- Case-insensitive matching verified for both globs and literals
+- Comprehensive validation test coverage
+
+### Documentation
+- Updated README.md with validation and case-insensitive matching sections
+- Enhanced DEVELOPMENT.md with validation architecture details
+- API documentation improvements throughout
+
+## [0.5.2] - 2025-10-12
+
+### 🚀 Major Performance Improvements
+- **State-Specific AC Encoding**: 30-57% faster pattern matching
+  - ONE encoding (75-80% of states): Single transition stored inline
+  - SPARSE encoding (10-15% of states): 2-8 transitions via edge array
+  - DENSE encoding (2-5% of states): 9+ transitions via 256-entry lookup table
+  - O(1) lookup for high-degree nodes (1KB per dense state)
+  - 13% memory reduction overall due to ONE state optimization
+
+- **O(1) Database Loading**
+  - AC literal hash table eliminates HashMap construction on load
+  - Lazy offset-based pattern data lookups instead of eager deserialization
+  - Load time reduced from O(n) to O(1) where n = pattern count
+  - <100μs load time maintained at any scale
+
+- **Zero-Copy Optimizations**
+  - Added zerocopy derives (FromBytes, IntoBytes, Immutable, KnownLayout)
+  - Safe zero-copy header parsing with zerocopy::Ref
+  - Upgraded to zerocopy 0.8 with modern trait derivations
+
+- **Trusted Mode** for maximum performance
+  - `Database::open_trusted()` API skips UTF-8 validation
+  - 15-20% query speedup for databases from trusted sources
+  - `--trusted` flag for matchy CLI bench command
+  - Safe by default: `Database::open()` still validates
+
+### Added
+- **Comprehensive Benchmark Command** (`matchy bench`)
+  - 900+ lines of benchmarking infrastructure
+  - Benchmarks build time, load time, query performance
+  - Supports ip, literal, pattern, and combined database types
+  - Configurable entry counts, load iterations, query counts
+  - Hit rate control for realistic query distributions
+  - Optional temp file mode or persistent output
+
+- **Fuzzing Infrastructure**
+  - Comprehensive `docs/FUZZING_GUIDE.md` (663 lines)
+  - 5 fuzz targets: pattern_matching, ip_lookup, glob_patterns, data_values, literal_exact_match
+  - `fuzz/README.md` (229 lines) and `FUZZ_TARGETS_SUMMARY.md` (71 lines)
+  - `fuzz_quickstart.sh` automation script
+  - cargo-fuzz configuration in fuzz/ directory
+
+- **New Example Programs**
+  - `examples/prefix_convention.rs`: Demonstrates custom matching semantics (131 lines)
+
+- **C FFI Additions**
+  - `matchy_open_trusted()` for trusted database loading
+  - Updated matchy.h header with new API function
+
+### Fixed
+- **Critical: UTF-8 Boundary Panic** (discovered by fuzzing)
+  - Star wildcard (*) matching could panic on multi-byte UTF-8 characters
+  - Fixed by using character boundary iteration instead of byte positions
+  - Added `test_utf8_boundary_in_star_matching` regression test
+  - Example: Pattern `*4**4\4**4\*` with text containing 'Ż' would crash
+
+- **Critical: Exponential Backtracking / OOM** (discovered by fuzzing)
+  - Patterns with multiple wildcards could cause exponential backtracking
+  - Fixed by adding step counter (100,000 steps) to limit backtracking
+  - Added `test_backtracking_limit` regression test
+  - Example: Pattern `*a*b*c*d*e*f*g*h*i*j*k*l*m*n*o*p*` against mismatched text
+
+- MMDB data section pointer resolution
+- Windows compilation issues
+- Rustdoc warnings
+- docs.rs build configuration
+
+### Changed
+- **Breaking**: Removed C++ wrapper API (C API remains)
+- **Internal**: Paraglob now stores BufferStorage + metadata instead of cached data
+- **Internal**: Replace pattern_data_cache with pattern_data_map offset metadata
+- **Build**: Minor regression (+5-10% slower build time) for 30-57% faster queries
+
+### Removed
+- Obsolete example programs replaced by CLI bench:
+  - `examples/large_scale_ip_benchmark.rs`
+  - `examples/test_v3_performance.rs`
+
+### Performance
+- **Pattern Matching**: 30-57% faster across all benchmarks
+  - p10_t10000/high: +103% throughput
+  - p100_t10000/high: +106% throughput  
+  - p1000_t10000/high: +133% throughput
+  - realistic_workload: +49% throughput
+- **Database Loading**: O(1) vs O(n), <100μs at any scale
+- **Trusted Mode**: 15-20% additional query speedup
+- **Memory**: 13% reduction due to ONE state encoding
+
+### Dependencies
+- Added `zerocopy = "0.8"` for safe zero-copy parsing
+
+### Testing
+- All 79 tests passing
+- 5 comprehensive fuzz targets active
+- Both critical bugs discovered and fixed within minutes of fuzzing
+
+### Documentation
+- Added 64-byte cache-line alignment documentation
+- Added cross-platform endianness support documentation
+- Updated WARP.md with performance characteristics
+- Added trusted vs safe mode trade-off notes
+- Comprehensive fuzzing guide and best practices
+- Updated README.md with performance claims (7M+ IP, 1M+ pattern queries/sec)
+- Better examples with clearer comments
+
+## [0.5.1] - 2025-10-11
+
+### Added
+- **cargo-c Configuration** for C/C++ library installation
+  - Complete cargo-c metadata in Cargo.toml
+  - Headers install to `/usr/local/include/matchy/`
+  - Proper pkg-config support with correct include paths
+  - `strip_include_path_components` for correct `#include <matchy/matchy.h>`
+  - Documentation: `docs/C_INSTALLATION.md` (273 lines)
+  - Documentation: `docs/CARGO_C_SETUP.md` with implementation details
+
+### Changed
+- Added `capi` feature required by cargo-c
+- Updated installation instructions for system-wide library installation
+
+### Documentation
+- Updated README.md with installation instructions
+- Complete C installation guide with usage examples
+
+### Installation
+Users can now install matchy as a system library:
+```bash
+cargo install cargo-c
+sudo cargo cinstall --release --prefix=/usr/local
+```
+
 ## [0.5.0] - 2025-01-15
 
 ### 🚀 Major Performance Improvements

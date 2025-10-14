@@ -1,0 +1,4 @@
+/* Hide the navigation arrows (Previous/Next chapter buttons) */
+.nav-chapters {
+    display: none !important;
+}

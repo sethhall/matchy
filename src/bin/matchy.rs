@@ -14,7 +14,25 @@ use std::os::unix::fs::PermissionsExt;
 
 #[derive(Parser)]
 #[command(name = "matchy")]
-#[command(about = "Fast multi-pattern glob matching with optional data associations", long_about = None)]
+#[command(
+    about = "Unified database for IP addresses, string literals, and glob patterns",
+    long_about = "matchy - High-performance unified database for IP lookups, exact string matching, and glob pattern matching\n\n\
+    Build and query databases containing IP addresses (CIDR ranges), exact string literals, \n\
+    and glob patterns with wildcards. Uses memory-mapped files for fast, zero-copy queries.\n\n\
+    Features:\n\
+      • IP address lookups (IPv4/IPv6 with CIDR support)\n\
+      • Exact string matching (hash-based)\n\
+      • Multi-pattern glob matching (wildcards: *, ?, [abc], [!abc])\n\
+      • Extended MMDB format with backward compatibility\n\
+      • Zero-copy memory-mapped access\n\
+      • Attach custom metadata to any entry\n\n\
+    Examples:\n\
+      matchy build patterns.txt -o threats.mxy\n\
+      matchy query threats.mxy '192.168.1.1'\n\
+      matchy query threats.mxy 'evil.example.com'\n\
+      matchy inspect threats.mxy --verbose\n\
+      matchy validate threats.mxy --level strict"
+)]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
