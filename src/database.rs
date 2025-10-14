@@ -320,6 +320,12 @@ impl Database {
         // 2. Check glob patterns (for wildcard matches)
         if let Some(pg_cell) = &self.pattern_matcher {
             let mut pg = pg_cell.borrow_mut();
+            // Note: Using find_all() instead of find_all_ref() because we need to call
+            // get_pattern_data() later, which would require another borrow of pg.
+            // The RefCell architecture prevents holding a reference from find_all_ref()
+            // while borrowing again. This allocates a Vec for pattern IDs, but that's
+            // typically small (handful of u32s). See zero_alloc_demo.rs for zero-allocation
+            // API usage when not constrained by RefCell.
             let glob_pattern_ids = pg.find_all(pattern);
 
             // Add glob matches

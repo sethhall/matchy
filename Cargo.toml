@@ -88,6 +88,7 @@ criterion = "0.7"
 proptest = "1.4"
 tempfile = "3.8"
 rand = "0.9"
+dhat = "0.3"  # Heap profiling for examples and benchmarks
 
 [build-dependencies]
 cbindgen = "0.29"
