@@ -1,8 +1,8 @@
-# Matchy
-
 <p align="center">
-  <img src="https://raw.githubusercontent.com/sethhall/matchy/main/logo.jpg" alt="Matchy Logo" width="200" style="border-radius: 18%;" />
+  <img src="https://raw.githubusercontent.com/sethhall/matchy/main/logo.jpg" alt="Matchy Logo" width="200" />
 </p>
+
+# Matchy
 
 [![CI](https://github.com/sethhall/matchy/actions/workflows/ci.yml/badge.svg)](https://github.com/sethhall/matchy/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/matchy.svg)](https://crates.io/crates/matchy)
