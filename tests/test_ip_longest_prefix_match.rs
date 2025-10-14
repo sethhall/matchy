@@ -260,3 +260,62 @@ fn test_simple_two_level() {
     let level = get_level(result);
     assert_eq!(level, "24", "10.0.0.2 should match /24 prefix");
 }
+
+#[test]
+fn test_ipv6_longest_prefix_match() {
+    // Test that IPv6 also handles longest prefix matching correctly
+    let mut builder = MmdbBuilder::new(MatchMode::CaseSensitive);
+
+    // Add /64 first, then /128, then /96 (out of order)
+    let mut data1 = HashMap::new();
+    data1.insert("level".to_string(), DataValue::String("64".to_string()));
+    builder.add_ip("2001:db8::/64", data1).unwrap();
+
+    let mut data2 = HashMap::new();
+    data2.insert("level".to_string(), DataValue::String("128".to_string()));
+    builder.add_ip("2001:db8::1", data2).unwrap();
+
+    let mut data3 = HashMap::new();
+    data3.insert("level".to_string(), DataValue::String("96".to_string()));
+    builder.add_ip("2001:db8::/96", data3).unwrap();
+
+    // Build database
+    let db_bytes = builder.build().unwrap();
+    let db = Database::from_bytes(db_bytes).unwrap();
+
+    // Helper to extract level string from QueryResult
+    let get_level = |result: Option<QueryResult>| -> String {
+        if let Some(QueryResult::Ip { data, .. }) = result {
+            match &data {
+                DataValue::Map(m) => m
+                    .get("level")
+                    .and_then(|v| {
+                        if let DataValue::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap(),
+                _ => panic!("Expected map data"),
+            }
+        } else {
+            panic!("Expected IP result");
+        }
+    };
+
+    // 2001:db8::1 should match /128 (most specific)
+    let result = db.lookup_ip("2001:db8::1".parse().unwrap()).unwrap();
+    let level = get_level(result);
+    assert_eq!(level, "128", "2001:db8::1 should match /128 prefix");
+
+    // 2001:db8::2 should match /96 (next most specific)
+    let result = db.lookup_ip("2001:db8::2".parse().unwrap()).unwrap();
+    let level = get_level(result);
+    assert_eq!(level, "96", "2001:db8::2 should match /96 prefix");
+
+    // 2001:db8::1:0:0 should match /64 (least specific, outside /96)
+    let result = db.lookup_ip("2001:db8::1:0:0".parse().unwrap()).unwrap();
+    let level = get_level(result);
+    assert_eq!(level, "64", "2001:db8::1:0:0 should match /64 prefix");
+}
