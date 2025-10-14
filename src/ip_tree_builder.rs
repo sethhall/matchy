@@ -227,7 +227,8 @@ impl IpTreeBuilder {
 
                     // Make both children of the new node point to the existing data
                     // This preserves the less specific match for all IPs under this prefix
-                    self.nodes[new_node_id as usize].left = NodePointer::Data(existing_data_offset, existing_prefix_len);
+                    self.nodes[new_node_id as usize].left =
+                        NodePointer::Data(existing_data_offset, existing_prefix_len);
                     self.nodes[new_node_id as usize].right =
                         NodePointer::Data(existing_data_offset, existing_prefix_len);
 
@@ -274,7 +275,7 @@ impl IpTreeBuilder {
             let node = &self.nodes[node_id as usize];
             (node.left, node.right)
         };
-        
+
         // Process left child
         match left_ptr {
             NodePointer::Empty => {
@@ -295,7 +296,7 @@ impl IpTreeBuilder {
                 self.backfill_less_specific(child_id, data_offset, prefix_len);
             }
         }
-        
+
         // Process right child
         match right_ptr {
             NodePointer::Empty => {
