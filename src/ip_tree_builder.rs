@@ -38,8 +38,12 @@ struct Node {
 enum NodePointer {
     /// Points to another node (value is node ID)
     Node(u32),
-    /// Points to data section (value is data offset)
-    Data(u32),
+    /// Points to data section (data offset, prefix length)
+    /// Prefix length is tracked to enable proper longest-prefix matching:
+    /// - When inserting a less-specific prefix after a more-specific one, we can compare
+    /// - More specific (longer prefix) always wins
+    /// - This doesn't affect the on-disk format, only the building logic
+    Data(u32, u8),
     /// Empty (not found marker)
     Empty,
 }
@@ -153,14 +157,42 @@ impl IpTreeBuilder {
             };
 
             if depth + 1 == prefix_len {
-                // Reached target depth - set to data
-                let current_node = &mut self.nodes[node_id as usize];
-                if bit == 0 {
-                    current_node.left = NodePointer::Data(data_offset);
-                } else {
-                    current_node.right = NodePointer::Data(data_offset);
+                // Reached target depth - need to set this edge to data
+                // BUT: Check if there's already a Node pointer here (more specific routes exist deeper)
+                match child_ptr_value {
+                    NodePointer::Empty => {
+                        // Empty - set to our data
+                        let current_node = &mut self.nodes[node_id as usize];
+                        if bit == 0 {
+                            current_node.left = NodePointer::Data(data_offset, prefix_len);
+                        } else {
+                            current_node.right = NodePointer::Data(data_offset, prefix_len);
+                        }
+                        return Ok(());
+                    }
+                    NodePointer::Data(_existing_offset, existing_prefix_len) => {
+                        // Existing data - check if our prefix is more specific
+                        if prefix_len >= existing_prefix_len {
+                            // Our prefix is more specific (or equal) - replace it
+                            let current_node = &mut self.nodes[node_id as usize];
+                            if bit == 0 {
+                                current_node.left = NodePointer::Data(data_offset, prefix_len);
+                            } else {
+                                current_node.right = NodePointer::Data(data_offset, prefix_len);
+                            }
+                        }
+                        // Otherwise keep the existing (more specific) data
+                        return Ok(());
+                    }
+                    NodePointer::Node(child_node_id) => {
+                        // There's already a node here, meaning more specific prefixes exist deeper.
+                        // We're inserting a less specific prefix (e.g., /24) after more specific ones (e.g., /32).
+                        // We need to set all EMPTY children of this subtree to point to our data,
+                        // while preserving any existing data pointers (the more specific routes).
+                        self.backfill_less_specific(child_node_id, data_offset, prefix_len);
+                        return Ok(());
+                    }
                 }
-                return Ok(());
             }
 
             // Need to go deeper
@@ -181,7 +213,7 @@ impl IpTreeBuilder {
                     // Continue to existing node
                     node_id = child_id;
                 }
-                NodePointer::Data(existing_data_offset) => {
+                NodePointer::Data(existing_data_offset, existing_prefix_len) => {
                     // Hit existing data before reaching target depth.
                     // This means a less specific prefix already exists (e.g., /24)
                     // and we're trying to insert a more specific one (e.g., /32).
@@ -195,9 +227,9 @@ impl IpTreeBuilder {
 
                     // Make both children of the new node point to the existing data
                     // This preserves the less specific match for all IPs under this prefix
-                    self.nodes[new_node_id as usize].left = NodePointer::Data(existing_data_offset);
+                    self.nodes[new_node_id as usize].left = NodePointer::Data(existing_data_offset, existing_prefix_len);
                     self.nodes[new_node_id as usize].right =
-                        NodePointer::Data(existing_data_offset);
+                        NodePointer::Data(existing_data_offset, existing_prefix_len);
 
                     // Update parent to point to new node instead of data
                     let current_node = &mut self.nodes[node_id as usize];
@@ -221,6 +253,69 @@ impl IpTreeBuilder {
         let id = self.nodes.len() as u32;
         self.nodes.push(Node::new_empty());
         id
+    }
+
+    /// Backfill a subtree with less-specific prefix data
+    ///
+    /// When inserting a less specific prefix (e.g., /24) after more specific ones (e.g., /32),
+    /// we need to fill in gaps left by the more specific routes.
+    ///
+    /// With prefix length tracking, we can now properly distinguish:
+    /// - Empty pointers (fill with new data)
+    /// - Less-specific data (replace with new, more specific data)
+    /// - More-specific data (leave alone)
+    ///
+    /// # Arguments
+    /// * `node_id` - Root of the subtree to backfill
+    /// * `data_offset` - Data offset for the less specific prefix
+    /// * `prefix_len` - Prefix length of the data we're backfilling
+    fn backfill_less_specific(&mut self, node_id: u32, data_offset: u32, prefix_len: u8) {
+        let (left_ptr, right_ptr) = {
+            let node = &self.nodes[node_id as usize];
+            (node.left, node.right)
+        };
+        
+        // Process left child
+        match left_ptr {
+            NodePointer::Empty => {
+                // Empty - fill with new data
+                let node = &mut self.nodes[node_id as usize];
+                node.left = NodePointer::Data(data_offset, prefix_len);
+            }
+            NodePointer::Data(_, existing_prefix_len) => {
+                // Existing data - replace only if we're more specific
+                if prefix_len > existing_prefix_len {
+                    let node = &mut self.nodes[node_id as usize];
+                    node.left = NodePointer::Data(data_offset, prefix_len);
+                }
+                // Otherwise keep the existing data (it's more specific)
+            }
+            NodePointer::Node(child_id) => {
+                // Recurse into subtree
+                self.backfill_less_specific(child_id, data_offset, prefix_len);
+            }
+        }
+        
+        // Process right child
+        match right_ptr {
+            NodePointer::Empty => {
+                // Empty - fill with new data
+                let node = &mut self.nodes[node_id as usize];
+                node.right = NodePointer::Data(data_offset, prefix_len);
+            }
+            NodePointer::Data(_, existing_prefix_len) => {
+                // Existing data - replace only if we're more specific
+                if prefix_len > existing_prefix_len {
+                    let node = &mut self.nodes[node_id as usize];
+                    node.right = NodePointer::Data(data_offset, prefix_len);
+                }
+                // Otherwise keep the existing data (it's more specific)
+            }
+            NodePointer::Node(child_id) => {
+                // Recurse into subtree
+                self.backfill_less_specific(child_id, data_offset, prefix_len);
+            }
+        }
     }
 
     /// Build the tree and return serialized bytes
@@ -260,11 +355,12 @@ impl IpTreeBuilder {
     }
 
     /// Convert node pointer to numeric value
+    /// Note: prefix_len is discarded here - it's only used during building
     fn pointer_to_value(&self, pointer: NodePointer, node_count: u32) -> u32 {
         match pointer {
             NodePointer::Empty => node_count, // "not found" marker
             NodePointer::Node(id) => id,
-            NodePointer::Data(offset) => node_count + 16 + offset, // +16 for separator
+            NodePointer::Data(offset, _prefix_len) => node_count + 16 + offset, // +16 for separator
         }
     }
 
