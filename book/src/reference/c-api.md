@@ -69,9 +69,14 @@ typedef enum {
 The C API is organized into these groups:
 
 ### Database Operations
-- `matchy_open()` - Open database
+- `matchy_open()` - Open database (default settings)
+- `matchy_open_with_options()` - Open database with custom options
+- `matchy_init_open_options()` - Initialize option structure
+- `matchy_open_trusted()` - Open database (skip validation)
 - `matchy_close()` - Close database
-- `matchy_lookup()` - Query database
+- `matchy_query()` - Query database
+- `matchy_get_stats()` - Get database statistics
+- `matchy_clear_cache()` - Clear query cache
 
 ### Builder Operations
 - `matchy_builder_new()` - Create builder
@@ -156,6 +161,99 @@ matchy_lookup(db, "query1", &r1);
 // Thread 2 (safe!)
 matchy_result *r2 = NULL;
 matchy_lookup(db, "query2", &r2);
+```
+
+## Opening with Cache Options
+
+### Basic Opening (Default Cache)
+
+```c
+// Opens with default cache (10,000 entries)
+matchy_t *db = matchy_open("database.mxy");
+if (db == NULL) {
+    fprintf(stderr, "Failed to open database\n");
+    return 1;
+}
+```
+
+### Custom Cache Configuration
+
+```c
+// Initialize options structure
+matchy_open_options_t opts;
+matchy_init_open_options(&opts);
+
+// Configure cache and validation
+opts.cache_capacity = 100000;  // Large cache for high repetition
+opts.trusted = 1;              // Skip validation (faster)
+
+matchy_t *db = matchy_open_with_options("threats.mxy", &opts);
+if (db == NULL) {
+    fprintf(stderr, "Failed to open database\n");
+    return 1;
+}
+```
+
+### No Cache
+
+```c
+matchy_open_options_t opts;
+matchy_init_open_options(&opts);
+opts.cache_capacity = 0;  // Disable cache
+
+matchy_t *db = matchy_open_with_options("database.mxy", &opts);
+```
+
+### Get Statistics
+
+```c
+matchy_stats_t stats;
+matchy_get_stats(db, &stats);
+
+printf("Total queries: %llu\n", stats.total_queries);
+printf("Queries with match: %llu\n", stats.queries_with_match);
+printf("IP queries: %llu\n", stats.ip_queries);
+printf("String queries: %llu\n", stats.string_queries);
+
+// Calculate rates
+double cache_hit_rate = 0.0;
+if (stats.cache_hits + stats.cache_misses > 0) {
+    cache_hit_rate = (double)stats.cache_hits / 
+                     (stats.cache_hits + stats.cache_misses);
+}
+
+double match_rate = 0.0;
+if (stats.total_queries > 0) {
+    match_rate = (double)stats.queries_with_match / stats.total_queries;
+}
+
+printf("Cache hit rate: %.1f%%\n", cache_hit_rate * 100.0);
+printf("Match rate: %.1f%%\n", match_rate * 100.0);
+```
+
+### matchy_stats_t Structure
+
+```c
+typedef struct {
+    uint64_t total_queries;
+    uint64_t queries_with_match;
+    uint64_t queries_without_match;
+    uint64_t cache_hits;
+    uint64_t cache_misses;
+    uint64_t ip_queries;
+    uint64_t string_queries;
+} matchy_stats_t;
+```
+
+### Clear Cache
+
+```c
+// Do some queries (fills cache)
+matchy_result_t result = matchy_query(db, "example.com");
+matchy_free_result(&result);
+
+// Clear cache to force fresh lookups
+matchy_clear_cache(db);
 ```
 
 ## Complete Example

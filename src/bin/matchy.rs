@@ -54,6 +54,10 @@ enum Commands {
         /// Quiet mode - no output, only exit code (0 = found, 1 = not found)
         #[arg(short, long)]
         quiet: bool,
+
+        /// Trust database and skip UTF-8 validation (faster, only for trusted sources)
+        #[arg(long)]
+        trusted: bool,
     },
 
     /// Inspect a pattern database
@@ -159,6 +163,15 @@ enum Commands {
         #[arg(long)]
         trusted: bool,
 
+        /// LRU cache capacity (default: 10000, use 0 to disable)
+        #[arg(long, default_value = "10000")]
+        cache_size: usize,
+
+        /// Simulated cache hit rate percentage (0-100, default: 0 - all unique queries)
+        /// Set to 80-90 to simulate real-world log patterns where queries repeat
+        #[arg(long, default_value = "0")]
+        cache_hit_rate: usize,
+
         /// Pattern style for pattern benchmarks: prefix, suffix, mixed, or complex (default: complex)
         #[arg(long, default_value = "complex")]
         pattern_style: String,
@@ -196,7 +209,8 @@ fn main() -> Result<()> {
             database,
             query,
             quiet,
-        } => cmd_query(database, query, quiet),
+            trusted,
+        } => cmd_query(database, query, quiet, trusted),
         Commands::Inspect {
             database,
             json,
@@ -236,6 +250,8 @@ fn main() -> Result<()> {
             query_count,
             hit_rate,
             trusted,
+            cache_size,
+            cache_hit_rate,
             pattern_style,
         } => cmd_bench(
             db_type,
@@ -246,6 +262,8 @@ fn main() -> Result<()> {
             query_count,
             hit_rate,
             trusted,
+            cache_size,
+            cache_hit_rate,
             pattern_style,
         ),
     }
@@ -283,11 +301,18 @@ fn format_cidr(ip_str: &str, prefix_len: u8) -> String {
     }
 }
 
-fn cmd_query(database: PathBuf, query: String, quiet: bool) -> Result<()> {
+fn cmd_query(database: PathBuf, query: String, quiet: bool, trusted: bool) -> Result<()> {
     use matchy::{Database, QueryResult};
 
-    // Load database using unified API (supports IP, pattern, and combined formats)
-    let db = Database::open(database.to_str().unwrap())
+    // Load database using fluent API
+    let mut opener = Database::from(database.to_str().unwrap());
+
+    if trusted {
+        opener = opener.trusted();
+    }
+
+    let db = opener
+        .open()
         .with_context(|| format!("Failed to load database: {}", database.display()))?;
 
     // Perform the query (auto-detects IP vs pattern)
@@ -350,8 +375,9 @@ fn cmd_query(database: PathBuf, query: String, quiet: bool) -> Result<()> {
 fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()> {
     use matchy::Database;
 
-    // Load database using unified API
-    let db = Database::open(database.to_str().unwrap())
+    // Load database using fluent API
+    let db = Database::from(database.to_str().unwrap())
+        .open()
         .with_context(|| format!("Failed to load database: {}", database.display()))?;
 
     let format_str = db.format();
@@ -1085,6 +1111,8 @@ fn cmd_bench(
     query_count: usize,
     hit_rate: usize,
     trusted: bool,
+    cache_size: usize,
+    cache_hit_rate: usize,
     pattern_style: String,
 ) -> Result<()> {
     println!("=== Matchy Database Benchmark ===\n");
@@ -1093,7 +1121,27 @@ fn cmd_bench(
     println!("  Entry count:       {}", format_number(count));
     println!("  Load iterations:   {}", load_iterations);
     println!("  Query iterations:  {}", format_number(query_count));
-    println!("  Hit rate:          {}%", hit_rate);
+    println!(
+        "  Match rate:        {}% (queries that find entries)",
+        hit_rate
+    );
+    println!(
+        "  Cache size:        {}",
+        if cache_size == 0 {
+            "disabled".to_string()
+        } else {
+            format_number(cache_size)
+        }
+    );
+    println!(
+        "  Cache hit rate:    {}% (query repetition{})",
+        cache_hit_rate,
+        if cache_hit_rate == 0 {
+            " - worst case"
+        } else {
+            ""
+        }
+    );
     if db_type == "pattern" {
         println!("  Pattern style:     {}", pattern_style);
     }
@@ -1108,7 +1156,15 @@ fn cmd_bench(
         .unwrap_or_else(|| PathBuf::from(format!("/tmp/matchy_bench_{}_{}.mxy", db_type, count)));
 
     match db_type.as_str() {
-        "ip" => bench_ip_database(count, &temp_file, keep, load_iterations, query_count),
+        "ip" => bench_ip_database(
+            count,
+            &temp_file,
+            keep,
+            load_iterations,
+            query_count,
+            cache_size,
+            cache_hit_rate,
+        ),
         "literal" => bench_literal_database(
             count,
             &temp_file,
@@ -1117,6 +1173,8 @@ fn cmd_bench(
             query_count,
             hit_rate,
             trusted,
+            cache_size,
+            cache_hit_rate,
         ),
         "pattern" => bench_pattern_database(
             count,
@@ -1126,11 +1184,19 @@ fn cmd_bench(
             query_count,
             hit_rate,
             trusted,
+            cache_size,
+            cache_hit_rate,
             &pattern_style,
         ),
-        "combined" => {
-            bench_combined_database(count, &temp_file, keep, load_iterations, query_count)
-        }
+        "combined" => bench_combined_database(
+            count,
+            &temp_file,
+            keep,
+            load_iterations,
+            query_count,
+            cache_size,
+            cache_hit_rate,
+        ),
         _ => {
             anyhow::bail!(
                 "Unknown database type: {}. Use 'ip', 'literal', 'pattern', or 'combined'",
@@ -1180,6 +1246,8 @@ fn bench_ip_database(
     keep: bool,
     load_iterations: usize,
     query_count: usize,
+    cache_size: usize,
+    cache_hit_rate: usize,
 ) -> Result<()> {
     use matchy::glob::MatchMode;
     use matchy::mmdb_builder::MmdbBuilder;
@@ -1231,7 +1299,7 @@ fn bench_ip_database(
     let mut load_times = Vec::new();
     for i in 1..=load_iterations {
         let load_start = Instant::now();
-        let _db = Database::open(temp_file.to_str().unwrap())?;
+        let _db = Database::from(temp_file.to_str().unwrap()).open()?;
         let load_time = load_start.elapsed();
         load_times.push(load_time);
         println!(
@@ -1245,12 +1313,29 @@ fn bench_ip_database(
     println!();
 
     println!("--- Phase 4: Query Performance ---");
-    let db = Database::open(temp_file.to_str().unwrap())?;
+    let mut opener = Database::from(temp_file.to_str().unwrap());
+    if cache_size == 0 {
+        opener = opener.no_cache();
+    } else {
+        opener = opener.cache_capacity(cache_size);
+    }
+    let db = opener.open()?;
+
+    // Calculate unique query count to achieve target cache hit rate
+    let unique_queries = if cache_hit_rate >= 100 {
+        1 // All queries hit same entry
+    } else if cache_hit_rate == 0 {
+        query_count // Every query unique
+    } else {
+        let unique = query_count * (100 - cache_hit_rate) / 100;
+        unique.max(1)
+    };
+
     let bench_start = Instant::now();
     let mut found = 0;
 
     for i in 0..query_count {
-        let ip_num = ((i * 43) % count) as u32;
+        let ip_num = ((i * 43) % unique_queries.min(count)) as u32;
         let octet1 = (ip_num >> 24) & 0xFF;
         let octet2 = (ip_num >> 16) & 0xFF;
         let octet3 = (ip_num >> 8) & 0xFF;
@@ -1298,6 +1383,8 @@ fn bench_literal_database(
     query_count: usize,
     hit_rate: usize,
     trusted: bool,
+    cache_size: usize,
+    cache_hit_rate: usize,
 ) -> Result<()> {
     use matchy::glob::MatchMode;
     use matchy::mmdb_builder::MmdbBuilder;
@@ -1425,11 +1512,11 @@ fn bench_literal_database(
     let mut load_times = Vec::new();
     for i in 1..=load_iterations {
         let load_start = Instant::now();
-        let _db = if trusted {
-            Database::open_trusted(temp_file.to_str().unwrap())?
-        } else {
-            Database::open(temp_file.to_str().unwrap())?
-        };
+        let mut opener = Database::from(temp_file.to_str().unwrap());
+        if trusted {
+            opener = opener.trusted();
+        }
+        let _db = opener.open()?;
         let load_time = load_start.elapsed();
         load_times.push(load_time);
         println!(
@@ -1443,11 +1530,27 @@ fn bench_literal_database(
     println!();
 
     println!("--- Phase 4: Query Performance ---");
-    let db = if trusted {
-        Database::open_trusted(temp_file.to_str().unwrap())?
+    let mut opener = Database::from(temp_file.to_str().unwrap());
+    if trusted {
+        opener = opener.trusted();
+    }
+    if cache_size == 0 {
+        opener = opener.no_cache();
     } else {
-        Database::open(temp_file.to_str().unwrap())?
+        opener = opener.cache_capacity(cache_size);
+    }
+    let db = opener.open()?;
+
+    // Calculate unique query count to achieve target cache hit rate
+    let unique_queries = if cache_hit_rate >= 100 {
+        1 // All queries hit same entry
+    } else if cache_hit_rate == 0 {
+        query_count // Every query unique
+    } else {
+        let unique = query_count * (100 - cache_hit_rate) / 100;
+        unique.max(1)
     };
+
     let bench_start = Instant::now();
     let mut found = 0;
 
@@ -1463,15 +1566,18 @@ fn bench_literal_database(
     ];
 
     for i in 0..query_count {
+        // Use modulo to cycle through a limited pool of queries for cache hits
+        let query_idx = i % unique_queries;
+
         // Determine if this query should hit (match) based on hit_rate
-        let should_hit = (i * 100 / query_count) < hit_rate;
+        let should_hit = (query_idx * 100 / unique_queries) < hit_rate;
 
         let test_str = if !should_hit {
             // Generate non-matching query
-            format!("nomatch-query-string-{}", i)
+            format!("nomatch-query-string-{}", query_idx)
         } else {
             // Generate matching query - must exactly match one of the patterns
-            let pattern_id = (i * 43) % count;
+            let pattern_id = (query_idx * 43) % count;
 
             match pattern_id % 10 {
                 0 => {
@@ -1579,6 +1685,8 @@ fn bench_pattern_database(
     query_count: usize,
     hit_rate: usize,
     trusted: bool,
+    cache_size: usize,
+    cache_hit_rate: usize,
     pattern_style: &str,
 ) -> Result<()> {
     use matchy::glob::MatchMode;
@@ -1708,11 +1816,11 @@ fn bench_pattern_database(
     let mut load_times = Vec::new();
     for i in 1..=load_iterations {
         let load_start = Instant::now();
-        let _db = if trusted {
-            Database::open_trusted(temp_file.to_str().unwrap())?
-        } else {
-            Database::open(temp_file.to_str().unwrap())?
-        };
+        let mut opener = Database::from(temp_file.to_str().unwrap());
+        if trusted {
+            opener = opener.trusted();
+        }
+        let _db = opener.open()?;
         let load_time = load_start.elapsed();
         load_times.push(load_time);
         println!(
@@ -1726,11 +1834,16 @@ fn bench_pattern_database(
     println!();
 
     println!("--- Phase 4: Query Performance ---");
-    let db = if trusted {
-        Database::open_trusted(temp_file.to_str().unwrap())?
+    let mut opener = Database::from(temp_file.to_str().unwrap());
+    if trusted {
+        opener = opener.trusted();
+    }
+    if cache_size == 0 {
+        opener = opener.no_cache();
     } else {
-        Database::open(temp_file.to_str().unwrap())?
-    };
+        opener = opener.cache_capacity(cache_size);
+    }
+    let db = opener.open()?;
     let bench_start = Instant::now();
     let mut found = 0;
 
@@ -1745,16 +1858,29 @@ fn bench_pattern_database(
         "domain", "site", "server", "host", "web", "portal", "service", "cloud", "zone", "network",
     ];
 
+    // Generate a pool of queries for cache simulation
+    let unique_query_count = if cache_hit_rate == 0 {
+        query_count // All unique queries (worst case)
+    } else {
+        // Calculate how many unique queries we need to achieve target cache hit rate
+        // If cache_hit_rate is 80%, we want 20% unique queries
+        let unique_pct = 100 - cache_hit_rate;
+        (query_count * unique_pct / 100).max(1)
+    };
+
     for i in 0..query_count {
+        // Map query index to a unique query ID (for cache hit simulation)
+        let query_id = i % unique_query_count;
+
         // Determine if this query should hit (match) based on hit_rate
-        let should_hit = (i * 100 / query_count) < hit_rate;
+        let should_hit = (query_id * 100 / unique_query_count) < hit_rate;
 
         let test_str = if !should_hit {
             // Generate non-matching query (benign traffic)
-            format!("benign-clean-traffic-{}.legitimate-site.com", i)
+            format!("benign-clean-traffic-{}.legitimate-site.com", query_id)
         } else {
             // Generate matching query based on pattern_id and style
-            let pattern_id = (i * 43) % count;
+            let pattern_id = (query_id * 43) % count;
             let word = malicious_words[pattern_id % malicious_words.len()];
             let domain_word = domains[(pattern_id / 7) % domains.len()];
             let tld = tlds[pattern_id % tlds.len()];
@@ -1876,6 +2002,8 @@ fn bench_combined_database(
     keep: bool,
     load_iterations: usize,
     query_count: usize,
+    cache_size: usize,
+    cache_hit_rate: usize,
 ) -> Result<()> {
     use matchy::glob::MatchMode;
     use matchy::mmdb_builder::MmdbBuilder;
@@ -1963,7 +2091,7 @@ fn bench_combined_database(
     let mut load_times = Vec::new();
     for i in 1..=load_iterations {
         let load_start = Instant::now();
-        let _db = Database::open(temp_file.to_str().unwrap())?;
+        let _db = Database::from(temp_file.to_str().unwrap()).open()?;
         let load_time = load_start.elapsed();
         load_times.push(load_time);
         println!(
@@ -1977,7 +2105,23 @@ fn bench_combined_database(
     println!();
 
     println!("--- Phase 4: Query Performance ---");
-    let db = Database::open(temp_file.to_str().unwrap())?;
+    let mut opener = Database::from(temp_file.to_str().unwrap());
+    if cache_size == 0 {
+        opener = opener.no_cache();
+    } else {
+        opener = opener.cache_capacity(cache_size);
+    }
+    let db = opener.open()?;
+
+    // Calculate unique query count to achieve target cache hit rate
+    let unique_queries = if cache_hit_rate >= 100 {
+        1 // All queries hit same entry
+    } else if cache_hit_rate == 0 {
+        query_count // Every query unique
+    } else {
+        let unique = query_count * (100 - cache_hit_rate) / 100;
+        unique.max(1)
+    };
 
     // Query both IPs and patterns
     let bench_start = Instant::now();
@@ -1985,10 +2129,12 @@ fn bench_combined_database(
     let mut pattern_found = 0;
 
     let half_queries = query_count / 2;
+    let unique_half = unique_queries / 2;
 
     // Query IPs
     for i in 0..half_queries {
-        let ip_num = ((i * 43) % ip_count) as u32;
+        let query_idx = i % unique_half.max(1);
+        let ip_num = ((query_idx * 43) % ip_count) as u32;
         let octet1 = (ip_num >> 24) & 0xFF;
         let octet2 = (ip_num >> 16) & 0xFF;
         let octet3 = (ip_num >> 8) & 0xFF;
@@ -2002,7 +2148,8 @@ fn bench_combined_database(
 
     // Query patterns
     for i in 0..(query_count - half_queries) {
-        let pattern_id = (i * 43) % pattern_count;
+        let query_idx = i % unique_half.max(1);
+        let pattern_id = (query_idx * 43) % pattern_count;
         let test_str = if pattern_id.is_multiple_of(20) {
             // Match complex patterns (~5%)
             match (pattern_id / 20) % 4 {

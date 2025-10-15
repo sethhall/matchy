@@ -5,19 +5,57 @@ for a tutorial.
 
 ## Opening a Database
 
-```rust
+### Basic Opening
+
+```rust path=null start=null
 use matchy::Database;
 
-let db = Database::open("database.mxy")?;
+// Simple - uses defaults (cache enabled, validation on)
+let db = Database::from("database.mxy").open()?;
 ```
 
 The database is memory-mapped and loads in under 1 millisecond regardless of size.
 
-### Method Signature
+### Builder API
 
-```rust
-pub fn open<P: AsRef<Path>>(path: P) -> Result<Database, MatchyError>
+The recommended way to open databases uses the fluent builder API:
+
+```rust path=null start=null
+use matchy::Database;
+
+// With custom cache size
+let db = Database::from("database.mxy")
+    .cache_capacity(1000)
+    .open()?;
+
+// Performance mode (skip validation, large cache)
+let db = Database::from("threats.mxy")
+    .trusted()
+    .cache_capacity(100_000)
+    .open()?;
+
+// No cache (for unique queries)
+let db = Database::from("database.mxy")
+    .no_cache()
+    .open()?;
 ```
+
+### Builder Methods
+
+| Method | Description |
+|--------|-------------|
+| `.cache_capacity(size)` | Set LRU cache size (default: 10,000) |
+| `.no_cache()` | Disable caching entirely |
+| `.trusted()` | Skip UTF-8 validation (~15-20% faster) |
+| `.open()` | Load the database |
+
+**Cache Size Guidelines**:
+- `0` (via `.no_cache()`): No caching - best for diverse queries
+- `100-1000`: Good for moderate repetition
+- `10,000` (default): Optimal for typical workloads
+- `100,000+`: For very high repetition (80%+ hit rate)
+
+**Note**: Caching only benefits pattern lookups with high repetition. IP and literal lookups are already fast and don't benefit from caching.
 
 ### Error Handling
 
@@ -188,11 +226,91 @@ Query performance by entry type:
 
 See [Performance Considerations](../guide/performance.md) for details.
 
+## Database Statistics
+
+### Get Statistics
+
+Retrieve comprehensive statistics about database usage:
+
+```rust path=null start=null
+use matchy::Database;
+
+let db = Database::from("threats.mxy").open()?;
+
+// Do some queries
+db.lookup("1.2.3.4")?;
+db.lookup("example.com")?;
+db.lookup("test.com")?;
+
+// Get stats
+let stats = db.stats();
+println!("Total queries: {}", stats.total_queries);
+println!("Queries with match: {}", stats.queries_with_match);
+println!("Cache hit rate: {:.1}%", stats.cache_hit_rate() * 100.0);
+println!("Match rate: {:.1}%", stats.match_rate() * 100.0);
+println!("IP queries: {}", stats.ip_queries);
+println!("String queries: {}", stats.string_queries);
+```
+
+### DatabaseStats Structure
+
+```rust path=null start=null
+pub struct DatabaseStats {
+    pub total_queries: u64,
+    pub queries_with_match: u64,
+    pub queries_without_match: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub ip_queries: u64,
+    pub string_queries: u64,
+}
+
+impl DatabaseStats {
+    pub fn cache_hit_rate(&self) -> f64
+    pub fn match_rate(&self) -> f64
+}
+```
+
+**Helper Methods:**
+- `cache_hit_rate()` - Returns cache hit rate as a value from 0.0 to 1.0
+- `match_rate()` - Returns query match rate as a value from 0.0 to 1.0
+
+### Interpreting Statistics
+
+**Cache Performance:**
+- Hit rate < 50%: Consider disabling cache (`.no_cache()`)
+- Hit rate 50-80%: Cache is helping moderately
+- Hit rate > 80%: Cache is very effective
+
+**Query Distribution:**
+- High `ip_queries`: Database is being used for IP lookups
+- High `string_queries`: Database is being used for domain/pattern matching
+
+## Cache Management
+
+### Clear Cache
+
+Remove all cached query results:
+
+```rust path=null start=null
+use matchy::Database;
+
+let db = Database::from("threats.mxy").open()?;
+
+// Do some queries (fills cache)
+db.lookup("example.com")?;
+
+// Clear cache to force fresh lookups
+db.clear_cache();
+```
+
+Useful for benchmarking or when you need to ensure fresh lookups without reopening the database.
+
 ## Helper Methods
 
 ### Checking Entry Types
 
-```rust
+```rust path=null start=null
 if let Some(QueryResult::Ip { .. }) = result {
     // Handle IP match
 }

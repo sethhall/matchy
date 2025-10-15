@@ -129,7 +129,9 @@ pub mod c_api;
 // Re-exports for Rust consumers
 
 /// Unified database for IP and pattern lookups
-pub use crate::database::{Database, DatabaseError, QueryResult};
+pub use crate::database::{
+    Database, DatabaseError, DatabaseOpener, DatabaseOptions, DatabaseStats, QueryResult,
+};
 
 /// Data value type for database entries
 pub use crate::data_section::DataValue;
