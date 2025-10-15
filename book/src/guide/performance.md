@@ -300,6 +300,13 @@ let new_db = Database::open("threats.mxy")?;
 
 Old queries complete with the old database. New queries use the new database.
 
+## Profiling Your Own Code
+
+For developers working on Matchy or optimizing performance:
+
+- [Benchmarking Guide](../dev/benchmarking.md) - Memory and CPU profiling tools
+- [Testing Guide](../dev/testing.md) - Testing strategies
+
 ## Next Steps
 
 - [Database Concepts](database-concepts.md) - Understanding database structure

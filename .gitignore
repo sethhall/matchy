@@ -30,6 +30,12 @@ Thumbs.db
 /benchmarks/comparison_*/
 /benchmarks/baseline_*/
 
+# Profiling output files
+dhat-*.json
+flamegraph.svg
+perf.data
+*.trace
+
 # mdbook cmdrun wrapper (generated on build)
 /book/.cmdrun-wrapper/
 # Note: /book/command-outputs/ IS committed to repo
