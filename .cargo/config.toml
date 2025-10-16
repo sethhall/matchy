@@ -9,8 +9,9 @@
 #   cargo check-docs     - Build docs with warnings as errors
 #   cargo test-all       - Run all tests verbosely
 #   cargo test-doc       - Run doc tests
+#   cargo update-psl     - Update Public Suffi[alias]
+update-psl = "run --bin update-psl"
 
-[alias]
 # Individual CI checks (use these for quick iteration)
 check-fmt = "fmt --all -- --check"
 check-clippy = "clippy --all-targets --all-features -- -D warnings"

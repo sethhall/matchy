@@ -786,6 +786,35 @@ impl Paraglob {
         builder.build()
     }
 
+    /// Find all matches with their end positions in the text
+    ///
+    /// Returns (end_position, pattern_id) for each match.
+    /// The end_position is the byte offset immediately after the match.
+    pub fn find_matches_with_positions(&mut self, text: &str) -> Vec<(usize, u32)> {
+        let buffer = self.buffer.as_slice();
+        if buffer.is_empty() {
+            return Vec::new();
+        }
+
+        let (header_ref, _) = match Ref::<_, ParaglobHeader>::from_prefix(buffer) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        let header = *header_ref;
+
+        let ac_start = header.ac_nodes_offset as usize;
+        let ac_size = header.ac_edges_size as usize;
+
+        if ac_size == 0 {
+            return Vec::new();
+        }
+
+        let ac_buffer = &buffer[ac_start..ac_start + ac_size];
+        let mut matches = Vec::new();
+        Self::run_ac_matching_with_positions(ac_buffer, text.as_bytes(), self.mode, &mut matches);
+        matches
+    }
+    
     /// Find all matching pattern IDs
     pub fn find_all(&mut self, text: &str) -> Vec<u32> {
         let buffer = self.buffer.as_slice();
@@ -971,6 +1000,81 @@ impl Paraglob {
         matching_ids
     }
 
+    /// Run AC automaton matching with position tracking
+    fn run_ac_matching_with_positions(
+        ac_buffer: &[u8],
+        text: &[u8],
+        mode: GlobMatchMode,
+        matches: &mut Vec<(usize, u32)>,
+    ) {
+        use crate::offset_format::ACNode;
+
+        if ac_buffer.is_empty() || text.is_empty() {
+            return;
+        }
+
+        let mut current_offset = 0usize;
+
+        for (pos, &ch) in text.iter().enumerate() {
+            let search_ch = match mode {
+                GlobMatchMode::CaseInsensitive => ch.to_ascii_lowercase(),
+                GlobMatchMode::CaseSensitive => ch,
+            };
+
+            // Traverse to next state
+            loop {
+                if let Some(next_offset) =
+                    Self::find_ac_transition(ac_buffer, current_offset, search_ch)
+                {
+                    current_offset = next_offset;
+                    break;
+                }
+
+                if current_offset == 0 {
+                    break;
+                }
+
+                let node_slice = match ac_buffer.get(current_offset..) {
+                    Some(s) => s,
+                    None => break,
+                };
+                let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
+                    Ok((r, _)) => r,
+                    Err(_) => break,
+                };
+                let node = *node_ref;
+                current_offset = node.failure_offset as usize;
+            }
+
+            // Collect matches at this position (end of match is pos + 1)
+            let node_slice = match ac_buffer.get(current_offset..) {
+                Some(s) => s,
+                None => continue,
+            };
+            let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
+                Ok((r, _)) => r,
+                Err(_) => continue,
+            };
+            let node = *node_ref;
+
+            if node.pattern_count > 0 {
+                let patterns_offset = node.patterns_offset as usize;
+                let pattern_count = node.pattern_count as usize;
+
+                if patterns_offset + pattern_count * 4 <= ac_buffer.len() {
+                    let pattern_slice = &ac_buffer[patterns_offset..];
+                    if let Ok((ids_ref, _)) =
+                        Ref::<_, [u32]>::from_prefix_with_elems(pattern_slice, pattern_count)
+                    {
+                        for &pattern_id in ids_ref.iter() {
+                            matches.push((pos + 1, pattern_id));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     /// Run AC automaton matching on the offset-based buffer
     /// Writes AC literal IDs into the provided HashSet (avoids allocation)
     fn run_ac_matching_into_static(
