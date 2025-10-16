@@ -4,13 +4,105 @@ use matchy::DataValue;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Instant;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
+/// Zero-copy line scanner using memchr for SIMD-accelerated scanning.
+/// Reuses a provided buffer to avoid allocations. Handles partial lines at buffer boundaries.
+struct LineScanner<R: io::BufRead> {
+    reader: R,
+    partial: Vec<u8>,
+    eof: bool,
+}
+
+impl<R: io::BufRead> LineScanner<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            partial: Vec::new(),
+            eof: false,
+        }
+    }
+
+    /// Trim ASCII whitespace from both ends of a byte slice
+    fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
+        while !bytes.is_empty() && bytes[0].is_ascii_whitespace() {
+            bytes = &bytes[1..];
+        }
+        while !bytes.is_empty() && bytes[bytes.len() - 1].is_ascii_whitespace() {
+            bytes = &bytes[..bytes.len() - 1];
+        }
+        bytes
+    }
+
+    /// Read next line into the provided buffer (zero-copy when possible).
+    /// Returns Ok(true) if a line was read, Ok(false) on EOF, Err on I/O error.
+    fn read_line(&mut self, line_buf: &mut Vec<u8>) -> io::Result<bool> {
+        line_buf.clear();
+
+        loop {
+            if self.eof {
+                // Handle final partial line if any
+                if !self.partial.is_empty() {
+                    let trimmed = Self::trim_ascii(&self.partial);
+                    if !trimmed.is_empty() {
+                        line_buf.extend_from_slice(trimmed);
+                        self.partial.clear();
+                        return Ok(true);
+                    }
+                    self.partial.clear();
+                }
+                return Ok(false);
+            }
+
+            let buffer = self.reader.fill_buf()?;
+
+            if buffer.is_empty() {
+                self.eof = true;
+                continue;
+            }
+
+            // Scan for newline using memchr
+            if let Some(newline_pos) = memchr::memchr(b'\n', buffer) {
+                // Found complete line
+                if self.partial.is_empty() {
+                    // Fast path: line is entirely in buffer, no allocation
+                    let trimmed = Self::trim_ascii(&buffer[..newline_pos]);
+                    if !trimmed.is_empty() {
+                        line_buf.extend_from_slice(trimmed);
+                        self.reader.consume(newline_pos + 1);
+                        return Ok(true);
+                    }
+                } else {
+                    // Append to partial line from previous chunk
+                    self.partial.extend_from_slice(&buffer[..newline_pos]);
+                    let trimmed = Self::trim_ascii(&self.partial);
+                    if !trimmed.is_empty() {
+                        line_buf.extend_from_slice(trimmed);
+                    }
+                    self.partial.clear();
+                    self.reader.consume(newline_pos + 1);
+                    if !line_buf.is_empty() {
+                        return Ok(true);
+                    }
+                }
+
+                // Empty line, consume and continue
+                self.reader.consume(newline_pos + 1);
+            } else {
+                // No newline in buffer - accumulate and continue
+                self.partial.extend_from_slice(buffer);
+                let consumed = buffer.len();
+                self.reader.consume(consumed);
+            }
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "matchy")]
@@ -413,14 +505,16 @@ fn cmd_match(
         eprintln!("[INFO] Extractor configured for: {}", extracting.join(", "));
     }
 
-    // Read input (file or stdin) into buffer
-    let mut buffer = Vec::new();
-    if input.to_str() == Some("-") {
-        io::stdin().read_to_end(&mut buffer)?;
+    // Open input for streaming (file or stdin) with 128KB buffer
+    const BUFFER_SIZE: usize = 128 * 1024; // 128KB - optimal for log file processing
+    let reader: Box<dyn io::BufRead> = if input.to_str() == Some("-") {
+        Box::new(io::BufReader::with_capacity(BUFFER_SIZE, io::stdin()))
     } else {
-        fs::File::open(&input)
-            .with_context(|| format!("Failed to open input file: {}", input.display()))?
-            .read_to_end(&mut buffer)?;
+        Box::new(io::BufReader::with_capacity(
+            BUFFER_SIZE,
+            fs::File::open(&input)
+                .with_context(|| format!("Failed to open input file: {}", input.display()))?,
+        ))
     };
 
     let mut lines_processed = 0;
@@ -441,136 +535,136 @@ fn cmd_match(
     let overall_start = Instant::now();
     let output_json = format == "json";
 
+    // Get base timestamp once, use monotonic clock for offsets (avoids syscalls)
+    let base_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+
+    // Sampling: Only measure timing every Nth line/candidate to reduce Instant::now() overhead
+    const SAMPLE_INTERVAL: usize = 100;
+
     if show_stats {
         eprintln!("[INFO] Processing stdin...");
     }
 
-    // Process lines using memchr for fast line splitting
-    let mut start = 0;
-    while start < buffer.len() {
-        let line_end = memchr::memchr(b'\n', &buffer[start..])
-            .map(|pos| start + pos)
-            .unwrap_or(buffer.len());
+    // Process lines using LineScanner (zero-copy streaming + memchr)
+    let mut scanner = LineScanner::new(reader);
+    let mut line_buf = Vec::new(); // Reusable buffer, grows once to max line size
 
-        let mut line_bytes = &buffer[start..line_end];
+    while scanner.read_line(&mut line_buf)? {
+        lines_processed += 1;
+        total_bytes += line_buf.len();
 
-        // Trim whitespace from byte slice
-        while !line_bytes.is_empty() && line_bytes[0].is_ascii_whitespace() {
-            line_bytes = &line_bytes[1..];
+        // Calculate timestamp from monotonic clock offset (no syscall)
+        let timestamp = if output_json {
+            base_timestamp + overall_start.elapsed().as_secs_f64()
+        } else {
+            0.0 // Not used
+        };
+
+        // Extract candidates from the line
+        let extract_start = if show_stats && lines_processed % SAMPLE_INTERVAL == 0 {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let extracted = extractor.extract_from_line(&line_buf);
+        if let Some(start) = extract_start {
+            extraction_time += start.elapsed();
         }
-        while !line_bytes.is_empty() && line_bytes[line_bytes.len() - 1].is_ascii_whitespace() {
-            line_bytes = &line_bytes[..line_bytes.len() - 1];
-        }
 
-        if !line_bytes.is_empty() {
-            lines_processed += 1;
-            total_bytes += line_bytes.len();
+        let mut line_had_match = false;
 
-            // Extract candidates from the line
-            let extract_start = Instant::now();
-            let extracted = extractor.extract_from_line(line_bytes);
+        // Test each candidate
+        for item in extracted {
+            candidates_tested += 1;
+
+            // Track candidate types if stats enabled
             if show_stats {
-                extraction_time += extract_start.elapsed();
+                match &item.item {
+                    matchy::extractor::ExtractedItem::Ipv4(_) => ipv4_count += 1,
+                    matchy::extractor::ExtractedItem::Ipv6(_) => ipv6_count += 1,
+                    matchy::extractor::ExtractedItem::Domain(_) => domain_count += 1,
+                    matchy::extractor::ExtractedItem::Email(_) => email_count += 1,
+                    matchy::extractor::ExtractedItem::Url(_) => url_count += 1,
+                }
             }
 
-            let mut line_had_match = false;
-
-            // Test each candidate
-            for item in extracted {
-                candidates_tested += 1;
-
-                // Track candidate types if stats enabled
-                if show_stats {
-                    match &item.item {
-                        matchy::extractor::ExtractedItem::Ipv4(_) => ipv4_count += 1,
-                        matchy::extractor::ExtractedItem::Ipv6(_) => ipv6_count += 1,
-                        matchy::extractor::ExtractedItem::Domain(_) => domain_count += 1,
-                        matchy::extractor::ExtractedItem::Email(_) => email_count += 1,
-                        matchy::extractor::ExtractedItem::Url(_) => url_count += 1,
-                    }
+            // Lookup candidate (use specialized IP lookup to avoid string conversion)
+            let lookup_start = if show_stats && candidates_tested % SAMPLE_INTERVAL == 0 {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            let (result, candidate_str) = match &item.item {
+                // IP addresses: use direct lookup_ip (no string conversion needed)
+                matchy::extractor::ExtractedItem::Ipv4(ip) => {
+                    (db.lookup_ip(IpAddr::V4(*ip))?, ip.to_string())
                 }
-
-                // Lookup candidate (use specialized IP lookup to avoid string conversion)
-                let lookup_start = Instant::now();
-                let (result, candidate_str) = match &item.item {
-                    // IP addresses: use direct lookup_ip (no string conversion needed)
-                    matchy::extractor::ExtractedItem::Ipv4(ip) => {
-                        (db.lookup_ip(IpAddr::V4(*ip))?, ip.to_string())
-                    }
-                    matchy::extractor::ExtractedItem::Ipv6(ip) => {
-                        (db.lookup_ip(IpAddr::V6(*ip))?, ip.to_string())
-                    }
-                    // String patterns: use regular lookup
-                    matchy::extractor::ExtractedItem::Domain(s) => (db.lookup(s)?, s.to_string()),
-                    matchy::extractor::ExtractedItem::Email(s) => (db.lookup(s)?, s.to_string()),
-                    matchy::extractor::ExtractedItem::Url(s) => (db.lookup(s)?, s.to_string()),
-                };
-                if show_stats {
-                    lookup_time += lookup_start.elapsed();
+                matchy::extractor::ExtractedItem::Ipv6(ip) => {
+                    (db.lookup_ip(IpAddr::V6(*ip))?, ip.to_string())
                 }
+                // String patterns: use regular lookup
+                matchy::extractor::ExtractedItem::Domain(s) => (db.lookup(s)?, s.to_string()),
+                matchy::extractor::ExtractedItem::Email(s) => (db.lookup(s)?, s.to_string()),
+                matchy::extractor::ExtractedItem::Url(s) => (db.lookup(s)?, s.to_string()),
+            };
+            if let Some(start) = lookup_start {
+                lookup_time += start.elapsed();
+            }
 
-                let is_match = match &result {
-                    Some(matchy::QueryResult::Pattern { pattern_ids, .. }) => {
-                        !pattern_ids.is_empty()
-                    }
-                    Some(matchy::QueryResult::Ip { .. }) => true,
-                    _ => false,
-                };
+            let is_match = match &result {
+                Some(matchy::QueryResult::Pattern { pattern_ids, .. }) => !pattern_ids.is_empty(),
+                Some(matchy::QueryResult::Ip { .. }) => true,
+                _ => false,
+            };
 
-                if is_match {
-                    if !line_had_match {
-                        lines_with_matches += 1; // Only count the line once
-                        line_had_match = true;
-                    }
-                    total_matches += 1;
+            if is_match {
+                if !line_had_match {
+                    lines_with_matches += 1; // Only count the line once
+                    line_had_match = true;
+                }
+                total_matches += 1;
 
-                    // Output match to stdout as NDJSON
-                    if output_json {
-                        let timestamp = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs_f64();
+                // Output match to stdout as NDJSON
+                if output_json {
+                    let mut match_obj = json!({
+                        "timestamp": format!("{:.3}", timestamp),
+                        "line_number": lines_processed,
+                        "matched_text": candidate_str,
+                        "input_line": String::from_utf8_lossy(&line_buf),
+                    });
 
-                        let mut match_obj = json!({
-                            "timestamp": format!("{:.3}", timestamp),
-                            "line_number": lines_processed,
-                            "matched_text": candidate_str,
-                            "input_line": String::from_utf8_lossy(line_bytes),
-                        });
-
-                        // Add match-specific fields
-                        match &result {
-                            Some(matchy::QueryResult::Pattern { pattern_ids, data }) => {
-                                match_obj["match_type"] = json!("pattern");
-                                match_obj["pattern_count"] = json!(pattern_ids.len());
-                                if !data.is_empty() {
-                                    let data_json: Vec<_> = data
-                                        .iter()
-                                        .filter_map(|d| d.as_ref().map(data_value_to_json))
-                                        .collect();
-                                    if !data_json.is_empty() {
-                                        match_obj["data"] = json!(data_json);
-                                    }
+                    // Add match-specific fields
+                    match &result {
+                        Some(matchy::QueryResult::Pattern { pattern_ids, data }) => {
+                            match_obj["match_type"] = json!("pattern");
+                            match_obj["pattern_count"] = json!(pattern_ids.len());
+                            if !data.is_empty() {
+                                let data_json: Vec<_> = data
+                                    .iter()
+                                    .filter_map(|d| d.as_ref().map(data_value_to_json))
+                                    .collect();
+                                if !data_json.is_empty() {
+                                    match_obj["data"] = json!(data_json);
                                 }
                             }
-                            Some(matchy::QueryResult::Ip { data, prefix_len }) => {
-                                match_obj["match_type"] = json!("ip");
-                                match_obj["prefix_len"] = json!(prefix_len);
-                                match_obj["cidr"] = json!(format_cidr(&candidate_str, *prefix_len));
-                                match_obj["data"] = data_value_to_json(data);
-                            }
-                            _ => {}
                         }
-
-                        // Write to stdout
-                        println!("{}", serde_json::to_string(&match_obj)?);
+                        Some(matchy::QueryResult::Ip { data, prefix_len }) => {
+                            match_obj["match_type"] = json!("ip");
+                            match_obj["prefix_len"] = json!(prefix_len);
+                            match_obj["cidr"] = json!(format_cidr(&candidate_str, *prefix_len));
+                            match_obj["data"] = data_value_to_json(data);
+                        }
+                        _ => {}
                     }
+
+                    // Write to stdout
+                    println!("{}", serde_json::to_string(&match_obj)?);
                 }
             }
         }
-
-        // Move to next line
-        start = line_end + 1;
     }
 
     let overall_elapsed = overall_start.elapsed();
@@ -623,7 +717,7 @@ fn cmd_match(
         );
         eprintln!("[INFO] Total time: {:.2}s", overall_elapsed.as_secs_f64());
         eprintln!(
-            "[INFO] Extraction time: {:.2}s ({:.2}µs per line)",
+            "[INFO] Extraction time (sampled): {:.2}s ({:.2}µs per line)",
             extraction_time.as_secs_f64(),
             if lines_processed > 0 {
                 extraction_time.as_nanos() as f64 / 1000.0 / lines_processed as f64
@@ -632,7 +726,7 @@ fn cmd_match(
             }
         );
         eprintln!(
-            "[INFO] Lookup time: {:.2}s ({:.2}µs per candidate)",
+            "[INFO] Lookup time (sampled): {:.2}s ({:.2}µs per candidate)",
             lookup_time.as_secs_f64(),
             if candidates_tested > 0 {
                 lookup_time.as_nanos() as f64 / 1000.0 / candidates_tested as f64
