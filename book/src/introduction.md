@@ -1,5 +1,8 @@
 <div style="text-align: center; margin: 2em 0;">
-  <img src="images/logo.jpg" alt="Matchy Logo" style="width: 180px; height: 180px; border-radius: 16px;" />
+  <picture>
+    <source srcset="../theme/logo-dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="../theme/logo-light.svg" alt="Matchy Logo" style="width: 180px;" />
+  </picture>
 </div>
 
 # The Matchy Book
