@@ -451,9 +451,9 @@ fn cmd_match(
         let line_end = memchr::memchr(b'\n', &buffer[start..])
             .map(|pos| start + pos)
             .unwrap_or(buffer.len());
-        
+
         let mut line_bytes = &buffer[start..line_end];
-        
+
         // Trim whitespace from byte slice
         while !line_bytes.is_empty() && line_bytes[0].is_ascii_whitespace() {
             line_bytes = &line_bytes[1..];
@@ -461,7 +461,7 @@ fn cmd_match(
         while !line_bytes.is_empty() && line_bytes[line_bytes.len() - 1].is_ascii_whitespace() {
             line_bytes = &line_bytes[..line_bytes.len() - 1];
         }
-        
+
         if !line_bytes.is_empty() {
             lines_processed += 1;
             total_bytes += line_bytes.len();
@@ -469,7 +469,9 @@ fn cmd_match(
             // Extract candidates from the line
             let extract_start = Instant::now();
             let extracted = extractor.extract_from_line(line_bytes);
-            extraction_time += extract_start.elapsed();
+            if show_stats {
+                extraction_time += extract_start.elapsed();
+            }
 
             let mut line_had_match = false;
 
@@ -503,11 +505,14 @@ fn cmd_match(
                     matchy::extractor::ExtractedItem::Email(s) => (db.lookup(s)?, s.to_string()),
                     matchy::extractor::ExtractedItem::Url(s) => (db.lookup(s)?, s.to_string()),
                 };
-                let elapsed = lookup_start.elapsed();
-                lookup_time += elapsed;
+                if show_stats {
+                    lookup_time += lookup_start.elapsed();
+                }
 
                 let is_match = match &result {
-                    Some(matchy::QueryResult::Pattern { pattern_ids, .. }) => !pattern_ids.is_empty(),
+                    Some(matchy::QueryResult::Pattern { pattern_ids, .. }) => {
+                        !pattern_ids.is_empty()
+                    }
                     Some(matchy::QueryResult::Ip { .. }) => true,
                     _ => false,
                 };
@@ -563,7 +568,7 @@ fn cmd_match(
                 }
             }
         }
-        
+
         // Move to next line
         start = line_end + 1;
     }

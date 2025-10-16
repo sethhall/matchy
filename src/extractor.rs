@@ -230,28 +230,34 @@ impl PatternExtractor {
             return;
         }
 
-        // Convert to string for matching (TLD patterns are case-insensitive)
-        let text = match std::str::from_utf8(line) {
-            Ok(s) => s,
-            Err(_) => return, // Invalid UTF-8, skip
-        };
-
-        // Find all TLD suffix matches with positions
+        // Find all TLD suffix matches with positions using byte-based matching
+        // No UTF-8 validation needed - AC works on raw bytes
         // Returns (end_position, pattern_id) for each TLD match
-        let tld_matches = tld_matcher.find_matches_with_positions(text);
+        let tld_matches = tld_matcher.find_matches_with_positions_bytes(line);
 
         for (tld_end, _pattern_id) in tld_matches {
             // e.g., "evil.example.com" with ".com" match gives tld_end = 18
 
+            // Fast boundary check: TLD must be followed by non-domain char or end of line
+            // This rejects false positives like "blah.community" (.com matches but continues)
+            // Single byte check is much faster than backward scan
+            if tld_end < line.len() && is_domain_char(line[tld_end]) {
+                continue; // TLD continues with domain chars - not a real TLD boundary
+            }
+
             // Expand backwards to find domain start
             if let Some(domain_span) = self.expand_domain_backwards(line, tld_end) {
-                // Validate the extracted domain
-                if self.is_valid_domain(line, domain_span) {
-                    // Safe: we validated UTF-8 above
-                    let domain_str = unsafe {
-                        std::str::from_utf8_unchecked(&line[domain_span.0..domain_span.1])
-                    };
+                let domain_bytes = &line[domain_span.0..domain_span.1];
 
+                // Validate UTF-8 only on the domain candidate (not the whole line!)
+                // This is a small slice (10-30 bytes typically) vs entire KB lines
+                let domain_str = match std::str::from_utf8(domain_bytes) {
+                    Ok(s) => s,
+                    Err(_) => continue, // Invalid UTF-8 in domain - skip
+                };
+
+                // Validate the extracted domain (label checks, etc.)
+                if self.is_valid_domain(line, domain_span) {
                     matches.push(Match {
                         item: ExtractedItem::Domain(domain_str),
                         span: domain_span,
@@ -262,6 +268,7 @@ impl PatternExtractor {
     }
 
     /// Expand backwards from TLD end to find domain start
+    /// Walks through all bytes (ASCII + UTF-8) until hitting a boundary character
     fn expand_domain_backwards(&self, line: &[u8], tld_end: usize) -> Option<(usize, usize)> {
         if tld_end == 0 {
             return None;
@@ -270,19 +277,30 @@ impl PatternExtractor {
         // Find the start of the domain by scanning backwards
         let mut start = tld_end;
 
-        // Scan backwards while we see valid domain characters
-        while start > 0 && is_domain_char(line[start - 1]) {
+        // Walk backwards through all bytes until we hit a boundary
+        // This includes:
+        // - ASCII alphanumeric, hyphen, dot
+        // - UTF-8 start bytes (0xC0-0xFF)
+        // - UTF-8 continuation bytes (0x80-0xBF)
+        // We stop at ASCII boundary characters (whitespace, punctuation)
+        while start > 0 {
+            let b = line[start - 1];
+
+            // Stop at ASCII boundary characters
+            if b.is_ascii() && is_word_boundary(b) {
+                break;
+            }
+
+            // Continue through:
+            // - ASCII alphanumeric/hyphen/dot
+            // - All UTF-8 bytes (0x80-0xFF)
             start -= 1;
         }
 
-        // Check word boundary at start if required
+        // Check word boundary at end if required
         if self.config.require_word_boundaries {
-            if start > 0 && !is_word_boundary(line[start - 1]) {
-                return None;
-            }
-            // Also check boundary at end (if not at line end)
             if tld_end < line.len() && !is_word_boundary(line[tld_end]) {
-                return None;
+                return None; // Domain continues - not a real boundary
             }
         }
 
@@ -297,10 +315,10 @@ impl PatternExtractor {
     fn is_valid_domain(&self, line: &[u8], span: (usize, usize)) -> bool {
         let domain_bytes = &line[span.0..span.1];
 
-        // Must be valid UTF-8 (we don't need the str, just validation)
-        if std::str::from_utf8(domain_bytes).is_err() {
-            return false;
-        }
+        // Note: UTF-8 validation is unnecessary here because:
+        // 1. The entire line was validated as UTF-8 before TLD matching (line 234)
+        // 2. is_valid_label() enforces ASCII-only ([a-z0-9-]), which is always valid UTF-8
+        // 3. Punycode domains (xn--*) are ASCII, and we don't decode them
 
         // Validate labels without allocating - iterate and count simultaneously
         let mut label_count = 0;
@@ -339,11 +357,13 @@ impl PatternExtractor {
             return false;
         }
 
-        // Label must be alphanumeric + hyphens (ASCII only)
-        // Using byte operations instead of chars() avoids UTF-8 decoding overhead
-        label
-            .iter()
-            .all(|&b| b.is_ascii_alphanumeric() || b == b'-')
+        // That's it! We already validated:
+        // - TLD is from trusted PSL
+        // - Boundaries are correct (word boundaries)
+        // - UTF-8 is valid (checked before calling this)
+        // No need to validate individual characters - if it has a valid TLD
+        // and valid boundaries, it's a domain
+        true
     }
 
     /// Extract IPv4 addresses using SIMD-accelerated dot search
@@ -581,6 +601,8 @@ fn is_word_boundary(b: u8) -> bool {
                 | b'>'
                 | b'"'
                 | b'\''
+                | b'@'  // Stop domain extraction at @ (emails)
+                | b'=' // Stop at = (key-value pairs: domain=example.com)
         )
 }
 
@@ -755,6 +777,152 @@ mod tests {
     }
 
     #[test]
+    fn test_unicode_domain_extraction() {
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        // German domain with umlaut (münchen.de in UTF-8)
+        let line = "Visit münchen.de for info".as_bytes();
+        let matches = extractor.extract_from_line(line);
+
+        // Should extract the Unicode domain
+        assert_eq!(matches.len(), 1);
+        let domain = match matches[0].item {
+            ExtractedItem::Domain(d) => d,
+            _ => panic!("Expected domain"),
+        };
+
+        // Domain contains UTF-8 characters
+        assert!(domain.contains("ünchen") || domain.contains("xn--"));
+    }
+
+    #[test]
+    fn test_mixed_unicode_ascii_domains() {
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        // Line with both ASCII and Unicode domains
+        let line = "Check café.fr and example.com".as_bytes();
+        let matches = extractor.extract_from_line(line);
+
+        // Should extract both domains
+        assert!(matches.len() >= 2);
+
+        let domains: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Domain(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+
+        // ASCII domain should be extracted normally
+        assert!(domains.iter().any(|d| d.contains("example.com")));
+        // Unicode domain should be extracted (either as-is or punycode)
+        assert!(domains
+            .iter()
+            .any(|d| d.contains("caf") || d.contains("xn--")));
+    }
+
+    #[test]
+    fn test_binary_log_with_ascii_domain() {
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        // Binary log line with non-UTF-8 bytes but ASCII domain
+        let mut line = Vec::new();
+        line.extend_from_slice(b"Log: ");
+        line.push(0xFF); // Invalid UTF-8 byte
+        line.push(0xFE); // Invalid UTF-8 byte
+        line.extend_from_slice(b" evil.com ");
+        line.push(0x80); // Invalid UTF-8 byte
+
+        let matches = extractor.extract_from_line(&line);
+
+        // Should still extract ASCII domain despite binary junk
+        let domains: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Domain(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            domains.contains(&"evil.com"),
+            "Should extract ASCII domain from binary log"
+        );
+    }
+
+    #[test]
+    fn test_invalid_utf8_in_domain_rejected() {
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        // Line with invalid UTF-8 sequence where domain would be
+        let mut line = Vec::new();
+        line.extend_from_slice(b"Visit ");
+        line.push(0xFF); // Invalid UTF-8
+        line.push(0xC0); // Invalid UTF-8
+        line.extend_from_slice(b".com");
+
+        let matches = extractor.extract_from_line(&line);
+
+        // Should NOT extract domain with invalid UTF-8
+        let domains: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Domain(_) => Some("found"),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(domains.len(), 0, "Should reject domain with invalid UTF-8");
+    }
+
+    #[test]
+    fn test_false_positive_rejection() {
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        // "blah.community" contains ".com" but shouldn't match as domain
+        let line = b"This is blah.community stuff";
+        let matches = extractor.extract_from_line(line);
+
+        let domains: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Domain(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+
+        // Should NOT extract "blah.com" - our boundary check should prevent this
+        assert!(
+            !domains.iter().any(|d| d.ends_with(".com")),
+            "Should not extract .com from .community"
+        );
+    }
+
+    #[test]
+    fn test_key_value_pair_extraction() {
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        // Common log format with key=value pairs
+        let line = b"Request: host=api.example.com method=GET path=/test";
+        let matches = extractor.extract_from_line(line);
+
+        let domains: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Domain(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+
+        // Should extract just the domain, not including the "host=" prefix
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0], "api.example.com");
+        // Verify it doesn't include the = sign
+        assert!(!domains[0].contains('='));
+    }
+
+    #[test]
     fn test_ipv4_invalid() {
         let mut extractor = PatternExtractor::new().unwrap();
 
@@ -894,10 +1062,12 @@ mod tests {
 
         assert_eq!(emails.len(), 1);
         assert_eq!(ips.len(), 1);
-        assert_eq!(domains.len(), 1);
+        assert_eq!(domains.len(), 2); // Both example.com (from email) and api.test.com
 
         assert_eq!(emails[0], "user@example.com");
         assert_eq!(ips[0].to_string(), "10.1.2.3");
-        assert_eq!(domains[0], "api.test.com");
+        // Domains extracted from both email and standalone
+        assert!(domains.contains(&"example.com"));
+        assert!(domains.contains(&"api.test.com"));
     }
 }

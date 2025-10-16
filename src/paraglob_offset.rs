@@ -791,6 +791,17 @@ impl Paraglob {
     /// Returns (end_position, pattern_id) for each match.
     /// The end_position is the byte offset immediately after the match.
     pub fn find_matches_with_positions(&mut self, text: &str) -> Vec<(usize, u32)> {
+        self.find_matches_with_positions_bytes(text.as_bytes())
+    }
+
+    /// Find all matches with their end positions in raw bytes
+    ///
+    /// Returns (end_position, pattern_id) for each match.
+    /// The end_position is the byte offset immediately after the match.
+    ///
+    /// This method works directly on byte slices without requiring UTF-8 validation.
+    /// Useful for processing binary logs or avoiding whole-line UTF-8 validation overhead.
+    pub fn find_matches_with_positions_bytes(&mut self, text: &[u8]) -> Vec<(usize, u32)> {
         let buffer = self.buffer.as_slice();
         if buffer.is_empty() {
             return Vec::new();
@@ -811,7 +822,7 @@ impl Paraglob {
 
         let ac_buffer = &buffer[ac_start..ac_start + ac_size];
         let mut matches = Vec::new();
-        Self::run_ac_matching_with_positions(ac_buffer, text.as_bytes(), self.mode, &mut matches);
+        Self::run_ac_matching_with_positions(ac_buffer, text, self.mode, &mut matches);
         matches
     }
 
