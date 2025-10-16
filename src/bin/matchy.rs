@@ -4,7 +4,7 @@ use matchy::DataValue;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -346,7 +346,6 @@ fn cmd_match(
 ) -> Result<()> {
     use matchy::extractor::PatternExtractor;
     use matchy::Database;
-    use std::io::Write;
 
     // Load database
     let load_start = Instant::now();
@@ -414,13 +413,14 @@ fn cmd_match(
         eprintln!("[INFO] Extractor configured for: {}", extracting.join(", "));
     }
 
-    // Open input (file or stdin)
-    let reader: Box<dyn io::BufRead> = if input.to_str() == Some("-") {
-        Box::new(io::BufReader::new(io::stdin()))
+    // Read input (file or stdin) into buffer
+    let mut buffer = Vec::new();
+    if input.to_str() == Some("-") {
+        io::stdin().read_to_end(&mut buffer)?;
     } else {
-        Box::new(io::BufReader::new(fs::File::open(&input).with_context(
-            || format!("Failed to open input file: {}", input.display()),
-        )?))
+        fs::File::open(&input)
+            .with_context(|| format!("Failed to open input file: {}", input.display()))?
+            .read_to_end(&mut buffer)?;
     };
 
     let mut lines_processed = 0;
@@ -445,112 +445,127 @@ fn cmd_match(
         eprintln!("[INFO] Processing stdin...");
     }
 
-    for line in reader.lines() {
-        let text = line?;
-        let text = text.trim();
-        if text.is_empty() || text.starts_with('#') {
-            continue;
+    // Process lines using memchr for fast line splitting
+    let mut start = 0;
+    while start < buffer.len() {
+        let line_end = memchr::memchr(b'\n', &buffer[start..])
+            .map(|pos| start + pos)
+            .unwrap_or(buffer.len());
+        
+        let mut line_bytes = &buffer[start..line_end];
+        
+        // Trim whitespace from byte slice
+        while !line_bytes.is_empty() && line_bytes[0].is_ascii_whitespace() {
+            line_bytes = &line_bytes[1..];
         }
+        while !line_bytes.is_empty() && line_bytes[line_bytes.len() - 1].is_ascii_whitespace() {
+            line_bytes = &line_bytes[..line_bytes.len() - 1];
+        }
+        
+        if !line_bytes.is_empty() {
+            lines_processed += 1;
+            total_bytes += line_bytes.len();
 
-        lines_processed += 1;
-        total_bytes += text.len();
+            // Extract candidates from the line
+            let extract_start = Instant::now();
+            let extracted = extractor.extract_from_line(line_bytes);
+            extraction_time += extract_start.elapsed();
 
-        // Extract candidates from the line
-        let extract_start = Instant::now();
-        let extracted = extractor.extract_from_line(text.as_bytes());
-        extraction_time += extract_start.elapsed();
+            let mut line_had_match = false;
 
-        let mut line_had_match = false;
+            // Test each candidate
+            for item in extracted {
+                candidates_tested += 1;
 
-        // Test each candidate
-        for item in extracted {
-            candidates_tested += 1;
-
-            // Track candidate types if stats enabled
-            if show_stats {
-                match &item.item {
-                    matchy::extractor::ExtractedItem::Ipv4(_) => ipv4_count += 1,
-                    matchy::extractor::ExtractedItem::Ipv6(_) => ipv6_count += 1,
-                    matchy::extractor::ExtractedItem::Domain(_) => domain_count += 1,
-                    matchy::extractor::ExtractedItem::Email(_) => email_count += 1,
-                    matchy::extractor::ExtractedItem::Url(_) => url_count += 1,
+                // Track candidate types if stats enabled
+                if show_stats {
+                    match &item.item {
+                        matchy::extractor::ExtractedItem::Ipv4(_) => ipv4_count += 1,
+                        matchy::extractor::ExtractedItem::Ipv6(_) => ipv6_count += 1,
+                        matchy::extractor::ExtractedItem::Domain(_) => domain_count += 1,
+                        matchy::extractor::ExtractedItem::Email(_) => email_count += 1,
+                        matchy::extractor::ExtractedItem::Url(_) => url_count += 1,
+                    }
                 }
-            }
 
-            // Lookup candidate (use specialized IP lookup to avoid string conversion)
-            let start = Instant::now();
-            let (result, candidate_str) = match &item.item {
-                // IP addresses: use direct lookup_ip (no string conversion needed)
-                matchy::extractor::ExtractedItem::Ipv4(ip) => {
-                    (db.lookup_ip(IpAddr::V4(*ip))?, ip.to_string())
-                }
-                matchy::extractor::ExtractedItem::Ipv6(ip) => {
-                    (db.lookup_ip(IpAddr::V6(*ip))?, ip.to_string())
-                }
-                // String patterns: use regular lookup
-                matchy::extractor::ExtractedItem::Domain(s) => (db.lookup(s)?, s.to_string()),
-                matchy::extractor::ExtractedItem::Email(s) => (db.lookup(s)?, s.to_string()),
-                matchy::extractor::ExtractedItem::Url(s) => (db.lookup(s)?, s.to_string()),
-            };
-            let elapsed = start.elapsed();
-            lookup_time += elapsed;
+                // Lookup candidate (use specialized IP lookup to avoid string conversion)
+                let lookup_start = Instant::now();
+                let (result, candidate_str) = match &item.item {
+                    // IP addresses: use direct lookup_ip (no string conversion needed)
+                    matchy::extractor::ExtractedItem::Ipv4(ip) => {
+                        (db.lookup_ip(IpAddr::V4(*ip))?, ip.to_string())
+                    }
+                    matchy::extractor::ExtractedItem::Ipv6(ip) => {
+                        (db.lookup_ip(IpAddr::V6(*ip))?, ip.to_string())
+                    }
+                    // String patterns: use regular lookup
+                    matchy::extractor::ExtractedItem::Domain(s) => (db.lookup(s)?, s.to_string()),
+                    matchy::extractor::ExtractedItem::Email(s) => (db.lookup(s)?, s.to_string()),
+                    matchy::extractor::ExtractedItem::Url(s) => (db.lookup(s)?, s.to_string()),
+                };
+                let elapsed = lookup_start.elapsed();
+                lookup_time += elapsed;
 
-            let is_match = match &result {
-                Some(matchy::QueryResult::Pattern { pattern_ids, .. }) => !pattern_ids.is_empty(),
-                Some(matchy::QueryResult::Ip { .. }) => true,
-                _ => false,
-            };
+                let is_match = match &result {
+                    Some(matchy::QueryResult::Pattern { pattern_ids, .. }) => !pattern_ids.is_empty(),
+                    Some(matchy::QueryResult::Ip { .. }) => true,
+                    _ => false,
+                };
 
-            if is_match {
-                if !line_had_match {
-                    lines_with_matches += 1; // Only count the line once
-                    line_had_match = true;
-                }
-                total_matches += 1;
+                if is_match {
+                    if !line_had_match {
+                        lines_with_matches += 1; // Only count the line once
+                        line_had_match = true;
+                    }
+                    total_matches += 1;
 
-                // Output match to stdout as NDJSON
-                if output_json {
-                    let timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs_f64();
+                    // Output match to stdout as NDJSON
+                    if output_json {
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs_f64();
 
-                    let mut match_obj = json!({
-                        "timestamp": format!("{:.3}", timestamp),
-                        "line_number": lines_processed,
-                        "matched_text": candidate_str,
-                        "input_line": text,
-                    });
+                        let mut match_obj = json!({
+                            "timestamp": format!("{:.3}", timestamp),
+                            "line_number": lines_processed,
+                            "matched_text": candidate_str,
+                            "input_line": String::from_utf8_lossy(line_bytes),
+                        });
 
-                    // Add match-specific fields
-                    match &result {
-                        Some(matchy::QueryResult::Pattern { pattern_ids, data }) => {
-                            match_obj["match_type"] = json!("pattern");
-                            match_obj["pattern_count"] = json!(pattern_ids.len());
-                            if !data.is_empty() {
-                                let data_json: Vec<_> = data
-                                    .iter()
-                                    .filter_map(|d| d.as_ref().map(data_value_to_json))
-                                    .collect();
-                                if !data_json.is_empty() {
-                                    match_obj["data"] = json!(data_json);
+                        // Add match-specific fields
+                        match &result {
+                            Some(matchy::QueryResult::Pattern { pattern_ids, data }) => {
+                                match_obj["match_type"] = json!("pattern");
+                                match_obj["pattern_count"] = json!(pattern_ids.len());
+                                if !data.is_empty() {
+                                    let data_json: Vec<_> = data
+                                        .iter()
+                                        .filter_map(|d| d.as_ref().map(data_value_to_json))
+                                        .collect();
+                                    if !data_json.is_empty() {
+                                        match_obj["data"] = json!(data_json);
+                                    }
                                 }
                             }
+                            Some(matchy::QueryResult::Ip { data, prefix_len }) => {
+                                match_obj["match_type"] = json!("ip");
+                                match_obj["prefix_len"] = json!(prefix_len);
+                                match_obj["cidr"] = json!(format_cidr(&candidate_str, *prefix_len));
+                                match_obj["data"] = data_value_to_json(data);
+                            }
+                            _ => {}
                         }
-                        Some(matchy::QueryResult::Ip { data, prefix_len }) => {
-                            match_obj["match_type"] = json!("ip");
-                            match_obj["prefix_len"] = json!(prefix_len);
-                            match_obj["cidr"] = json!(format_cidr(&candidate_str, *prefix_len));
-                            match_obj["data"] = data_value_to_json(data);
-                        }
-                        _ => {}
-                    }
 
-                    // Write to stdout
-                    println!("{}", serde_json::to_string(&match_obj)?);
+                        // Write to stdout
+                        println!("{}", serde_json::to_string(&match_obj)?);
+                    }
                 }
             }
         }
+        
+        // Move to next line
+        start = line_end + 1;
     }
 
     let overall_elapsed = overall_start.elapsed();
