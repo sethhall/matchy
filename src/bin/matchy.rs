@@ -41,6 +41,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Match strings from file or stdin against database (operational testing)
+    Match {
+        /// Path to the matchy database (.mxy file)
+        #[arg(value_name = "DATABASE")]
+        database: PathBuf,
+
+        /// Input file with strings to test (one per line), or "-" for stdin
+        #[arg(value_name = "INPUT")]
+        input: PathBuf,
+
+        /// Output format: json (default, NDJSON), or summary (statistics only)
+        #[arg(short = 'f', long, default_value = "json")]
+        format: String,
+
+        /// Show detailed statistics in stderr (extraction time, candidate breakdown, etc.)
+        #[arg(short, long)]
+        stats: bool,
+
+        /// Trust database and skip UTF-8 validation (faster, only for trusted sources)
+        #[arg(long)]
+        trusted: bool,
+
+        /// LRU cache capacity (default: 10000, use 0 to disable)
+        #[arg(long, default_value = "10000")]
+        cache_size: usize,
+    },
+
     /// Query a pattern database
     Query {
         /// Path to the matchy database (.mxy file)
@@ -205,6 +232,14 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Match {
+            database,
+            input,
+            format,
+            stats,
+            trusted,
+            cache_size,
+        } => cmd_match(database, input, format, stats, trusted, cache_size),
         Commands::Query {
             database,
             query,
@@ -299,6 +334,311 @@ fn format_cidr(ip_str: &str, prefix_len: u8) -> String {
     } else {
         format!("{}/{}", ip_str, prefix_len)
     }
+}
+
+fn cmd_match(
+    database: PathBuf,
+    input: PathBuf,
+    format: String,
+    show_stats: bool,
+    trusted: bool,
+    cache_size: usize,
+) -> Result<()> {
+    use matchy::extractor::PatternExtractor;
+    use matchy::Database;
+    use std::io::Write;
+
+    // Load database
+    let load_start = Instant::now();
+    let mut opener = Database::from(database.to_str().unwrap());
+    if trusted {
+        opener = opener.trusted();
+    }
+    if cache_size == 0 {
+        opener = opener.no_cache();
+    } else {
+        opener = opener.cache_capacity(cache_size);
+    }
+    let db = opener
+        .open()
+        .with_context(|| format!("Failed to load database: {}", database.display()))?;
+    let load_time = load_start.elapsed();
+
+    // Info messages to stderr
+    if show_stats {
+        eprintln!("[INFO] Loaded database: {}", database.display());
+        eprintln!("[INFO] Load time: {:.2}ms", load_time.as_millis());
+        eprintln!(
+            "[INFO] Cache: {}",
+            if cache_size == 0 {
+                "disabled".to_string()
+            } else {
+                format!("{} entries", cache_size)
+            }
+        );
+    }
+
+    // Configure extractor based on database capabilities
+    let has_ip = db.has_ip_data();
+    let has_strings = db.has_literal_data() || db.has_glob_data();
+
+    // Build extractor optimized for what the database contains
+    let mut builder = PatternExtractor::builder();
+
+    if !has_ip {
+        // No IP data - skip IP extraction entirely
+        builder = builder.extract_ipv4(false).extract_ipv6(false);
+    }
+
+    if !has_strings {
+        // No string data - skip all string extraction
+        builder = builder
+            .extract_domains(false)
+            .extract_emails(false)
+            .extract_urls(false);
+    }
+
+    let config = builder.build();
+    let mut extractor =
+        PatternExtractor::with_config(config).context("Failed to create pattern extractor")?;
+
+    if show_stats {
+        let extracting: Vec<&str> = [
+            if has_ip { Some("IPs") } else { None },
+            if has_strings { Some("strings") } else { None },
+        ]
+        .iter()
+        .filter_map(|&x| x)
+        .collect();
+
+        eprintln!("[INFO] Extractor configured for: {}", extracting.join(", "));
+    }
+
+    // Open input (file or stdin)
+    let reader: Box<dyn io::BufRead> = if input.to_str() == Some("-") {
+        Box::new(io::BufReader::new(io::stdin()))
+    } else {
+        Box::new(io::BufReader::new(fs::File::open(&input).with_context(
+            || format!("Failed to open input file: {}", input.display()),
+        )?))
+    };
+
+    let mut lines_processed = 0;
+    let mut candidates_tested = 0;
+    let mut lines_with_matches = 0;
+    let mut total_matches = 0;
+    let mut total_bytes = 0usize;
+    let mut extraction_time = std::time::Duration::ZERO;
+    let mut lookup_time = std::time::Duration::ZERO;
+
+    // Detailed stats (only tracked if --stats flag is set)
+    let mut ipv4_count = 0usize;
+    let mut ipv6_count = 0usize;
+    let mut domain_count = 0usize;
+    let mut email_count = 0usize;
+    let mut url_count = 0usize;
+
+    let overall_start = Instant::now();
+    let output_json = format == "json";
+
+    if show_stats {
+        eprintln!("[INFO] Processing stdin...");
+    }
+
+    for line in reader.lines() {
+        let text = line?;
+        let text = text.trim();
+        if text.is_empty() || text.starts_with('#') {
+            continue;
+        }
+
+        lines_processed += 1;
+        total_bytes += text.len();
+
+        // Extract candidates from the line
+        let extract_start = Instant::now();
+        let extracted = extractor.extract_from_line(text.as_bytes());
+        extraction_time += extract_start.elapsed();
+
+        let mut line_had_match = false;
+
+        // Test each candidate
+        for item in extracted {
+            candidates_tested += 1;
+
+            // Track candidate types if stats enabled
+            if show_stats {
+                match &item.item {
+                    matchy::extractor::ExtractedItem::Ipv4(_) => ipv4_count += 1,
+                    matchy::extractor::ExtractedItem::Ipv6(_) => ipv6_count += 1,
+                    matchy::extractor::ExtractedItem::Domain(_) => domain_count += 1,
+                    matchy::extractor::ExtractedItem::Email(_) => email_count += 1,
+                    matchy::extractor::ExtractedItem::Url(_) => url_count += 1,
+                }
+            }
+
+            // Lookup candidate (use specialized IP lookup to avoid string conversion)
+            let start = Instant::now();
+            let (result, candidate_str) = match &item.item {
+                // IP addresses: use direct lookup_ip (no string conversion needed)
+                matchy::extractor::ExtractedItem::Ipv4(ip) => {
+                    (db.lookup_ip(IpAddr::V4(*ip))?, ip.to_string())
+                }
+                matchy::extractor::ExtractedItem::Ipv6(ip) => {
+                    (db.lookup_ip(IpAddr::V6(*ip))?, ip.to_string())
+                }
+                // String patterns: use regular lookup
+                matchy::extractor::ExtractedItem::Domain(s) => (db.lookup(s)?, s.to_string()),
+                matchy::extractor::ExtractedItem::Email(s) => (db.lookup(s)?, s.to_string()),
+                matchy::extractor::ExtractedItem::Url(s) => (db.lookup(s)?, s.to_string()),
+            };
+            let elapsed = start.elapsed();
+            lookup_time += elapsed;
+
+            let is_match = match &result {
+                Some(matchy::QueryResult::Pattern { pattern_ids, .. }) => !pattern_ids.is_empty(),
+                Some(matchy::QueryResult::Ip { .. }) => true,
+                _ => false,
+            };
+
+            if is_match {
+                if !line_had_match {
+                    lines_with_matches += 1; // Only count the line once
+                    line_had_match = true;
+                }
+                total_matches += 1;
+
+                // Output match to stdout as NDJSON
+                if output_json {
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs_f64();
+
+                    let mut match_obj = json!({
+                        "timestamp": format!("{:.3}", timestamp),
+                        "line_number": lines_processed,
+                        "matched_text": candidate_str,
+                        "input_line": text,
+                    });
+
+                    // Add match-specific fields
+                    match &result {
+                        Some(matchy::QueryResult::Pattern { pattern_ids, data }) => {
+                            match_obj["match_type"] = json!("pattern");
+                            match_obj["pattern_count"] = json!(pattern_ids.len());
+                            if !data.is_empty() {
+                                let data_json: Vec<_> = data
+                                    .iter()
+                                    .filter_map(|d| d.as_ref().map(data_value_to_json))
+                                    .collect();
+                                if !data_json.is_empty() {
+                                    match_obj["data"] = json!(data_json);
+                                }
+                            }
+                        }
+                        Some(matchy::QueryResult::Ip { data, prefix_len }) => {
+                            match_obj["match_type"] = json!("ip");
+                            match_obj["prefix_len"] = json!(prefix_len);
+                            match_obj["cidr"] = json!(format_cidr(&candidate_str, *prefix_len));
+                            match_obj["data"] = data_value_to_json(data);
+                        }
+                        _ => {}
+                    }
+
+                    // Write to stdout
+                    println!("{}", serde_json::to_string(&match_obj)?);
+                }
+            }
+        }
+    }
+
+    let overall_elapsed = overall_start.elapsed();
+
+    // Output summary stats to stderr
+    if show_stats {
+        let db_stats = db.stats();
+
+        eprintln!();
+        eprintln!("[INFO] Processing complete");
+        eprintln!("[INFO] Lines processed: {}", format_number(lines_processed));
+        eprintln!(
+            "[INFO] Lines with matches: {} ({:.1}%)",
+            format_number(lines_with_matches),
+            if lines_processed > 0 {
+                (lines_with_matches as f64 / lines_processed as f64) * 100.0
+            } else {
+                0.0
+            }
+        );
+        eprintln!("[INFO] Total matches: {}", format_number(total_matches));
+        eprintln!(
+            "[INFO] Candidates tested: {}",
+            format_number(candidates_tested)
+        );
+
+        if ipv4_count > 0 {
+            eprintln!("[INFO]   IPv4: {}", format_number(ipv4_count));
+        }
+        if ipv6_count > 0 {
+            eprintln!("[INFO]   IPv6: {}", format_number(ipv6_count));
+        }
+        if domain_count > 0 {
+            eprintln!("[INFO]   Domains: {}", format_number(domain_count));
+        }
+        if email_count > 0 {
+            eprintln!("[INFO]   Emails: {}", format_number(email_count));
+        }
+        if url_count > 0 {
+            eprintln!("[INFO]   URLs: {}", format_number(url_count));
+        }
+
+        eprintln!(
+            "[INFO] Throughput: {:.2} MB/s",
+            if overall_elapsed.as_secs_f64() > 0.0 {
+                (total_bytes as f64 / 1_000_000.0) / overall_elapsed.as_secs_f64()
+            } else {
+                0.0
+            }
+        );
+        eprintln!("[INFO] Total time: {:.2}s", overall_elapsed.as_secs_f64());
+        eprintln!(
+            "[INFO] Extraction time: {:.2}s ({:.2}µs per line)",
+            extraction_time.as_secs_f64(),
+            if lines_processed > 0 {
+                extraction_time.as_nanos() as f64 / 1000.0 / lines_processed as f64
+            } else {
+                0.0
+            }
+        );
+        eprintln!(
+            "[INFO] Lookup time: {:.2}s ({:.2}µs per candidate)",
+            lookup_time.as_secs_f64(),
+            if candidates_tested > 0 {
+                lookup_time.as_nanos() as f64 / 1000.0 / candidates_tested as f64
+            } else {
+                0.0
+            }
+        );
+        eprintln!(
+            "[INFO] Query rate: {} candidates/sec",
+            format_qps(if candidates_tested > 0 {
+                candidates_tested as f64 / lookup_time.as_secs_f64()
+            } else {
+                0.0
+            })
+        );
+
+        if cache_size > 0 {
+            eprintln!(
+                "[INFO] Cache: {} entries ({:.1}% hit rate)",
+                format_number(cache_size),
+                db_stats.cache_hit_rate() * 100.0
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn cmd_query(database: PathBuf, query: String, quiet: bool, trusted: bool) -> Result<()> {

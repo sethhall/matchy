@@ -814,7 +814,7 @@ impl Paraglob {
         Self::run_ac_matching_with_positions(ac_buffer, text.as_bytes(), self.mode, &mut matches);
         matches
     }
-    
+
     /// Find all matching pattern IDs
     pub fn find_all(&mut self, text: &str) -> Vec<u32> {
         let buffer = self.buffer.as_slice();
@@ -1074,7 +1074,7 @@ impl Paraglob {
             }
         }
     }
-    
+
     /// Run AC automaton matching on the offset-based buffer
     /// Writes AC literal IDs into the provided HashSet (avoids allocation)
     fn run_ac_matching_into_static(

@@ -472,6 +472,7 @@ dependencies = [
  "csv",
  "libc",
  "lru",
+ "memchr",
  "memmap2",
  "memory-stats",
  "proptest",

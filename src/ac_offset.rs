@@ -522,7 +522,7 @@ impl ACAutomaton {
 
         matches
     }
-    
+
     /// Find all pattern IDs that match in the text
     ///
     /// This traverses the offset-based automaton directly.
