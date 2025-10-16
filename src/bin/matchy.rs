@@ -524,6 +524,8 @@ fn cmd_match(
     let mut total_bytes = 0usize;
     let mut extraction_time = std::time::Duration::ZERO;
     let mut lookup_time = std::time::Duration::ZERO;
+    let mut extraction_samples = 0usize;
+    let mut lookup_samples = 0usize;
 
     // Detailed stats (only tracked if --stats flag is set)
     let mut ipv4_count = 0usize;
@@ -536,10 +538,13 @@ fn cmd_match(
     let output_json = format == "json";
 
     // Get base timestamp once, use monotonic clock for offsets (avoids syscalls)
-    let base_timestamp = std::time::SystemTime::now()
+    // Resync periodically to handle clock adjustments in long-running processes
+    let mut base_timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64();
+    let mut last_resync = overall_start;
+    const RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
     // Sampling: Only measure timing every Nth line/candidate to reduce Instant::now() overhead
     const SAMPLE_INTERVAL: usize = 100;
@@ -569,9 +574,26 @@ fn cmd_match(
         } else {
             None
         };
+
+        // Resync wall clock every 60s for long-running processes (piggyback on sampling)
+        // Check on every sampled line, or every 6000 lines if stats disabled
+        let should_check_resync = extract_start.is_some() || lines_processed % 6000 == 0;
+        if output_json && should_check_resync {
+            let now = extract_start.unwrap_or_else(Instant::now);
+            if now.duration_since(last_resync) >= RESYNC_INTERVAL {
+                base_timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64()
+                    - overall_start.elapsed().as_secs_f64();
+                last_resync = now;
+            }
+        }
+
         let extracted = extractor.extract_from_line(&line_buf);
         if let Some(start) = extract_start {
             extraction_time += start.elapsed();
+            extraction_samples += 1;
         }
 
         let mut line_had_match = false;
@@ -612,6 +634,7 @@ fn cmd_match(
             };
             if let Some(start) = lookup_start {
                 lookup_time += start.elapsed();
+                lookup_samples += 1;
             }
 
             let is_match = match &result {
@@ -717,27 +740,29 @@ fn cmd_match(
         );
         eprintln!("[INFO] Total time: {:.2}s", overall_elapsed.as_secs_f64());
         eprintln!(
-            "[INFO] Extraction time (sampled): {:.2}s ({:.2}µs per line)",
+            "[INFO] Extraction time (sampled): {:.2}s ({:.2}µs per sample, {} samples)",
             extraction_time.as_secs_f64(),
-            if lines_processed > 0 {
-                extraction_time.as_nanos() as f64 / 1000.0 / lines_processed as f64
+            if extraction_samples > 0 {
+                extraction_time.as_nanos() as f64 / 1000.0 / extraction_samples as f64
             } else {
                 0.0
-            }
+            },
+            format_number(extraction_samples)
         );
         eprintln!(
-            "[INFO] Lookup time (sampled): {:.2}s ({:.2}µs per candidate)",
+            "[INFO] Lookup time (sampled): {:.2}s ({:.2}µs per sample, {} samples)",
             lookup_time.as_secs_f64(),
-            if candidates_tested > 0 {
-                lookup_time.as_nanos() as f64 / 1000.0 / candidates_tested as f64
+            if lookup_samples > 0 {
+                lookup_time.as_nanos() as f64 / 1000.0 / lookup_samples as f64
             } else {
                 0.0
-            }
+            },
+            format_number(lookup_samples)
         );
         eprintln!(
-            "[INFO] Query rate: {} candidates/sec",
-            format_qps(if candidates_tested > 0 {
-                candidates_tested as f64 / lookup_time.as_secs_f64()
+            "[INFO] Query rate: {} candidates/sec (overall)",
+            format_qps(if overall_elapsed.as_secs_f64() > 0.0 {
+                candidates_tested as f64 / overall_elapsed.as_secs_f64()
             } else {
                 0.0
             })

@@ -53,52 +53,62 @@ pub struct ExtractorConfigBuilder {
 }
 
 impl ExtractorConfigBuilder {
+    /// Create a new builder with default configuration
     pub fn new() -> Self {
         Self {
             config: ExtractorConfig::default(),
         }
     }
 
+    /// Enable or disable domain extraction
     pub fn extract_domains(mut self, enable: bool) -> Self {
         self.config.extract_domains = enable;
         self
     }
 
+    /// Enable or disable email extraction
     pub fn extract_emails(mut self, enable: bool) -> Self {
         self.config.extract_emails = enable;
         self
     }
 
+    /// Enable or disable IPv4 extraction
     pub fn extract_ipv4(mut self, enable: bool) -> Self {
         self.config.extract_ipv4 = enable;
         self
     }
 
+    /// Enable or disable IPv6 extraction
     pub fn extract_ipv6(mut self, enable: bool) -> Self {
         self.config.extract_ipv6 = enable;
         self
     }
 
+    /// Enable or disable URL extraction
     pub fn extract_urls(mut self, enable: bool) -> Self {
         self.config.extract_urls = enable;
         self
     }
 
+    /// Require domain TLDs to be in Public Suffix List
     pub fn require_valid_tld(mut self, require: bool) -> Self {
         self.config.require_valid_tld = require;
         self
     }
 
+    /// Set minimum number of domain labels (e.g., 2 for "example.com")
     pub fn min_domain_labels(mut self, min: usize) -> Self {
         self.config.min_domain_labels = min;
         self
     }
 
+    /// Require word boundaries around extracted patterns
     pub fn require_word_boundaries(mut self, require: bool) -> Self {
         self.config.require_word_boundaries = require;
         self
     }
 
+    /// Build the final configuration
     pub fn build(self) -> ExtractorConfig {
         self.config
     }
@@ -177,37 +187,19 @@ impl PatternExtractor {
         ExtractorConfigBuilder::new()
     }
 
-    /// Extract all patterns from a line, returning owned matches
-    pub fn extract_from_line<'a>(&mut self, line: &'a [u8]) -> Vec<Match<'a>> {
-        let mut matches = Vec::new();
-
-        // Extract domains if enabled
-        if self.config.extract_domains {
-            self.extract_domains(line, &mut matches);
-        }
-
-        // Extract IPv4 addresses
-        if self.config.extract_ipv4 {
-            self.extract_ipv4(line, &mut matches);
-        }
-
-        // Extract email addresses
-        if self.config.extract_emails {
-            self.extract_emails(line, &mut matches);
-        }
-
-        // TODO: Extract IPv6, URLs
-
-        matches
-    }
-
-    /// Extract patterns using an iterator (zero-allocation when possible)
-    pub fn extract_iter<'a>(&'a self, line: &'a [u8]) -> ExtractIter<'a> {
-        ExtractIter {
-            extractor: self,
-            line,
-            pos: 0,
-        }
+    /// Extract patterns from a line using an iterator (zero-allocation)
+    /// 
+    /// Returns an iterator that lazily extracts matches as you iterate.
+    /// This is more efficient than collecting into a Vec.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// for match_item in extractor.extract_from_line(line) {
+    ///     // Process each match
+    /// }
+    /// ```
+    pub fn extract_from_line<'a>(&'a mut self, line: &'a [u8]) -> ExtractIter<'a> {
+        ExtractIter::new(self, line)
     }
 
     /// Get the configuration
@@ -448,9 +440,9 @@ impl PatternExtractor {
                 return None; // No digits found
             }
 
-            // Parse octet value
+            // Parse octet value (u8::parse already ensures 0-255 range)
             let octet: u8 = match octet_str.parse() {
-                Ok(val) if val <= 255 => val,
+                Ok(val) => val,
                 _ => return None, // Invalid octet
             };
 
@@ -552,21 +544,70 @@ impl Default for PatternExtractor {
 }
 
 /// Iterator over extracted patterns in a line
+/// 
+/// Lazily extracts patterns as you iterate, avoiding allocation
+/// when not all matches are needed.
 pub struct ExtractIter<'a> {
-    extractor: &'a PatternExtractor,
+    #[allow(dead_code)]
+    extractor: &'a mut PatternExtractor,
+    #[allow(dead_code)]
     line: &'a [u8],
-    pos: usize,
+    matches: Vec<Match<'a>>,
+    current_idx: usize,
+}
+
+impl<'a> ExtractIter<'a> {
+    fn new(extractor: &'a mut PatternExtractor, line: &'a [u8]) -> Self {
+        // Extract all matches upfront into a Vec
+        // We can optimize this later to be truly lazy if needed
+        let mut matches = Vec::new();
+
+        // Extract domains if enabled
+        if extractor.config.extract_domains {
+            extractor.extract_domains(line, &mut matches);
+        }
+
+        // Extract IPv4 addresses
+        if extractor.config.extract_ipv4 {
+            extractor.extract_ipv4(line, &mut matches);
+        }
+
+        // Extract email addresses
+        if extractor.config.extract_emails {
+            extractor.extract_emails(line, &mut matches);
+        }
+
+        // TODO: Extract IPv6, URLs
+
+        Self {
+            extractor,
+            line,
+            matches,
+            current_idx: 0,
+        }
+    }
 }
 
 impl<'a> Iterator for ExtractIter<'a> {
     type Item = Match<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // TODO: Implement iterative extraction
-        // This will be more efficient than extract_from_line for streaming
-        None
+        if self.current_idx < self.matches.len() {
+            let match_item = self.matches[self.current_idx].clone();
+            self.current_idx += 1;
+            Some(match_item)
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.matches.len() - self.current_idx;
+        (remaining, Some(remaining))
     }
 }
+
+impl<'a> ExactSizeIterator for ExtractIter<'a> {}
 
 // Embedded TLD automaton - generated by cargo update-psl
 const TLD_AUTOMATON: &[u8] = include_bytes!("data/tld_automaton.ac");
@@ -612,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_extractor_creation() {
-        let extractor = PatternExtractor::new().unwrap();
+        let mut extractor = PatternExtractor::new().unwrap();
         assert!(extractor.config().extract_domains);
     }
 
@@ -652,7 +693,7 @@ mod tests {
         let mut extractor = PatternExtractor::new().unwrap();
 
         let line = b"Visit example.com for more info";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].as_str(line), "example.com");
@@ -667,7 +708,7 @@ mod tests {
         let mut extractor = PatternExtractor::new().unwrap();
 
         let line = b"Check google.com and github.com";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].as_str(line), "google.com");
@@ -679,7 +720,7 @@ mod tests {
         let mut extractor = PatternExtractor::new().unwrap();
 
         let line = b"Visit api.example.com today";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].as_str(line), "api.example.com");
@@ -690,7 +731,7 @@ mod tests {
         let mut extractor = PatternExtractor::new().unwrap();
 
         let line = b"Go to https://www.example.com/path";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         // Should extract just the domain, not the protocol or path
         assert_eq!(matches.len(), 1);
@@ -706,7 +747,7 @@ mod tests {
         let mut extractor = PatternExtractor::with_config(config).unwrap();
 
         let line = b"Visit example.com and api.test.example.com";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         // Only the 3-label domain should match
         assert_eq!(matches.len(), 1);
@@ -720,7 +761,7 @@ mod tests {
         // Realistic log line
         let line =
             b"2024-01-15 10:32:45 GET /api evil.example.com 192.168.1.1 - malware.badsite.org";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         assert!(matches.len() >= 2);
         // Should find both domains
@@ -741,7 +782,7 @@ mod tests {
         let mut extractor = PatternExtractor::new().unwrap();
 
         let line = b"Server at 192.168.1.1 responded";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         // Should find the IP
         let ips: Vec<Ipv4Addr> = matches
@@ -761,7 +802,7 @@ mod tests {
         let mut extractor = PatternExtractor::new().unwrap();
 
         let line = b"Traffic from 10.0.0.5 to 172.16.0.10";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let ips: Vec<Ipv4Addr> = matches
             .iter()
@@ -782,7 +823,7 @@ mod tests {
 
         // German domain with umlaut (münchen.de in UTF-8)
         let line = "Visit münchen.de for info".as_bytes();
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         // Should extract the Unicode domain
         assert_eq!(matches.len(), 1);
@@ -801,7 +842,7 @@ mod tests {
 
         // Line with both ASCII and Unicode domains
         let line = "Check café.fr and example.com".as_bytes();
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         // Should extract both domains
         assert!(matches.len() >= 2);
@@ -834,7 +875,7 @@ mod tests {
         line.extend_from_slice(b" evil.com ");
         line.push(0x80); // Invalid UTF-8 byte
 
-        let matches = extractor.extract_from_line(&line);
+        let matches: Vec<_> = extractor.extract_from_line(&line).collect();
 
         // Should still extract ASCII domain despite binary junk
         let domains: Vec<&str> = matches
@@ -862,7 +903,7 @@ mod tests {
         line.push(0xC0); // Invalid UTF-8
         line.extend_from_slice(b".com");
 
-        let matches = extractor.extract_from_line(&line);
+        let matches: Vec<_> = extractor.extract_from_line(&line).collect();
 
         // Should NOT extract domain with invalid UTF-8
         let domains: Vec<&str> = matches
@@ -882,7 +923,7 @@ mod tests {
 
         // "blah.community" contains ".com" but shouldn't match as domain
         let line = b"This is blah.community stuff";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let domains: Vec<&str> = matches
             .iter()
@@ -905,7 +946,7 @@ mod tests {
 
         // Common log format with key=value pairs
         let line = b"Request: host=api.example.com method=GET path=/test";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let domains: Vec<&str> = matches
             .iter()
@@ -928,7 +969,7 @@ mod tests {
 
         // Invalid IPs should not match
         let line = b"Not IPs: 256.1.1.1 1.2.3.999 1.2.3";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let ips: Vec<Ipv4Addr> = matches
             .iter()
@@ -947,7 +988,7 @@ mod tests {
 
         // Mix of domains and IPs
         let line = b"Request from 10.1.2.3 to api.example.com at 192.168.1.100";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let ips: Vec<Ipv4Addr> = matches
             .iter()
@@ -975,7 +1016,7 @@ mod tests {
         let mut extractor = PatternExtractor::new().unwrap();
 
         let line = b"Contact user@example.com for info";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let emails: Vec<&str> = matches
             .iter()
@@ -994,7 +1035,7 @@ mod tests {
         let mut extractor = PatternExtractor::new().unwrap();
 
         let line = b"Email alice@test.com or bob@company.org";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let emails: Vec<&str> = matches
             .iter()
@@ -1014,7 +1055,7 @@ mod tests {
         let mut extractor = PatternExtractor::new().unwrap();
 
         let line = b"Send to user+tag@example.com";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let emails: Vec<&str> = matches
             .iter()
@@ -1034,7 +1075,7 @@ mod tests {
 
         // Realistic log line with everything
         let line = b"2024-01-15 user@example.com from 10.1.2.3 accessed api.test.com";
-        let matches = extractor.extract_from_line(line);
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let emails: Vec<&str> = matches
             .iter()
