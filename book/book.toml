@@ -19,6 +19,8 @@ additional-js = ["mermaid.min.js", "mermaid-init.js"]
 additional-css = ["custom.css"]
 no-section-label = true
 favicon = "theme/favicon.png"
+# SVG favicon for modern browsers with theme support
+favicon-svg = "theme/logo-light.svg"
 
 
 [output.html.fold]

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For detailed version history, see the [full CHANGELOG.md](https://github.com/sethhall/matchy/blob/main/CHANGELOG.md) in the repository.
 
+## [1.0.1] - 2025-10-14
+
+### Fixed
+- **Critical: IP Longest Prefix Match Bug** ([#10](https://github.com/sethhall/matchy/issues/10))
+  - Fixed insertion order dependency affecting IP address lookups
+  - More specific prefixes (e.g., /32) now correctly take precedence over less specific ones (e.g., /24)
+  - Affects both IPv4 and IPv6 lookups
+  - Internal fix only - no database format changes
+
+### Added
+- Comprehensive test suite for longest prefix matching
+- IPv6 longest prefix match tests
+
 ## [1.0.0] - 2025-10-13
 
 ### 🎉 First Stable Release

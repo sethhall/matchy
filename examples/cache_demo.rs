@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test 2: With caching
     println!("3. Testing WITH caching (10k capacity)...");
-    let db_cached = Database::from_bytes_builder(db_bytes)
+    let db_cached = Database::from_bytes_builder(db_bytes.clone())
         .cache_capacity(10_000) // LRU cache for 10k queries
         .open()?;
 

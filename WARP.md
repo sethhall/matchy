@@ -98,6 +98,9 @@ cargo bench
 # Run specific benchmark
 cargo bench pattern_matching
 
+# Memory profiling (allocation analysis)
+cargo bench --bench query_profile --features dhat-heap
+
 # Run examples (includes perf test)
 cargo run --release --example production_test
 cargo run --release --example glob_demo
@@ -151,7 +154,8 @@ matchy/
 ├── tests/
 │   └── integration_tests.rs  # End-to-end integration tests
 ├── benches/
-│   └── paraglob_bench.rs     # Criterion benchmarks
+│   ├── matchy_bench.rs       # Criterion benchmarks
+│   └── query_profile.rs      # Memory allocation profiling (dhat)
 ├── examples/
 │   ├── glob_demo.rs          # Basic glob pattern demonstrations
 │   └── production_test.rs    # Production workload simulation

@@ -45,6 +45,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `idna = "0.5"` for Unicode domain (IDN) to punycode conversion
 - Added `lru = "0.12"` for LRU cache implementation
 
+## [1.0.1] - 2025-10-14
+
+### Fixed
+- **Critical: IP Longest Prefix Match Bug** ([#10](https://github.com/sethhall/matchy/issues/10))
+  - Fixed insertion order dependency where more specific IP prefixes inserted before less specific ones could be incorrectly overridden
+  - Added prefix length tracking to `NodePointer::Data` for proper route specificity comparison
+  - Affects both IPv4 and IPv6 address lookups
+  - Example: Inserting 192.0.2.1/32 before 192.0.2.0/24 now correctly returns the /32 match
+  - This fix is internal only and does not affect the on-disk MMDB format
+
+### Added
+- Comprehensive test suite for IP longest prefix matching scenarios
+- IPv6 longest prefix match validation tests
+
 ## [1.0.0] - 2025-10-13
 
 ### 🎉 Major Release - Production Ready

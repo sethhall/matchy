@@ -400,6 +400,27 @@ impl Database {
         self.query_cache.borrow_mut().clear();
     }
 
+    /// Get current cache size (number of entries)
+    ///
+    /// Returns the number of query results currently cached.
+    /// Useful for monitoring cache usage.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use matchy::Database;
+    ///
+    /// let db = Database::from("threats.mxy").open()?;
+    ///
+    /// // Do some queries
+    /// db.lookup("example.com")?;
+    /// println!("Cache size: {}", db.cache_size());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn cache_size(&self) -> usize {
+        self.query_cache.borrow().len()
+    }
+
     /// Get database statistics
     ///
     /// Returns statistics about query performance, cache effectiveness,

@@ -1,6 +1,6 @@
 [package]
 name = "matchy"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 authors = ["Seth Hall <seth@remor.com>"]
 license = "BSD-2-Clause"
@@ -29,9 +29,6 @@ include = [
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "LICENSE",
-    
-    # Assets
-    "logo.jpg",
 ]
 
 # cargo-c configuration for C/C++ library installation
@@ -61,6 +58,8 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 [features]
 # cargo-c requires a capi feature to identify C-compatible libraries
 capi = []
+# Enable dhat heap profiling in benchmarks (dhat is always available as dev-dep)
+dhat-heap = []
 
 [[bin]]
 name = "matchy"
@@ -91,6 +90,7 @@ criterion = "0.7"
 proptest = "1.4"
 tempfile = "3.8"
 rand = "0.9"
+dhat = "0.3"  # Heap profiling for benchmarks
 
 [build-dependencies]
 cbindgen = "0.29"
@@ -117,3 +117,8 @@ harness = false
 name = "cache_bench"
 harness = false
 
+# Memory profiling tool (not a Criterion benchmark)
+[[bench]]
+name = "query_profile"
+path = "benches/query_profile.rs"
+harness = false
