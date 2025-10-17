@@ -78,7 +78,8 @@ impl IpTreeBuilder {
     /// # Arguments
     /// * `capacity` - Expected number of nodes
     pub fn reserve_nodes(&mut self, capacity: usize) {
-        self.nodes.reserve(capacity.saturating_sub(self.nodes.len()));
+        self.nodes
+            .reserve(capacity.saturating_sub(self.nodes.len()));
     }
 
     /// Insert an IP address or CIDR range with associated data offset

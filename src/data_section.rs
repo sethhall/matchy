@@ -202,7 +202,7 @@ impl Hash for DataValue {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Hash the discriminant first
         std::mem::discriminant(self).hash(state);
-        
+
         match self {
             DataValue::Pointer(v) => v.hash(state),
             DataValue::String(v) => v.hash(state),

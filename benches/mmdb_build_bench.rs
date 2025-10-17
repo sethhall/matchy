@@ -59,10 +59,7 @@ fn bench_mmdb_build_with_deduplication(c: &mut Criterion) {
                     for i in 0..count {
                         let ip = format!("192.168.{}.{}", i / 256, i % 256);
                         let mut data = HashMap::new();
-                        data.insert(
-                            "id".to_string(),
-                            DataValue::Uint32(i as u32),
-                        );
+                        data.insert("id".to_string(), DataValue::Uint32(i as u32));
                         data.insert(
                             "unique".to_string(),
                             DataValue::String(format!("unique_value_{}", i)),
@@ -121,11 +118,15 @@ fn bench_mmdb_build_with_deduplication(c: &mut Criterion) {
                         } else if i % 3 == 1 {
                             // Literal pattern
                             let pattern = format!("evil_{}.com", i);
-                            builder.add_literal(black_box(&pattern), black_box(data)).unwrap();
+                            builder
+                                .add_literal(black_box(&pattern), black_box(data))
+                                .unwrap();
                         } else {
                             // Glob pattern
                             let pattern = format!("*.bad_{}.net", i);
-                            builder.add_glob(black_box(&pattern), black_box(data)).unwrap();
+                            builder
+                                .add_glob(black_box(&pattern), black_box(data))
+                                .unwrap();
                         }
                     }
                     let db = builder.build().unwrap();
@@ -145,16 +146,19 @@ fn bench_mmdb_build_complex_data(c: &mut Criterion) {
     // Create realistic threat intel data structure
     let create_complex_data = |category: &str, severity: u16| {
         let mut data = HashMap::new();
-        data.insert("category".to_string(), DataValue::String(category.to_string()));
+        data.insert(
+            "category".to_string(),
+            DataValue::String(category.to_string()),
+        );
         data.insert("severity".to_string(), DataValue::Uint16(severity));
-        
+
         // Nested metadata
         let mut metadata = HashMap::new();
         metadata.insert("first_seen".to_string(), DataValue::Uint64(1234567890));
         metadata.insert("last_seen".to_string(), DataValue::Uint64(1234567999));
         metadata.insert("confidence".to_string(), DataValue::Float(0.95));
         data.insert("metadata".to_string(), DataValue::Map(metadata));
-        
+
         // Array of tags
         let tags = vec![
             DataValue::String("malware".to_string()),
@@ -162,7 +166,7 @@ fn bench_mmdb_build_complex_data(c: &mut Criterion) {
             DataValue::String("c2".to_string()),
         ];
         data.insert("tags".to_string(), DataValue::Array(tags));
-        
+
         data
     };
 
@@ -190,7 +194,9 @@ fn bench_mmdb_build_complex_data(c: &mut Criterion) {
                             builder.add_ip(black_box(&ip), black_box(data)).unwrap();
                         } else {
                             let domain = format!("evil-{}.badactor.com", i);
-                            builder.add_literal(black_box(&domain), black_box(data)).unwrap();
+                            builder
+                                .add_literal(black_box(&domain), black_box(data))
+                                .unwrap();
                         }
                     }
                     let db = builder.build().unwrap();

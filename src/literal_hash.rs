@@ -155,20 +155,27 @@ impl LiteralHashBuilder {
         }
 
         let start = std::time::Instant::now();
-        eprintln!("[LiteralHash] Building hash table for {} patterns...", self.patterns.len());
+        eprintln!(
+            "[LiteralHash] Building hash table for {} patterns...",
+            self.patterns.len()
+        );
 
         // Determine number of shards adaptively based on dataset size
         // Small datasets: fewer shards to avoid memory overhead
         // Large datasets: more shards for parallelism
         let shard_bits = if self.patterns.len() < 10_000 {
-            4  // 16 shards for small datasets
+            4 // 16 shards for small datasets
         } else if self.patterns.len() < 100_000 {
-            5  // 32 shards for medium datasets  
+            5 // 32 shards for medium datasets
         } else {
-            6  // 64 shards for large datasets
+            6 // 64 shards for large datasets
         };
         let num_shards = 1 << shard_bits;
-        eprintln!("[LiteralHash] Using {} shards for {} patterns", num_shards, self.patterns.len());
+        eprintln!(
+            "[LiteralHash] Using {} shards for {} patterns",
+            num_shards,
+            self.patterns.len()
+        );
 
         // We'll calculate per-shard capacity during build (after partitioning)
         // to avoid allocating huge empty tables
@@ -176,27 +183,29 @@ impl LiteralHashBuilder {
 
         // Partition entries into shards by top shard_bits of hash
         eprintln!("[LiteralHash] Partitioning into shards...");
-        let mut shard_buckets: Vec<Vec<(String, u32, u64)>> = (0..num_shards)
-            .map(|_| Vec::new())
-            .collect();
-        
+        let mut shard_buckets: Vec<Vec<(String, u32, u64)>> =
+            (0..num_shards).map(|_| Vec::new()).collect();
+
         for (pattern, pattern_id, hash) in self.patterns {
             // Better distribution: use modulo instead of top bits
             let shard_id = (hash as usize) % num_shards;
             shard_buckets[shard_id].push((pattern, pattern_id, hash));
         }
-        eprintln!("[LiteralHash] Partitioned into shards ({:?})", start.elapsed());
+        eprintln!(
+            "[LiteralHash] Partitioned into shards ({:?})",
+            start.elapsed()
+        );
 
         // Build shards in batches to limit memory usage
         // Process 8 shards at a time instead of all simultaneously
         eprintln!("[LiteralHash] Building shards in batches (8 at a time)...");
         let batch_size = 8;
         let mut shards = Vec::with_capacity(num_shards);
-        
+
         for chunk_start in (0..num_shards).step_by(batch_size) {
             let chunk_end = (chunk_start + batch_size).min(num_shards);
             eprintln!("[LiteralHash]   Batch {}-{}...", chunk_start, chunk_end - 1);
-            
+
             let mut chunk: Vec<Shard> = shard_buckets[chunk_start..chunk_end]
                 .par_iter_mut()
                 .enumerate()
@@ -206,10 +215,10 @@ impl LiteralHashBuilder {
                     build_shard_auto_size(shard_id, entries_vec)
                 })
                 .collect();
-            
+
             shards.append(&mut chunk);
         }
-        
+
         eprintln!("[LiteralHash] All shards built ({:?})", start.elapsed());
 
         // Concatenate shards into final table and string pool
@@ -218,27 +227,27 @@ impl LiteralHashBuilder {
         let mut final_table = Vec::with_capacity(table_size);
         let mut final_string_pool = Vec::new();
         let mut pool_offset = 0;
-        
+
         // Build shard offset table for lookups
-        let mut shard_offsets = vec![0u32; num_shards + 1];  // +1 for end sentinel
+        let mut shard_offsets = vec![0u32; num_shards + 1]; // +1 for end sentinel
         let mut table_offset = 0u32;
 
         for shard in &shards {
             shard_offsets[shard.shard_id] = table_offset;
             table_offset += shard.table.len() as u32;
         }
-        shard_offsets[num_shards] = table_offset;  // End sentinel
+        shard_offsets[num_shards] = table_offset; // End sentinel
 
         for mut shard in shards {
             let shard_pool_size = shard.strings.len() as u32;
-            
+
             // Adjust string offsets by pool base
             for entry in &mut shard.table {
                 if !entry.is_empty() {
                     entry.string_offset += pool_offset;
                 }
             }
-            
+
             final_table.extend(shard.table);
             final_string_pool.extend(shard.strings);
             pool_offset += shard_pool_size;
@@ -246,8 +255,8 @@ impl LiteralHashBuilder {
         eprintln!("[LiteralHash] Shards concatenated ({:?})", start.elapsed());
 
         // Calculate offsets
-        let header_size = 32;  // Fixed: 4 bytes magic + 7 u32 fields
-        let shard_table_size = (num_shards + 1) * 4;  // Shard offset table
+        let header_size = 32; // Fixed: 4 bytes magic + 7 u32 fields
+        let shard_table_size = (num_shards + 1) * 4; // Shard offset table
         let table_bytes_size = table_size * mem::size_of::<HashEntry>();
         let strings_offset = header_size + shard_table_size + table_bytes_size;
         let strings_size = final_string_pool.len();
@@ -293,7 +302,7 @@ impl LiteralHashBuilder {
         unsafe {
             buffer.reserve(table_bytes_size);
             let ptr = buffer.as_mut_ptr().add(table_start);
-            
+
             for (i, entry) in final_table.iter().enumerate() {
                 let entry_ptr = ptr.add(i * entry_size) as *mut HashEntry;
                 std::ptr::write(
@@ -305,7 +314,7 @@ impl LiteralHashBuilder {
                     },
                 );
             }
-            
+
             buffer.set_len(table_start + table_bytes_size);
         }
 
@@ -319,7 +328,7 @@ impl LiteralHashBuilder {
             let mappings_size = pattern_data_offsets.len() * 8; // 2 u32s per mapping
             buffer.reserve(mappings_size);
             let ptr = buffer.as_mut_ptr().add(mappings_start);
-            
+
             for (i, (pattern_id, data_offset)) in pattern_data_offsets.iter().enumerate() {
                 let offset = i * 8;
                 std::ptr::copy_nonoverlapping(
@@ -333,10 +342,10 @@ impl LiteralHashBuilder {
                     4,
                 );
             }
-            
+
             buffer.set_len(mappings_start + mappings_size);
         }
-        
+
         eprintln!("[LiteralHash] Total build time: {:?}", start.elapsed());
         Ok(buffer)
     }
@@ -360,7 +369,7 @@ pub struct LiteralHash<'a> {
     table_start: usize,
     strings_start: usize,
     mappings_start: usize,
-    shard_offsets: Vec<u32>,  // Offset of each shard in the table
+    shard_offsets: Vec<u32>, // Offset of each shard in the table
     mode: MatchMode,
 }
 
@@ -412,7 +421,7 @@ impl<'a> LiteralHash<'a> {
 
         // Header is 32 bytes: 4 byte magic + 7 u32 fields
         let header_size = 32;
-        
+
         // Read shard offset table (num_shards + 1 entries)
         let shard_table_start = header_size;
         let shard_table_size = (num_shards as usize + 1) * 4;
@@ -427,7 +436,7 @@ impl<'a> LiteralHash<'a> {
             let offset = u32::from_le_bytes(buffer[offset_pos..offset_pos + 4].try_into().unwrap());
             shard_offsets.push(offset);
         }
-        
+
         let table_start = shard_table_start + shard_table_size;
         let strings_start = strings_offset as usize;
         let mappings_start = strings_start + strings_size as usize;
@@ -453,28 +462,28 @@ impl<'a> LiteralHash<'a> {
             MatchMode::CaseInsensitive => query.to_lowercase(),
         };
         let hash = compute_hash(&normalized_query);
-        
+
         // Compute shard and shard bounds using offset table
         let num_shards = self.header.num_shards as usize;
         let shard_id = (hash as usize) % num_shards;
-        
+
         let shard_start = self.shard_offsets[shard_id] as usize;
         let shard_end = self.shard_offsets[shard_id + 1] as usize;
         let shard_capacity = shard_end - shard_start;
-        
+
         if shard_capacity == 0 {
-            return None;  // Empty shard
+            return None; // Empty shard
         }
-        
+
         // Shard capacity is always power of 2, so mask works
         let shard_mask = shard_capacity - 1;
-        
-        let base_slot = (hash as usize) & shard_mask;  // Position within shard
-        let mut slot = shard_start + base_slot;         // Absolute position
+
+        let base_slot = (hash as usize) & shard_mask; // Position within shard
+        let mut slot = shard_start + base_slot; // Absolute position
         let entry_size = mem::size_of::<HashEntry>();
 
         // Lookup within shard only
-        for probe_dist in 0..shard_capacity {
+        for _ in 0..shard_capacity {
             let entry_offset = self.table_start + slot * entry_size;
             if entry_offset + entry_size > self.buffer.len() {
                 return None;
@@ -576,7 +585,6 @@ fn build_shard_auto_size(shard_id: usize, entries: Vec<(String, u32, u64)>) -> S
             strings: Vec::new(),
         };
     }
-    
 
     // Use 0.6 load factor for faster builds (40% empty space reduces collisions dramatically)
     let desired_load = 0.60f64;
@@ -592,34 +600,26 @@ fn build_shard_auto_size(shard_id: usize, entries: Vec<(String, u32, u64)>) -> S
     unsafe {
         let ptr: *mut u8 = strings.as_mut_ptr();
         let mut offset = 0;
-        
+
         for (pattern, _, _) in &entries {
             string_offsets.push(offset);
-            
+
             let len = pattern.len() as u16;
             let bytes = pattern.as_bytes();
-            
+
             // Write length
-            std::ptr::copy_nonoverlapping(
-                len.to_le_bytes().as_ptr(),
-                ptr.add(offset),
-                2,
-            );
+            std::ptr::copy_nonoverlapping(len.to_le_bytes().as_ptr(), ptr.add(offset), 2);
             offset += 2;
-            
+
             // Write string
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                ptr.add(offset),
-                bytes.len(),
-            );
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(offset), bytes.len());
             offset += bytes.len();
-            
+
             // Null terminator
             *ptr.add(offset) = 0;
             offset += 1;
         }
-        
+
         strings.set_len(offset);
     }
 
@@ -628,17 +628,17 @@ fn build_shard_auto_size(shard_id: usize, entries: Vec<(String, u32, u64)>) -> S
     for (idx, (_pattern, pattern_id, hash)) in entries.iter().enumerate() {
         map.insert(*hash, (string_offsets[idx] as u32, *pattern_id));
     }
-    
+
     // Now serialize to linear-probed table
     let mut table = vec![HashEntry::empty(); capacity];
     for (hash, (string_offset, pattern_id)) in map.into_iter() {
         let mut pos = (hash as usize) & mask;
-        
+
         // Linear probing - should be fast since we have 40% empty space
         while !table[pos].is_empty() {
             pos = (pos + 1) & mask;
         }
-        
+
         table[pos] = HashEntry {
             hash,
             string_offset,
@@ -646,21 +646,19 @@ fn build_shard_auto_size(shard_id: usize, entries: Vec<(String, u32, u64)>) -> S
         };
     }
 
-    Shard { shard_id, table, strings }
+    Shard {
+        shard_id,
+        table,
+        strings,
+    }
 }
 
 /// Compute XXH64 with fixed seed for stable, portable on-disk hashing
 const HASH_SEED_1: u64 = 0;
-const HASH_SEED_2: u64 = 0x517cc1b727220a95;  // Random seed for second hash function
 
 #[inline]
 fn compute_hash(s: &str) -> u64 {
     xxh64(s.as_bytes(), HASH_SEED_1)
-}
-
-#[inline]
-fn compute_hash2(s: &str) -> u64 {
-    xxh64(s.as_bytes(), HASH_SEED_2)
 }
 
 #[cfg(test)]
