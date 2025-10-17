@@ -103,6 +103,8 @@ pub mod glob;
 pub mod ip_tree_builder;
 /// Literal string hash table for O(1) exact matching
 pub mod literal_hash;
+/// Literal string minimal perfect hash for O(1) exact matching with minimal space
+pub mod literal_mph;
 /// MISP JSON threat intelligence importer
 pub mod misp_importer;
 pub mod mmap;
