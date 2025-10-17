@@ -663,11 +663,11 @@ impl ACAutomaton {
                 // Extract all edge characters into contiguous array for SIMD
                 // This is cache-friendly and enables vectorized search
                 let mut chars = [0u8; 8]; // Max 8 edges for sparse states
-                for i in 0..count {
+                for (i, char_slot) in chars.iter_mut().enumerate().take(count) {
                     let edge_offset = edges_offset + i * edge_size;
                     let edge_slice = &self.buffer[edge_offset..];
                     if let Ok((edge_ref, _)) = Ref::<_, ACEdge>::from_prefix(edge_slice) {
-                        chars[i] = edge_ref.character;
+                        *char_slot = edge_ref.character;
                     } else {
                         return None; // Corrupted data
                     }
