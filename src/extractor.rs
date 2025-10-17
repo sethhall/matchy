@@ -10,30 +10,21 @@ use crate::paraglob_offset::Paraglob;
 use crate::serialization::from_bytes;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-/// Configuration for pattern extraction behavior
-#[derive(Debug, Clone)]
-pub struct ExtractorConfig {
-    /// Extract domain names
-    pub extract_domains: bool,
-    /// Extract email addresses
-    pub extract_emails: bool,
-    /// Extract IPv4 addresses
-    pub extract_ipv4: bool,
-    /// Extract IPv6 addresses
-    pub extract_ipv6: bool,
-    /// Extract URLs
-    pub extract_urls: bool,
-
-    /// Require domain TLDs to be in Public Suffix List
-    pub require_valid_tld: bool,
-    /// Minimum number of labels in a domain (e.g., 2 for "a.com")
-    pub min_domain_labels: usize,
-    /// Require word boundaries around extracted patterns
-    pub require_word_boundaries: bool,
+/// Builder for PatternExtractor
+pub struct PatternExtractorBuilder {
+    extract_domains: bool,
+    extract_emails: bool,
+    extract_ipv4: bool,
+    extract_ipv6: bool,
+    extract_urls: bool,
+    require_valid_tld: bool,
+    min_domain_labels: usize,
+    require_word_boundaries: bool,
 }
 
-impl Default for ExtractorConfig {
-    fn default() -> Self {
+impl PatternExtractorBuilder {
+    /// Create a new builder with default configuration
+    pub fn new() -> Self {
         Self {
             extract_domains: true,
             extract_emails: true,
@@ -45,76 +36,80 @@ impl Default for ExtractorConfig {
             require_word_boundaries: true,
         }
     }
-}
-
-/// Builder for ExtractorConfig
-pub struct ExtractorConfigBuilder {
-    config: ExtractorConfig,
-}
-
-impl ExtractorConfigBuilder {
-    /// Create a new builder with default configuration
-    pub fn new() -> Self {
-        Self {
-            config: ExtractorConfig::default(),
-        }
-    }
 
     /// Enable or disable domain extraction
     pub fn extract_domains(mut self, enable: bool) -> Self {
-        self.config.extract_domains = enable;
+        self.extract_domains = enable;
         self
     }
 
     /// Enable or disable email extraction
     pub fn extract_emails(mut self, enable: bool) -> Self {
-        self.config.extract_emails = enable;
+        self.extract_emails = enable;
         self
     }
 
     /// Enable or disable IPv4 extraction
     pub fn extract_ipv4(mut self, enable: bool) -> Self {
-        self.config.extract_ipv4 = enable;
+        self.extract_ipv4 = enable;
         self
     }
 
     /// Enable or disable IPv6 extraction
     pub fn extract_ipv6(mut self, enable: bool) -> Self {
-        self.config.extract_ipv6 = enable;
+        self.extract_ipv6 = enable;
         self
     }
 
     /// Enable or disable URL extraction
     pub fn extract_urls(mut self, enable: bool) -> Self {
-        self.config.extract_urls = enable;
+        self.extract_urls = enable;
         self
     }
 
     /// Require domain TLDs to be in Public Suffix List
     pub fn require_valid_tld(mut self, require: bool) -> Self {
-        self.config.require_valid_tld = require;
+        self.require_valid_tld = require;
         self
     }
 
     /// Set minimum number of domain labels (e.g., 2 for "example.com")
     pub fn min_domain_labels(mut self, min: usize) -> Self {
-        self.config.min_domain_labels = min;
+        self.min_domain_labels = min;
         self
     }
 
     /// Require word boundaries around extracted patterns
     pub fn require_word_boundaries(mut self, require: bool) -> Self {
-        self.config.require_word_boundaries = require;
+        self.require_word_boundaries = require;
         self
     }
 
-    /// Build the final configuration
-    pub fn build(self) -> ExtractorConfig {
-        self.config
+    /// Build the PatternExtractor
+    pub fn build(self) -> Result<PatternExtractor, ParaglobError> {
+        // Load embedded TLD automaton if domain extraction enabled
+        let tld_matcher = if self.extract_domains {
+            let paraglob = from_bytes(TLD_AUTOMATON, MatchMode::CaseInsensitive)?;
+            Some(paraglob)
+        } else {
+            None
+        };
+
+        Ok(PatternExtractor {
+            extract_domains: self.extract_domains,
+            extract_emails: self.extract_emails,
+            extract_ipv4: self.extract_ipv4,
+            extract_ipv6: self.extract_ipv6,
+            extract_urls: self.extract_urls,
+            require_valid_tld: self.require_valid_tld,
+            min_domain_labels: self.min_domain_labels,
+            require_word_boundaries: self.require_word_boundaries,
+            tld_matcher,
+        })
     }
 }
 
-impl Default for ExtractorConfigBuilder {
+impl Default for PatternExtractorBuilder {
     fn default() -> Self {
         Self::new()
     }
@@ -154,8 +149,15 @@ impl<'a> Match<'a> {
 
 /// Fast pattern extractor using Aho-Corasick anchor matching
 pub struct PatternExtractor {
-    /// Configuration
-    config: ExtractorConfig,
+    // Configuration fields
+    extract_domains: bool,
+    extract_emails: bool,
+    extract_ipv4: bool,
+    extract_ipv6: bool,
+    extract_urls: bool,
+    require_valid_tld: bool,
+    min_domain_labels: usize,
+    require_word_boundaries: bool,
     /// TLD matcher (Paraglob with all public suffixes)
     tld_matcher: Option<Paraglob>,
 }
@@ -163,28 +165,12 @@ pub struct PatternExtractor {
 impl PatternExtractor {
     /// Create a new extractor with default configuration
     pub fn new() -> Result<Self, ParaglobError> {
-        Self::with_config(ExtractorConfig::default())
-    }
-
-    /// Create a new extractor with custom configuration
-    pub fn with_config(config: ExtractorConfig) -> Result<Self, ParaglobError> {
-        // Load embedded TLD automaton if domain extraction enabled
-        let tld_matcher = if config.extract_domains {
-            let paraglob = from_bytes(TLD_AUTOMATON, MatchMode::CaseInsensitive)?;
-            Some(paraglob)
-        } else {
-            None
-        };
-
-        Ok(Self {
-            config,
-            tld_matcher,
-        })
+        Self::builder().build()
     }
 
     /// Create a builder for custom configuration
-    pub fn builder() -> ExtractorConfigBuilder {
-        ExtractorConfigBuilder::new()
+    pub fn builder() -> PatternExtractorBuilder {
+        PatternExtractorBuilder::new()
     }
 
     /// Extract patterns from a line using an iterator (zero-allocation)
@@ -202,13 +188,38 @@ impl PatternExtractor {
         ExtractIter::new(self, line)
     }
 
-    /// Get the configuration
-    pub fn config(&self) -> &ExtractorConfig {
-        &self.config
+    /// Check if domain extraction is enabled
+    pub fn extract_domains(&self) -> bool {
+        self.extract_domains
+    }
+
+    /// Check if email extraction is enabled
+    pub fn extract_emails(&self) -> bool {
+        self.extract_emails
+    }
+
+    /// Check if IPv4 extraction is enabled
+    pub fn extract_ipv4(&self) -> bool {
+        self.extract_ipv4
+    }
+
+    /// Check if IPv6 extraction is enabled
+    pub fn extract_ipv6(&self) -> bool {
+        self.extract_ipv6
+    }
+
+    /// Check if URL extraction is enabled
+    pub fn extract_urls(&self) -> bool {
+        self.extract_urls
+    }
+
+    /// Get minimum domain labels requirement
+    pub fn min_domain_labels(&self) -> usize {
+        self.min_domain_labels
     }
 
     /// Extract domains by finding TLD anchors and expanding boundaries
-    fn extract_domains<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+    fn extract_domains_internal<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
         use memchr::memchr;
 
         let tld_matcher = match self.tld_matcher.as_ref() {
@@ -290,7 +301,7 @@ impl PatternExtractor {
         }
 
         // Check word boundary at end if required
-        if self.config.require_word_boundaries
+        if self.require_word_boundaries
             && tld_end < line.len()
             && !is_word_boundary(line[tld_end])
         {
@@ -335,7 +346,7 @@ impl PatternExtractor {
         label_count += 1;
 
         // Check minimum label count
-        label_count >= self.config.min_domain_labels
+        label_count >= self.min_domain_labels
     }
 
     /// Validate a single domain label (bytes between dots)
@@ -361,7 +372,7 @@ impl PatternExtractor {
 
     /// Extract IPv4 addresses using SIMD-accelerated dot search
     /// Strategy: Find dots (rare), check for digit.digit pattern, then parse
-    fn extract_ipv4<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+    fn extract_ipv4_internal<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
         use memchr::memchr_iter;
 
         // Track last parsed end position to skip overlapping candidates
@@ -419,7 +430,7 @@ impl PatternExtractor {
         let mut octets = Vec::new();
 
         // Check word boundary at start if required
-        if self.config.require_word_boundaries && start > 0 && !is_word_boundary(line[start - 1]) {
+        if self.require_word_boundaries && start > 0 && !is_word_boundary(line[start - 1]) {
             return None;
         }
 
@@ -457,7 +468,7 @@ impl PatternExtractor {
         }
 
         // Check word boundary at end if required
-        if self.config.require_word_boundaries && pos < line.len() && !is_word_boundary(line[pos]) {
+        if self.require_word_boundaries && pos < line.len() && !is_word_boundary(line[pos]) {
             return None;
         }
 
@@ -470,7 +481,7 @@ impl PatternExtractor {
     }
 
     /// Extract email addresses using SIMD-accelerated @ search
-    fn extract_emails<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+    fn extract_emails_internal<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
         use memchr::memchr_iter;
 
         // Find all @ symbols using SIMD - much faster than scanning every byte
@@ -501,7 +512,7 @@ impl PatternExtractor {
         }
 
         // Check word boundary at start if required
-        if self.config.require_word_boundaries && start > 0 && !is_word_boundary(line[start - 1]) {
+        if self.require_word_boundaries && start > 0 && !is_word_boundary(line[start - 1]) {
             return None;
         }
 
@@ -516,7 +527,7 @@ impl PatternExtractor {
         }
 
         // Check word boundary at end if required
-        if self.config.require_word_boundaries && end < line.len() && !is_word_boundary(line[end]) {
+        if self.require_word_boundaries && end < line.len() && !is_word_boundary(line[end]) {
             return None;
         }
 
@@ -530,11 +541,6 @@ impl PatternExtractor {
     }
 }
 
-impl Default for PatternExtractor {
-    fn default() -> Self {
-        Self::new().expect("Failed to create default extractor")
-    }
-}
 
 /// Iterator over extracted patterns in a line
 ///
@@ -556,18 +562,18 @@ impl<'a> ExtractIter<'a> {
         let mut matches = Vec::new();
 
         // Extract domains if enabled
-        if extractor.config.extract_domains {
-            extractor.extract_domains(line, &mut matches);
+        if extractor.extract_domains {
+            extractor.extract_domains_internal(line, &mut matches);
         }
 
         // Extract IPv4 addresses
-        if extractor.config.extract_ipv4 {
-            extractor.extract_ipv4(line, &mut matches);
+        if extractor.extract_ipv4 {
+            extractor.extract_ipv4_internal(line, &mut matches);
         }
 
         // Extract email addresses
-        if extractor.config.extract_emails {
-            extractor.extract_emails(line, &mut matches);
+        if extractor.extract_emails {
+            extractor.extract_emails_internal(line, &mut matches);
         }
 
         // TODO: Extract IPv6, URLs
@@ -647,20 +653,21 @@ mod tests {
     #[test]
     fn test_extractor_creation() {
         let extractor = PatternExtractor::new().unwrap();
-        assert!(extractor.config().extract_domains);
+        assert!(extractor.extract_domains());
     }
 
     #[test]
     fn test_builder() {
-        let config = ExtractorConfigBuilder::new()
+        let extractor = PatternExtractor::builder()
             .extract_domains(true)
             .extract_emails(false)
             .min_domain_labels(3)
-            .build();
+            .build()
+            .unwrap();
 
-        assert!(config.extract_domains);
-        assert!(!config.extract_emails);
-        assert_eq!(config.min_domain_labels, 3);
+        assert!(extractor.extract_domains());
+        assert!(!extractor.extract_emails());
+        assert_eq!(extractor.min_domain_labels(), 3);
     }
 
     #[test]
@@ -733,11 +740,11 @@ mod tests {
 
     #[test]
     fn test_domain_min_labels() {
-        let config = ExtractorConfigBuilder::new()
+        let extractor = PatternExtractor::builder()
             .extract_domains(true)
             .min_domain_labels(3) // Require at least 3 labels
-            .build();
-        let extractor = PatternExtractor::with_config(config).unwrap();
+            .build()
+            .unwrap();
 
         let line = b"Visit example.com and api.test.example.com";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();

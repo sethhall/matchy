@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - SIMD-accelerated extraction of domains, IPv4 addresses, and email addresses from unstructured text
   - Zero-copy line scanning with `memchr` for maximum throughput
   - Unicode/IDN domain support with automatic punycode conversion
-  - Configurable extraction via `ExtractorConfigBuilder`
+  - Configurable extraction via `PatternExtractor::builder()`
   - Word boundary detection for accurate pattern identification
   - Binary log support (extracts ASCII patterns from non-UTF-8 data)
   - 23 comprehensive unit tests covering edge cases
