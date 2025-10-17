@@ -99,20 +99,18 @@ for match_item in extractor.extract_from_line(line) {
 
 ## Configuration
 
-Customize extraction behavior using `ExtractorConfigBuilder`:
+Customize extraction behavior using the builder pattern:
 
 ```rust
-use matchy::extractor::ExtractorConfigBuilder;
+use matchy::extractor::PatternExtractor;
 
-let config = ExtractorConfigBuilder::new()
+let extractor = PatternExtractor::builder()
     .extract_domains(true)        // Enable domain extraction
     .extract_ipv4(true)            // Enable IPv4 extraction
     .extract_emails(false)         // Disable email extraction
     .min_domain_labels(3)          // Require 3+ labels (api.test.com)
     .require_word_boundaries(true) // Enforce word boundaries
-    .build();
-
-let extractor = PatternExtractor::with_config(config)?;
+    .build()?;
 ```
 
 ### Configuration Options
@@ -182,11 +180,11 @@ The extractor is highly optimized:
 
 1. **Disable unused extractors** to reduce overhead:
    ```rust
-   let config = ExtractorConfigBuilder::new()
+   let extractor = PatternExtractor::builder()
        .extract_ipv4(true)    // Only extract IPs
        .extract_domains(false)
        .extract_emails(false)
-       .build();
+       .build()?;
    ```
 
 2. **Process line-by-line** for better memory usage:

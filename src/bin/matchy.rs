@@ -489,9 +489,7 @@ fn cmd_match(
             .extract_urls(false);
     }
 
-    let config = builder.build();
-    let extractor =
-        PatternExtractor::with_config(config).context("Failed to create pattern extractor")?;
+    let extractor = builder.build().context("Failed to create pattern extractor")?;
 
     if show_stats {
         let extracting: Vec<&str> = [
@@ -619,13 +617,13 @@ fn cmd_match(
             } else {
                 None
             };
-            let (result, candidate_str) = match &item.item {
+            let (result, candidate_str) = match item.item {
                 // IP addresses: use direct lookup_ip (no string conversion needed)
                 matchy::extractor::ExtractedItem::Ipv4(ip) => {
-                    (db.lookup_ip(IpAddr::V4(*ip))?, ip.to_string())
+                    (db.lookup_ip(IpAddr::V4(ip))?, ip.to_string())
                 }
                 matchy::extractor::ExtractedItem::Ipv6(ip) => {
-                    (db.lookup_ip(IpAddr::V6(*ip))?, ip.to_string())
+                    (db.lookup_ip(IpAddr::V6(ip))?, ip.to_string())
                 }
                 // String patterns: use regular lookup
                 matchy::extractor::ExtractedItem::Domain(s) => (db.lookup(s)?, s.to_string()),
