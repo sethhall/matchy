@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Example: `benches/cache_bench.rs` demonstrates performance characteristics
 
 - **Pattern Extractor** for log scanning and data extraction
-  - SIMD-accelerated extraction of domains, IPv4 addresses, and email addresses from unstructured text
+  - SIMD-accelerated extraction of domains, IPv4/IPv6 addresses, and email addresses from unstructured text
   - Zero-copy line scanning with `memchr` for maximum throughput
   - Unicode/IDN domain support with automatic punycode conversion
   - Configurable extraction via `PatternExtractor::builder()`
@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Match Command** for CLI-based log scanning
   - `matchy match <database> <input-files>` scans logs and reports matches
-  - Automatic pattern extraction from input (domains, IPs, emails)
+  - Automatic pattern extraction from input (domains, IPv4/IPv6 addresses, emails)
   - JSON output (NDJSON format, one match per line to stdout)
   - Statistics with `--stats` flag (output to stderr)
   - Streaming input support for large files and stdin (`-`)

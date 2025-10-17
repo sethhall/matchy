@@ -483,13 +483,12 @@ fn cmd_match(
 
     if !has_strings {
         // No string data - skip all string extraction
-        builder = builder
-            .extract_domains(false)
-            .extract_emails(false)
-            .extract_urls(false);
+        builder = builder.extract_domains(false).extract_emails(false);
     }
 
-    let extractor = builder.build().context("Failed to create pattern extractor")?;
+    let extractor = builder
+        .build()
+        .context("Failed to create pattern extractor")?;
 
     if show_stats {
         let extracting: Vec<&str> = [
@@ -530,7 +529,6 @@ fn cmd_match(
     let mut ipv6_count = 0usize;
     let mut domain_count = 0usize;
     let mut email_count = 0usize;
-    let mut url_count = 0usize;
 
     let overall_start = Instant::now();
     let output_json = format == "json";
@@ -607,7 +605,6 @@ fn cmd_match(
                     matchy::extractor::ExtractedItem::Ipv6(_) => ipv6_count += 1,
                     matchy::extractor::ExtractedItem::Domain(_) => domain_count += 1,
                     matchy::extractor::ExtractedItem::Email(_) => email_count += 1,
-                    matchy::extractor::ExtractedItem::Url(_) => url_count += 1,
                 }
             }
 
@@ -628,7 +625,6 @@ fn cmd_match(
                 // String patterns: use regular lookup
                 matchy::extractor::ExtractedItem::Domain(s) => (db.lookup(s)?, s.to_string()),
                 matchy::extractor::ExtractedItem::Email(s) => (db.lookup(s)?, s.to_string()),
-                matchy::extractor::ExtractedItem::Url(s) => (db.lookup(s)?, s.to_string()),
             };
             if let Some(start) = lookup_start {
                 lookup_time += start.elapsed();
@@ -723,9 +719,6 @@ fn cmd_match(
         }
         if email_count > 0 {
             eprintln!("[INFO]   Emails: {}", format_number(email_count));
-        }
-        if url_count > 0 {
-            eprintln!("[INFO]   URLs: {}", format_number(url_count));
         }
 
         eprintln!(

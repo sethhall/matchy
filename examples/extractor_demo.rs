@@ -1,7 +1,7 @@
 //! Example demonstrating pattern extraction from logs
 //!
 //! This example shows how to use PatternExtractor to find domains,
-//! IP addresses, and email addresses in unstructured log data.
+//! IP addresses (IPv4 and IPv6), and email addresses in unstructured log data.
 
 use matchy::extractor::PatternExtractor;
 
@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Matchy Pattern Extractor Demo ===\n");
 
     // Example 1: Basic extraction with default settings
-    println!("1. Basic Extraction (domains, IPs, emails):");
+    println!("1. Basic Extraction (domains, IPv4, emails):");
     println!(
         "   Input: \"2024-01-15 10:32:45 GET /api evil.example.com 192.168.1.1 - user@test.com\""
     );
@@ -49,7 +49,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    // Example 4: Email extraction
+    // Example 4: IPv6 extraction
+    println!("4. IPv6 Address Extraction:");
+    println!("   Input: \"Server at 2001:db8::1 responded from fe80::1\"");
+
+    let line = b"Server at 2001:db8::1 responded from fe80::1";
+    println!("   IPv6 addresses found:");
+    for match_item in extractor.extract_from_line(line) {
+        if let matchy::extractor::ExtractedItem::Ipv6(ip) = match_item.item {
+            println!("     - {}", ip);
+        }
+    }
+    println!();
+
+    // Example 5: Email extraction
     println!("4. Email Address Extraction:");
     println!("   Input: \"Contact alice@example.com or bob+tag@company.org\"");
 
@@ -62,8 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    // Example 5: Unicode domain extraction
-    println!("5. Unicode Domain Extraction:");
+    // Example 6: Unicode domain extraction
+    println!("6. Unicode Domain Extraction:");
     println!("   Input: \"Visit münchen.de or café.fr for more info\"");
 
     let line = "Visit münchen.de or café.fr for more info".as_bytes();
@@ -75,14 +88,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    // Example 6: Custom configuration
-    println!("6. Custom Configuration (3+ label domains only):");
+    // Example 7: Custom configuration
+    println!("7. Custom Configuration (3+ label domains only):");
     println!("   Input: \"Check example.com and api.test.example.com\"");
 
     let custom_extractor = PatternExtractor::builder()
         .extract_domains(true)
         .min_domain_labels(3) // Require at least 3 labels (e.g., api.test.example.com)
-        .extract_ipv4(false) // Disable IP extraction
+        .extract_ipv4(false) // Disable IPv4 extraction
+        .extract_ipv6(false) // Disable IPv6 extraction
         .extract_emails(false) // Disable email extraction
         .build()?;
     let line = b"Check example.com and api.test.example.com";
@@ -93,8 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    // Example 7: Realistic log line
-    println!("7. Realistic Log Line:");
+    // Example 8: Realistic log line
+    println!("8. Realistic Log Line:");
     let log =
         b"[2024-10-16 23:45:00] INFO 192.168.1.100 user@company.com accessed api.prod.example.com";
     println!("   Input: {:?}", std::str::from_utf8(log)?);
@@ -104,15 +118,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let type_name = match match_item.item {
             matchy::extractor::ExtractedItem::Domain(_) => "Domain",
             matchy::extractor::ExtractedItem::Ipv4(_) => "IPv4",
+            matchy::extractor::ExtractedItem::Ipv6(_) => "IPv6",
             matchy::extractor::ExtractedItem::Email(_) => "Email",
-            _ => "Other",
         };
         println!("     - {} ({})", match_item.as_str(log), type_name);
     }
     println!();
 
-    // Example 8: Binary log with ASCII patterns
-    println!("8. Binary Log (extracts ASCII patterns from non-UTF-8 data):");
+    // Example 9: Binary log with ASCII patterns
+    println!("9. Binary Log (extracts ASCII patterns from non-UTF-8 data):");
     let mut binary_log = Vec::new();
     binary_log.extend_from_slice(b"Log: ");
     binary_log.push(0xFF); // Invalid UTF-8
@@ -139,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     println!("=== Common Use Cases ===");
-    println!("✓ Security: Extract domains/IPs from logs for threat detection");
+    println!("✓ Security: Extract domains/IPs (IPv4/IPv6) from logs for threat detection");
     println!("✓ Analytics: Count unique domains/IPs in access logs");
     println!("✓ Monitoring: Find email addresses in error logs");
     println!("✓ Compliance: Extract PII from audit logs");

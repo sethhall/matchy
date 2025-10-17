@@ -1,6 +1,6 @@
 # Pattern Extraction
 
-Matchy includes a high-performance pattern extractor for finding domains, IP addresses, and email addresses in unstructured text like log files.
+Matchy includes a high-performance pattern extractor for finding domains, IP addresses (IPv4 and IPv6), and email addresses in unstructured text like log files.
 
 ## Overview
 
@@ -76,6 +76,29 @@ for match_item in extractor.extract_from_line(line) {
 - **Validation**: Rejects invalid IPs (256.1.1.1, 999.0.0.1)
 - **Word boundaries**: Avoids false matches in version numbers
 
+### IPv6 Addresses
+
+Extracts all valid IPv6 addresses:
+
+```rust
+let line = b"Server at 2001:db8::1 responded from fe80::1";
+
+for match_item in extractor.extract_from_line(line) {
+    if let ExtractedItem::Ipv6(ip) = match_item.item {
+        println!("IPv6: {}", ip);
+    }
+}
+// Output:
+// IPv6: 2001:db8::1
+// IPv6: fe80::1
+```
+
+**Features:**
+- **SIMD-accelerated**: Uses `memchr` for fast colon detection
+- **Compressed notation**: Handles `::` and full addresses
+- **Validation**: Full RFC 4291 compliance via Rust's `Ipv6Addr`
+- **Mixed notation**: Supports `::ffff:127.0.0.1` format
+
 ### Email Addresses
 
 Extracts RFC 5322-compliant email addresses:
@@ -107,6 +130,7 @@ use matchy::extractor::PatternExtractor;
 let extractor = PatternExtractor::builder()
     .extract_domains(true)        // Enable domain extraction
     .extract_ipv4(true)            // Enable IPv4 extraction
+    .extract_ipv6(true)            // Enable IPv6 extraction
     .extract_emails(false)         // Disable email extraction
     .min_domain_labels(3)          // Require 3+ labels (api.test.com)
     .require_word_boundaries(true) // Enforce word boundaries
@@ -119,6 +143,7 @@ let extractor = PatternExtractor::builder()
 |--------|---------|-------------|
 | `extract_domains` | `true` | Extract domain names |
 | `extract_ipv4` | `true` | Extract IPv4 addresses |
+| `extract_ipv6` | `true` | Extract IPv6 addresses |
 | `extract_emails` | `true` | Extract email addresses |
 | `min_domain_labels` | `2` | Minimum labels (2 = example.com, 3 = api.example.com) |
 | `require_word_boundaries` | `true` | Ensure patterns have word boundaries |
@@ -181,7 +206,8 @@ The extractor is highly optimized:
 1. **Disable unused extractors** to reduce overhead:
    ```rust
    let extractor = PatternExtractor::builder()
-       .extract_ipv4(true)    // Only extract IPs
+       .extract_ipv4(true)     // Only extract IPv4
+       .extract_ipv6(true)     // Only extract IPv6
        .extract_domains(false)
        .extract_emails(false)
        .build()?;

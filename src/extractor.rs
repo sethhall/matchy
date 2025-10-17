@@ -1,7 +1,7 @@
 //! Fast extraction of structured patterns from log lines and text data.
 //!
-//! This module provides high-speed extraction of domains, IP addresses, emails,
-//! and URLs from arbitrary text using Aho-Corasick anchor pattern matching followed
+//! This module provides high-speed extraction of domains, IP addresses (IPv4/IPv6),
+//! and emails from arbitrary text using Aho-Corasick anchor pattern matching followed
 //! by fast boundary scanning.
 
 use crate::error::ParaglobError;
@@ -16,8 +16,6 @@ pub struct PatternExtractorBuilder {
     extract_emails: bool,
     extract_ipv4: bool,
     extract_ipv6: bool,
-    extract_urls: bool,
-    require_valid_tld: bool,
     min_domain_labels: usize,
     require_word_boundaries: bool,
 }
@@ -30,7 +28,6 @@ impl PatternExtractorBuilder {
             extract_emails: true,
             extract_ipv4: true,
             extract_ipv6: true,
-            extract_urls: true,
             require_valid_tld: true,
             min_domain_labels: 2,
             require_word_boundaries: true,
@@ -61,18 +58,6 @@ impl PatternExtractorBuilder {
         self
     }
 
-    /// Enable or disable URL extraction
-    pub fn extract_urls(mut self, enable: bool) -> Self {
-        self.extract_urls = enable;
-        self
-    }
-
-    /// Require domain TLDs to be in Public Suffix List
-    pub fn require_valid_tld(mut self, require: bool) -> Self {
-        self.require_valid_tld = require;
-        self
-    }
-
     /// Set minimum number of domain labels (e.g., 2 for "example.com")
     pub fn min_domain_labels(mut self, min: usize) -> Self {
         self.min_domain_labels = min;
@@ -100,8 +85,6 @@ impl PatternExtractorBuilder {
             extract_emails: self.extract_emails,
             extract_ipv4: self.extract_ipv4,
             extract_ipv6: self.extract_ipv6,
-            extract_urls: self.extract_urls,
-            require_valid_tld: self.require_valid_tld,
             min_domain_labels: self.min_domain_labels,
             require_word_boundaries: self.require_word_boundaries,
             tld_matcher,
@@ -126,8 +109,6 @@ pub enum ExtractedItem<'a> {
     Ipv4(Ipv4Addr),
     /// IPv6 address
     Ipv6(Ipv6Addr),
-    /// URL (e.g., "<https://example.com/path>")
-    Url(&'a str),
 }
 
 /// A single extracted match with position information
@@ -154,8 +135,6 @@ pub struct PatternExtractor {
     extract_emails: bool,
     extract_ipv4: bool,
     extract_ipv6: bool,
-    extract_urls: bool,
-    require_valid_tld: bool,
     min_domain_labels: usize,
     require_word_boundaries: bool,
     /// TLD matcher (Paraglob with all public suffixes)
@@ -206,11 +185,6 @@ impl PatternExtractor {
     /// Check if IPv6 extraction is enabled
     pub fn extract_ipv6(&self) -> bool {
         self.extract_ipv6
-    }
-
-    /// Check if URL extraction is enabled
-    pub fn extract_urls(&self) -> bool {
-        self.extract_urls
     }
 
     /// Get minimum domain labels requirement
@@ -301,9 +275,7 @@ impl PatternExtractor {
         }
 
         // Check word boundary at end if required
-        if self.require_word_boundaries
-            && tld_end < line.len()
-            && !is_word_boundary(line[tld_end])
+        if self.require_word_boundaries && tld_end < line.len() && !is_word_boundary(line[tld_end])
         {
             return None; // Domain continues - not a real boundary
         }
@@ -539,8 +511,100 @@ impl PatternExtractor {
 
         Some((start, end))
     }
-}
 
+    /// Extract IPv6 addresses using SIMD-accelerated colon search
+    /// Strategy: Find colons (somewhat rare), check for hex:hex pattern, then parse
+    fn extract_ipv6_internal<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+        use memchr::memchr_iter;
+
+        // Track last parsed end position to skip overlapping candidates
+        let mut last_end = 0;
+
+        // Find all colons using SIMD - much faster than scanning every byte
+        for colon_pos in memchr_iter(b':', line) {
+            // Quick reject: need space for at least "::1" (3 chars)
+            if colon_pos + 2 > line.len() {
+                continue;
+            }
+
+            // Quick check: is this colon between hex chars or another colon? (hex:hex or :: pattern)
+            let before_is_hex = colon_pos > 0 && is_hex_char(line[colon_pos - 1]);
+            let after_is_hex = is_hex_char(line[colon_pos + 1]);
+            let before_is_colon = colon_pos > 0 && line[colon_pos - 1] == b':';
+            let after_is_colon = line[colon_pos + 1] == b':';
+
+            if !(before_is_hex || before_is_colon) || !(after_is_hex || after_is_colon) {
+                continue;
+            }
+
+            // Look for at least 2 colons in a reasonable window around this position
+            // This is a strong signal of an IPv6 address
+            let window_start = colon_pos.saturating_sub(10);
+            let window_end = (colon_pos + 40).min(line.len());
+            let window = &line[window_start..window_end];
+
+            // Count colons in window (we need at least 2 for an IPv6)
+            let colon_count = memchr_iter(b':', window).count();
+            if colon_count < 2 {
+                continue; // Not enough colons for a full IPv6
+            }
+
+            // High confidence this is near an IPv6 - find start of sequence
+            let mut start = colon_pos;
+            while start > 0 && is_ipv6_char(line[start - 1]) {
+                start -= 1;
+            }
+
+            // Skip if we already parsed this area
+            if start < last_end {
+                continue;
+            }
+
+            // Now try full parse from the start of this sequence
+            if let Some((ip, end)) = self.try_parse_ipv6(line, start) {
+                matches.push(Match {
+                    item: ExtractedItem::Ipv6(ip),
+                    span: (start, end),
+                });
+                last_end = end;
+            }
+        }
+    }
+
+    /// Try to parse an IPv6 address starting at position
+    fn try_parse_ipv6(&self, line: &[u8], start: usize) -> Option<(Ipv6Addr, usize)> {
+        // Check word boundary at start if required
+        if self.require_word_boundaries && start > 0 && !is_word_boundary(line[start - 1]) {
+            return None;
+        }
+
+        // Find the end of the IPv6 candidate
+        let mut end = start;
+        while end < line.len() && is_ipv6_char(line[end]) {
+            end += 1;
+        }
+
+        // Check word boundary at end if required
+        if self.require_word_boundaries && end < line.len() && !is_word_boundary(line[end]) {
+            return None;
+        }
+
+        // Extract the candidate string
+        let candidate = &line[start..end];
+
+        // Convert to string for parsing
+        let candidate_str = match std::str::from_utf8(candidate) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+
+        // Try to parse as IPv6
+        match candidate_str.parse::<Ipv6Addr>() {
+            Ok(ip) => Some((ip, end)),
+            Err(_) => None,
+        }
+    }
+}
 
 /// Iterator over extracted patterns in a line
 ///
@@ -576,7 +640,10 @@ impl<'a> ExtractIter<'a> {
             extractor.extract_emails_internal(line, &mut matches);
         }
 
-        // TODO: Extract IPv6, URLs
+        // Extract IPv6 addresses
+        if extractor.extract_ipv6 {
+            extractor.extract_ipv6_internal(line, &mut matches);
+        }
 
         Self {
             extractor,
@@ -644,6 +711,16 @@ fn is_word_boundary(b: u8) -> bool {
                 | b'@'  // Stop domain extraction at @ (emails)
                 | b'=' // Stop at = (key-value pairs: domain=example.com)
         )
+}
+
+#[inline]
+fn is_hex_char(b: u8) -> bool {
+    b.is_ascii_hexdigit()
+}
+
+#[inline]
+fn is_ipv6_char(b: u8) -> bool {
+    is_hex_char(b) || b == b':'
 }
 
 #[cfg(test)]
@@ -1110,5 +1187,112 @@ mod tests {
         // Domains extracted from both email and standalone
         assert!(domains.contains(&"example.com"));
         assert!(domains.contains(&"api.test.com"));
+    }
+
+    #[test]
+    fn test_ipv6_extraction_basic() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Server at 2001:0db8:85a3:0000:0000:8a2e:0370:7334 responded";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let ips: Vec<Ipv6Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv6(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ips.len(), 1);
+        assert_eq!(ips[0].to_string(), "2001:db8:85a3::8a2e:370:7334");
+    }
+
+    #[test]
+    fn test_ipv6_extraction_compressed() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Connecting to 2001:db8::1";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let ips: Vec<Ipv6Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv6(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ips.len(), 1);
+        assert_eq!(ips[0].to_string(), "2001:db8::1");
+    }
+
+    #[test]
+    fn test_ipv6_extraction_loopback() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Localhost is ::1 or ::ffff:127.0.0.1";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let ips: Vec<Ipv6Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv6(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        // Should find at least ::1
+        assert!(!ips.is_empty());
+        assert!(ips.iter().any(|ip| ip.to_string() == "::1"));
+    }
+
+    #[test]
+    fn test_ipv6_extraction_multiple() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Traffic from 2001:db8::1 to fe80::1";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let ips: Vec<Ipv6Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv6(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ips.len(), 2);
+        assert_eq!(ips[0].to_string(), "2001:db8::1");
+        assert_eq!(ips[1].to_string(), "fe80::1");
+    }
+
+    #[test]
+    fn test_mixed_ipv4_ipv6_extraction() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        let line = b"IPv4: 192.168.1.1 IPv6: 2001:db8::1";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let ipv4s: Vec<Ipv4Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv4(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        let ipv6s: Vec<Ipv6Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv6(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ipv4s.len(), 1);
+        assert_eq!(ipv6s.len(), 1);
+        assert_eq!(ipv4s[0].to_string(), "192.168.1.1");
+        assert_eq!(ipv6s[0].to_string(), "2001:db8::1");
     }
 }

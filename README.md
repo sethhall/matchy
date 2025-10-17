@@ -32,7 +32,7 @@ db.lookup("sub.evil.example.com")?; // Matches *.example.com pattern
 - **<1ms load time** via memory mapping, regardless of database size
 - **99% memory savings** in multi-process deployments
 - **Query result caching**: 2-10x speedup for high-traffic workloads
-- **Log scanning**: SIMD-accelerated extraction of domains, IPs, emails
+- **Log scanning**: SIMD-accelerated extraction of domains, IPs (IPv4/IPv6), emails
 - **Unified database**: IPs, strings, and patterns in one file
 - **MaxMind compatible**: Extended MMDB format
 - **Rich metadata**: JSON-like structured data storage
