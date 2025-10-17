@@ -66,11 +66,6 @@ namespace matchy {
 #define LITERAL_HASH_VERSION 1
 
 /*
- Current version of the literal MPH format
- */
-#define LITERAL_MPH_VERSION 1
-
-/*
  Current format version (v3: adds AC literal mapping for zero-copy loading)
  */
 #define VERSION 3
