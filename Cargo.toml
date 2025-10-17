@@ -71,7 +71,7 @@ libc = "0.2"
 memmap2 = "0.9.8"
 zerocopy = { version = "0.8.27", features = ["derive"] }  # Safe binary format access
 clap = { version = "4.5", features = ["derive", "cargo"] }
-idna = "0.5"  # Unicode domain (IDN) to punycode conversion
+idna = "1.0"  # Unicode domain (IDN) to punycode conversion
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"

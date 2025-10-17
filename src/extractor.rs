@@ -28,7 +28,6 @@ impl PatternExtractorBuilder {
             extract_emails: true,
             extract_ipv4: true,
             extract_ipv6: true,
-            require_valid_tld: true,
             min_domain_labels: 2,
             require_word_boundaries: true,
         }
