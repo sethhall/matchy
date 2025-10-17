@@ -73,6 +73,118 @@ int main() {
     
     matchy_close(db);
     
+    // Test new open_with_options API
+    printf("\n--- Testing open_with_options API ---\n");
+    
+    // Test 1: Open with default options
+    matchy_open_options_t opts;
+    matchy_init_open_options(&opts);
+    
+    matchy_t* db2 = matchy_open_with_options(tmpfile, &opts);
+    if (db2 == NULL) {
+        fprintf(stderr, "Failed to open with default options\n");
+        return 1;
+    }
+    printf("✓ Opened with default options (cache: %u, trusted: %u)\n", 
+           opts.cache_capacity, opts.trusted);
+    
+    // Verify it works
+    result = matchy_query(db2, "test_file.txt");
+    if (!result.found) {
+        fprintf(stderr, "Query failed with default options\n");
+        return 1;
+    }
+    matchy_free_result(&result);
+    matchy_close(db2);
+    printf("✓ Query works with default options\n");
+    
+    // Test 2: Open with cache disabled
+    matchy_init_open_options(&opts);
+    opts.cache_capacity = 0;  // Disable cache
+    
+    matchy_t* db3 = matchy_open_with_options(tmpfile, &opts);
+    if (db3 == NULL) {
+        fprintf(stderr, "Failed to open with cache disabled\n");
+        return 1;
+    }
+    printf("✓ Opened with cache disabled\n");
+    
+    // Verify it still works
+    result = matchy_query(db3, "test_file.txt");
+    if (!result.found) {
+        fprintf(stderr, "Query failed with cache disabled\n");
+        return 1;
+    }
+    matchy_free_result(&result);
+    matchy_close(db3);
+    printf("✓ Query works with cache disabled\n");
+    
+    // Test 3: Open with custom cache size
+    matchy_init_open_options(&opts);
+    opts.cache_capacity = 100;  // Small cache
+    
+    matchy_t* db4 = matchy_open_with_options(tmpfile, &opts);
+    if (db4 == NULL) {
+        fprintf(stderr, "Failed to open with custom cache\n");
+        return 1;
+    }
+    printf("✓ Opened with custom cache size (100)\n");
+    
+    // Test multiple queries to potentially hit cache
+    for (int i = 0; i < 5; i++) {
+        result = matchy_query(db4, "test_file.txt");
+        if (!result.found) {
+            fprintf(stderr, "Query %d failed\n", i);
+            return 1;
+        }
+        matchy_free_result(&result);
+    }
+    matchy_close(db4);
+    printf("✓ Multiple queries work with custom cache\n");
+    
+    // Test 4: Open with trusted mode
+    matchy_init_open_options(&opts);
+    opts.trusted = 1;  // Skip validation
+    opts.cache_capacity = 1000;
+    
+    matchy_t* db5 = matchy_open_with_options(tmpfile, &opts);
+    if (db5 == NULL) {
+        fprintf(stderr, "Failed to open with trusted mode\n");
+        return 1;
+    }
+    printf("✓ Opened with trusted mode\n");
+    
+    result = matchy_query(db5, "test_file.txt");
+    if (!result.found) {
+        fprintf(stderr, "Query failed in trusted mode\n");
+        return 1;
+    }
+    matchy_free_result(&result);
+    matchy_close(db5);
+    printf("✓ Query works in trusted mode\n");
+    
+    // Test 5: NULL pointer checks
+    printf("\n--- Testing error handling ---\n");
+    
+    // NULL options should fail gracefully
+    matchy_t* db_null = matchy_open_with_options(tmpfile, NULL);
+    if (db_null != NULL) {
+        fprintf(stderr, "Should have failed with NULL options\n");
+        matchy_close(db_null);
+        return 1;
+    }
+    printf("✓ NULL options rejected\n");
+    
+    // NULL path should fail
+    matchy_init_open_options(&opts);
+    db_null = matchy_open_with_options(NULL, &opts);
+    if (db_null != NULL) {
+        fprintf(stderr, "Should have failed with NULL path\n");
+        matchy_close(db_null);
+        return 1;
+    }
+    printf("✓ NULL path rejected\n");
+    
     printf("\n=== All C API tests passed! ===\n");
     return 0;
 }

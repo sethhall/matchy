@@ -91,7 +91,7 @@ fn main() {
 
     // Build the final matcher
     println!("\nBuilding final Paraglob matcher...");
-    let mut pg = builder.build().unwrap();
+    let pg = builder.build().unwrap();
 
     println!("✓ Matcher built successfully!");
     println!(

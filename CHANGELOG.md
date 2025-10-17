@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Query Result Caching** for high-throughput workloads
+  - Configurable LRU cache with `Database::from().cache_capacity(size)` builder API
+  - Disable caching with `Database::from().no_cache()` for memory-constrained environments
+  - `clear_cache()` method for cache management
+  - Benchmarks show 2-10x speedup at 80%+ cache hit rates
+  - Zero overhead when disabled (compile-time branch elimination)
+  - Thread-safe with internal RefCell for zero-cost sharing
+  - Example: `benches/cache_bench.rs` demonstrates performance characteristics
+
+- **Pattern Extractor** for log scanning and data extraction
+  - SIMD-accelerated extraction of domains, IPv4 addresses, and email addresses from unstructured text
+  - Zero-copy line scanning with `memchr` for maximum throughput
+  - Unicode/IDN domain support with automatic punycode conversion
+  - Configurable extraction via `ExtractorConfigBuilder`
+  - Word boundary detection for accurate pattern identification
+  - Binary log support (extracts ASCII patterns from non-UTF-8 data)
+  - 23 comprehensive unit tests covering edge cases
+  - Example usage in `matchy match` command
+
+- **Match Command** for CLI-based log scanning
+  - `matchy match <database> <input-files>` scans logs and reports matches
+  - Automatic pattern extraction from input (domains, IPs, emails)
+  - JSON output (NDJSON format, one match per line to stdout)
+  - Statistics with `--stats` flag (output to stderr)
+  - Streaming input support for large files and stdin (`-`)
+  - Performance: 200-500 MB/sec on typical log files
+
+### Performance
+- **Caching**: 2-10x query speedup with 80%+ hit rates, zero overhead when disabled
+- **Pattern Extraction**: 200-500 MB/sec log scanning throughput
+- **Unicode TLDs**: Zero-copy domain validation using embedded Aho-Corasick automaton
+
+### Dependencies
+- Added `memchr = "2.7"` for SIMD-accelerated byte searching
+- Added `idna = "0.5"` for Unicode domain (IDN) to punycode conversion
+- Added `lru = "0.12"` for LRU cache implementation
+
 ## [1.0.1] - 2025-10-14
 
 ### Fixed

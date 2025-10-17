@@ -13,7 +13,7 @@ use std::hint::black_box;
 fn main() {
     // Build database BEFORE starting profiler
     let patterns = vec!["*.com", "*.org", "test*", "*suffix"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     println!("Database built, starting profiler...\n");
 

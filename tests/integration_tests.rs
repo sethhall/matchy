@@ -12,7 +12,7 @@ use std::collections::HashMap;
 #[test]
 fn test_basic_wildcards() {
     let patterns = vec!["*.txt", "test*", "*file*"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let m1 = pg.find_all("document.txt");
     let m2 = pg.find_all("test_case");
@@ -28,7 +28,7 @@ fn test_basic_wildcards() {
 #[test]
 fn test_exact_string_matching() {
     let patterns = vec!["hello", "world", "test"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let m1 = pg.find_all("hello");
     let m2 = pg.find_all("world");
@@ -44,7 +44,7 @@ fn test_exact_string_matching() {
 #[test]
 fn test_duplicate_pattern_deduplication() {
     let patterns = vec!["*test*", "*test*", "hello", "hello"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let m1 = pg.find_all("test123");
     let m2 = pg.find_all("hello");
@@ -65,7 +65,7 @@ fn test_duplicate_pattern_deduplication() {
 #[test]
 fn test_multiple_patterns_matching_same_text() {
     let patterns = vec!["*.txt", "*file*", "test*"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let m1 = pg.find_all("testfile.txt");
 
@@ -79,7 +79,7 @@ fn test_multiple_patterns_matching_same_text() {
 #[test]
 fn test_case_sensitivity() {
     let patterns = vec!["Test*", "HELLO"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let m1 = pg.find_all("Test123");
     let m2 = pg.find_all("test123");
@@ -101,7 +101,7 @@ fn test_case_sensitivity() {
 #[test]
 fn test_case_insensitivity() {
     let patterns = vec!["Test*", "HELLO"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseInsensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseInsensitive).unwrap();
 
     let m1 = pg.find_all("Test123");
     let m2 = pg.find_all("test123");
@@ -123,7 +123,7 @@ fn test_case_insensitivity() {
 #[test]
 fn test_empty_string_queries() {
     let patterns = vec!["test"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let m1 = pg.find_all("");
     let m2 = pg.find_all("test");
@@ -135,7 +135,7 @@ fn test_empty_string_queries() {
 #[test]
 fn test_pure_literal_patterns() {
     let patterns = vec!["exact_match", "another_literal", "third"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let m1 = pg.find_all("exact_match");
     let m2 = pg.find_all("prefix_exact_match_suffix");
@@ -153,7 +153,7 @@ fn test_pure_literal_patterns() {
 #[test]
 fn test_overlapping_literal_patterns() {
     let patterns = vec!["*test*", "test*", "*test"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let m1 = pg.find_all("test");
     let m2 = pg.find_all("testing");
@@ -170,7 +170,7 @@ fn test_overlapping_literal_patterns() {
 #[test]
 fn test_real_world_file_patterns() {
     let patterns = vec!["*.rs", "*.toml", "Cargo.*", "src/*", "*.md"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let m1 = pg.find_all("main.rs");
     let m2 = pg.find_all("Cargo.toml");
@@ -196,7 +196,7 @@ fn test_large_pattern_set() {
         patterns.push(format!("pattern_{}_*", i));
     }
     let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
-    let mut pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
 
     // Test that we can find specific patterns in the large set
     let m1 = pg.find_all("pattern_500_test");
@@ -224,7 +224,7 @@ fn test_large_pattern_set() {
 fn test_combined_literal_and_glob_patterns() {
     // Mix of literal strings and glob patterns
     let patterns = vec!["hello", "*.txt", "test_*"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let m1 = pg.find_all("hello.txt");
     let m2 = pg.find_all("test_file.txt");
@@ -243,7 +243,7 @@ fn test_combined_literal_and_glob_patterns() {
 #[test]
 fn test_pure_wildcard_patterns() {
     let patterns = vec!["*", "?", "**"];
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let m1 = pg.find_all("test");
     let m2 = pg.find_all("a");
@@ -549,7 +549,7 @@ fn test_v2_matching_with_data_retrieval() {
         Some(DataValue::Map(data3)),
     ];
 
-    let mut pg = Paraglob::build_from_patterns_with_data(
+    let pg = Paraglob::build_from_patterns_with_data(
         &patterns,
         Some(&data_values),
         MatchMode::CaseSensitive,
@@ -671,7 +671,7 @@ fn test_v2_incremental_builder() {
     assert!(!builder.contains_pattern("nonexistent"));
 
     // Build final matcher
-    let mut pg = builder.build().unwrap();
+    let pg = builder.build().unwrap();
 
     // Test matching
     let matches = pg.find_all("test_file.txt");
@@ -707,7 +707,7 @@ fn test_v2_incremental_builder_duplicate_handling() {
     assert_eq!(id1, id2);
     assert_eq!(builder.pattern_count(), 1);
 
-    let mut pg = builder.build().unwrap();
+    let pg = builder.build().unwrap();
     let matches = pg.find_all("file.txt");
 
     // Should only match once

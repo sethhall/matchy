@@ -447,6 +447,82 @@ impl ACAutomaton {
         })
     }
 
+    /// Find all matches with their end positions
+    ///
+    /// Returns (end_position, pattern_id) for each match.
+    /// The end_position is the byte offset immediately after the match.
+    pub fn find_with_positions(&self, text: &str) -> Vec<(usize, u32)> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+
+        let normalized = match self.mode {
+            MatchMode::CaseSensitive => text.as_bytes().to_vec(),
+            MatchMode::CaseInsensitive => text.to_lowercase().into_bytes(),
+        };
+
+        let mut matches = Vec::new();
+        let mut current_offset = 0usize;
+
+        for (pos, &ch) in normalized.iter().enumerate() {
+            let mut next_offset = self.find_transition(current_offset, ch);
+
+            while next_offset.is_none() && current_offset != 0 {
+                let node_slice = match self.buffer.get(current_offset..) {
+                    Some(s) => s,
+                    None => break,
+                };
+                let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
+                    Ok((r, _)) => r,
+                    Err(_) => break,
+                };
+                let node = *node_ref;
+                current_offset = node.failure_offset as usize;
+
+                if current_offset == 0 {
+                    break;
+                }
+
+                next_offset = self.find_transition(current_offset, ch);
+            }
+
+            if next_offset.is_none() {
+                next_offset = self.find_transition(0, ch);
+            }
+
+            current_offset = next_offset.unwrap_or(0);
+
+            // Collect matches at this position (end pos is pos + 1)
+            let node_slice = match self.buffer.get(current_offset..) {
+                Some(s) => s,
+                None => continue,
+            };
+            let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
+                Ok((r, _)) => r,
+                Err(_) => continue,
+            };
+            let node = *node_ref;
+
+            if node.pattern_count > 0 {
+                let patterns_offset = node.patterns_offset as usize;
+                let pattern_count = node.pattern_count as usize;
+
+                if patterns_offset + pattern_count * 4 <= self.buffer.len() {
+                    let pattern_slice = &self.buffer[patterns_offset..];
+                    if let Ok((ids_ref, _)) =
+                        Ref::<_, [u32]>::from_prefix_with_elems(pattern_slice, pattern_count)
+                    {
+                        for &pattern_id in ids_ref.iter() {
+                            matches.push((pos + 1, pattern_id));
+                        }
+                    }
+                }
+            }
+        }
+
+        matches
+    }
+
     /// Find all pattern IDs that match in the text
     ///
     /// This traverses the offset-based automaton directly.

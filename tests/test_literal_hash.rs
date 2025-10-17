@@ -24,7 +24,9 @@ fn test_literal_exact_match() {
     std::io::Write::write_all(&mut tmpfile, &db_bytes).unwrap();
 
     // Load and test
-    let db = Database::open(tmpfile.path().to_str().unwrap()).unwrap();
+    let db = Database::from(tmpfile.path().to_str().unwrap())
+        .open()
+        .unwrap();
 
     // Test exact match
     let result = db.lookup("evil.com").unwrap().unwrap();
@@ -81,7 +83,9 @@ fn test_literal_and_glob_both_match() {
     std::io::Write::write_all(&mut tmpfile, &db_bytes).unwrap();
 
     // Load and test
-    let db = Database::open(tmpfile.path().to_str().unwrap()).unwrap();
+    let db = Database::from(tmpfile.path().to_str().unwrap())
+        .open()
+        .unwrap();
 
     // Query should match BOTH the literal AND the glob
     let result = db.lookup("evil.com").unwrap().unwrap();
@@ -130,7 +134,9 @@ fn test_glob_only_match() {
     std::io::Write::write_all(&mut tmpfile, &db_bytes).unwrap();
 
     // Load and test
-    let db = Database::open(tmpfile.path().to_str().unwrap()).unwrap();
+    let db = Database::from(tmpfile.path().to_str().unwrap())
+        .open()
+        .unwrap();
 
     // Test glob match
     let result = db.lookup("test.phishing.com").unwrap().unwrap();
@@ -184,7 +190,9 @@ fn test_mixed_ip_literal_glob() {
     std::io::Write::write_all(&mut tmpfile, &db_bytes).unwrap();
 
     // Load and test
-    let db = Database::open(tmpfile.path().to_str().unwrap()).unwrap();
+    let db = Database::from(tmpfile.path().to_str().unwrap())
+        .open()
+        .unwrap();
 
     // Test IP lookup
     let result = db.lookup("1.2.3.4").unwrap().unwrap();
@@ -231,7 +239,9 @@ fn test_literal_with_special_chars() {
     std::io::Write::write_all(&mut tmpfile, &db_bytes).unwrap();
 
     // Load and test
-    let db = Database::open(tmpfile.path().to_str().unwrap()).unwrap();
+    let db = Database::from(tmpfile.path().to_str().unwrap())
+        .open()
+        .unwrap();
 
     // These should match exactly
     assert!(matches!(

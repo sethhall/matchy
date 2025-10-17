@@ -366,6 +366,125 @@ pub unsafe extern "C" fn matchy_builder_free(builder: *mut matchy_builder_t) {
 // DATABASE QUERYING API
 // ============================================================================
 
+/// Database opening options
+///
+/// Configure how databases are loaded, including cache settings and validation.
+#[repr(C)]
+pub struct matchy_open_options_t {
+    /// Skip UTF-8 validation (faster but less safe)
+    /// 0 = validate (safe), 1 = skip validation (trusted mode)
+    pub trusted: u8,
+
+    /// LRU cache capacity
+    /// 0 = disable cache, >0 = cache this many entries
+    /// Default: 10000
+    pub cache_capacity: u32,
+}
+
+impl Default for matchy_open_options_t {
+    fn default() -> Self {
+        Self {
+            trusted: 0,
+            cache_capacity: 10000,
+        }
+    }
+}
+
+/// Initialize database opening options with defaults
+///
+/// Sets default values:
+/// - trusted = 0 (validation enabled)
+/// - cache_capacity = 10000
+///
+/// # Parameters
+/// * `options` - Pointer to options struct to initialize (must not be NULL)
+///
+/// # Safety
+/// * `options` must be a valid pointer
+///
+/// # Example
+/// ```c
+/// matchy_open_options_t opts;
+/// matchy_init_open_options(&opts);
+/// opts.cache_capacity = 100000;  // Custom size
+/// matchy_t *db = matchy_open_with_options("threats.mxy", &opts);
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_init_open_options(options: *mut matchy_open_options_t) {
+    if options.is_null() {
+        return;
+    }
+    *options = matchy_open_options_t::default();
+}
+
+/// Open database with custom options
+///
+/// Opens a database file with configurable cache size and validation settings.
+///
+/// # Parameters
+/// * `filename` - Path to database file (null-terminated C string, must not be NULL)
+/// * `options` - Opening options (must not be NULL)
+///
+/// # Returns
+/// * Non-null pointer on success
+/// * NULL on failure
+///
+/// # Safety
+/// * `filename` must be a valid null-terminated C string
+/// * `options` must be a valid pointer
+///
+/// # Example
+/// ```c
+/// // High-performance mode
+/// matchy_open_options_t opts;
+/// matchy_init_open_options(&opts);
+/// opts.trusted = 1;            // Skip validation
+/// opts.cache_capacity = 100000; // Large cache
+///
+/// matchy_t *db = matchy_open_with_options("threats.mxy", &opts);
+/// if (db == NULL) {
+///     fprintf(stderr, "Failed to open database\n");
+///     return 1;
+/// }
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_open_with_options(
+    filename: *const c_char,
+    options: *const matchy_open_options_t,
+) -> *mut matchy_t {
+    if filename.is_null() || options.is_null() {
+        return ptr::null_mut();
+    }
+
+    let path = match CStr::from_ptr(filename).to_str() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    let opts = &*options;
+
+    // Build database using fluent API
+    let mut opener = RustDatabase::from(path);
+
+    if opts.trusted != 0 {
+        opener = opener.trusted();
+    }
+
+    if opts.cache_capacity == 0 {
+        opener = opener.no_cache();
+    } else {
+        opener = opener.cache_capacity(opts.cache_capacity as usize);
+    }
+
+    match opener.open() {
+        Ok(db) => {
+            let internal = Box::new(MatchyInternal { database: db });
+            matchy_t::from_internal(internal)
+        }
+        Err(_) => ptr::null_mut(),
+    }
+}
+
 /// Open database from file (memory-mapped) - SAFE mode
 ///
 /// Opens a database file using memory mapping for optimal performance.
@@ -393,22 +512,9 @@ pub unsafe extern "C" fn matchy_builder_free(builder: *mut matchy_builder_t) {
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_open(filename: *const c_char) -> *mut matchy_t {
-    if filename.is_null() {
-        return ptr::null_mut();
-    }
-
-    let path = match CStr::from_ptr(filename).to_str() {
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(),
-    };
-
-    match RustDatabase::open(path) {
-        Ok(db) => {
-            let internal = Box::new(MatchyInternal { database: db });
-            matchy_t::from_internal(internal)
-        }
-        Err(_) => ptr::null_mut(),
-    }
+    // Delegate to matchy_open_with_options with default settings
+    let opts = matchy_open_options_t::default();
+    matchy_open_with_options(filename, &opts)
 }
 
 /// Open database from file (memory-mapped) - TRUSTED mode
@@ -441,22 +547,12 @@ pub unsafe extern "C" fn matchy_open(filename: *const c_char) -> *mut matchy_t {
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_open_trusted(filename: *const c_char) -> *mut matchy_t {
-    if filename.is_null() {
-        return ptr::null_mut();
-    }
-
-    let path = match CStr::from_ptr(filename).to_str() {
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(),
+    // Delegate to matchy_open_with_options with trusted=true
+    let opts = matchy_open_options_t {
+        trusted: 1,
+        cache_capacity: 10000,
     };
-
-    match RustDatabase::open_trusted(path) {
-        Ok(db) => {
-            let internal = Box::new(MatchyInternal { database: db });
-            matchy_t::from_internal(internal)
-        }
-        Err(_) => ptr::null_mut(),
-    }
+    matchy_open_with_options(filename, &opts)
 }
 
 /// Open database from memory buffer (zero-copy)
@@ -488,6 +584,102 @@ pub unsafe extern "C" fn matchy_open_buffer(buffer: *const u8, size: usize) -> *
         }
         Err(_) => ptr::null_mut(),
     }
+}
+
+/// Database statistics
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct matchy_stats_t {
+    /// Total number of queries executed
+    pub total_queries: u64,
+    /// Queries that found a match
+    pub queries_with_match: u64,
+    /// Queries that found no match
+    pub queries_without_match: u64,
+    /// Cache hits (query served from cache)
+    pub cache_hits: u64,
+    /// Cache misses (query required lookup)
+    pub cache_misses: u64,
+    /// Number of IP address queries
+    pub ip_queries: u64,
+    /// Number of string queries (literal or pattern)
+    pub string_queries: u64,
+}
+
+/// Get database statistics
+///
+/// Returns statistics about query performance, cache effectiveness,
+/// and query distribution.
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+/// * `stats` - Pointer to stats structure to fill (must not be NULL)
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+/// * `stats` must be a valid pointer to matchy_stats_t
+///
+/// # Example
+/// ```c
+/// matchy_stats_t stats;
+/// matchy_get_stats(db, &stats);
+/// printf("Total queries: %llu\n", stats.total_queries);
+///
+/// // Calculate hit rate
+/// double cache_hit_rate = 0.0;
+/// if (stats.cache_hits + stats.cache_misses > 0) {
+///     cache_hit_rate = (double)stats.cache_hits /
+///                      (stats.cache_hits + stats.cache_misses);
+/// }
+/// printf("Cache hit rate: %.1f%%\n", cache_hit_rate * 100.0);
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_get_stats(db: *const matchy_t, stats: *mut matchy_stats_t) {
+    if db.is_null() || stats.is_null() {
+        return;
+    }
+
+    let internal = matchy_t::as_internal(db);
+    let rust_stats = internal.database.stats();
+
+    *stats = matchy_stats_t {
+        total_queries: rust_stats.total_queries,
+        queries_with_match: rust_stats.queries_with_match,
+        queries_without_match: rust_stats.queries_without_match,
+        cache_hits: rust_stats.cache_hits,
+        cache_misses: rust_stats.cache_misses,
+        ip_queries: rust_stats.ip_queries,
+        string_queries: rust_stats.string_queries,
+    };
+}
+
+/// Clear the query cache
+///
+/// Removes all cached query results. Useful for benchmarking or
+/// forcing fresh lookups.
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+///
+/// # Example
+/// ```c
+/// // Do some queries (fills cache)
+/// matchy_query(db, "example.com");
+///
+/// // Clear cache to force fresh lookups
+/// matchy_clear_cache(db);
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_clear_cache(db: *const matchy_t) {
+    if db.is_null() {
+        return;
+    }
+
+    let internal = matchy_t::as_internal(db);
+    internal.database.clear_cache();
 }
 
 /// Close database

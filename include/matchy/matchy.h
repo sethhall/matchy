@@ -225,11 +225,64 @@ typedef struct matchy_builder_t {
 } matchy_builder_t;
 
 /*
+ Database opening options
+
+ Configure how databases are loaded, including cache settings and validation.
+ */
+typedef struct matchy_open_options_t {
+  /*
+   Skip UTF-8 validation (faster but less safe)
+   0 = validate (safe), 1 = skip validation (trusted mode)
+   */
+  uint8_t trusted;
+  /*
+   LRU cache capacity
+   0 = disable cache, >0 = cache this many entries
+   Default: 10000
+   */
+  uint32_t cache_capacity;
+} matchy_open_options_t;
+
+/*
  Opaque database handle
  */
 typedef struct matchy_t {
   uint8_t _private[0];
 } matchy_t;
+
+/*
+ Database statistics
+ */
+typedef struct matchy_stats_t {
+  /*
+   Total number of queries executed
+   */
+  uint64_t total_queries;
+  /*
+   Queries that found a match
+   */
+  uint64_t queries_with_match;
+  /*
+   Queries that found no match
+   */
+  uint64_t queries_without_match;
+  /*
+   Cache hits (query served from cache)
+   */
+  uint64_t cache_hits;
+  /*
+   Cache misses (query required lookup)
+   */
+  uint64_t cache_misses;
+  /*
+   Number of IP address queries
+   */
+  uint64_t ip_queries;
+  /*
+   Number of string queries (literal or pattern)
+   */
+  uint64_t string_queries;
+} matchy_stats_t;
 
 /*
  Query result
@@ -441,6 +494,63 @@ int32_t matchy_builder_build(struct matchy_builder_t *builder, uint8_t **buffer,
 void matchy_builder_free(struct matchy_builder_t *builder);
 
 /*
+ Initialize database opening options with defaults
+
+ Sets default values:
+ - trusted = 0 (validation enabled)
+ - cache_capacity = 10000
+
+ # Parameters
+ * `options` - Pointer to options struct to initialize (must not be NULL)
+
+ # Safety
+ * `options` must be a valid pointer
+
+ # Example
+ ```c
+ matchy_open_options_t opts;
+ matchy_init_open_options(&opts);
+ opts.cache_capacity = 100000;  // Custom size
+ matchy_t *db = matchy_open_with_options("threats.mxy", &opts);
+ ```
+ */
+void matchy_init_open_options(struct matchy_open_options_t *options);
+
+/*
+ Open database with custom options
+
+ Opens a database file with configurable cache size and validation settings.
+
+ # Parameters
+ * `filename` - Path to database file (null-terminated C string, must not be NULL)
+ * `options` - Opening options (must not be NULL)
+
+ # Returns
+ * Non-null pointer on success
+ * NULL on failure
+
+ # Safety
+ * `filename` must be a valid null-terminated C string
+ * `options` must be a valid pointer
+
+ # Example
+ ```c
+ // High-performance mode
+ matchy_open_options_t opts;
+ matchy_init_open_options(&opts);
+ opts.trusted = 1;            // Skip validation
+ opts.cache_capacity = 100000; // Large cache
+
+ matchy_t *db = matchy_open_with_options("threats.mxy", &opts);
+ if (db == NULL) {
+     fprintf(stderr, "Failed to open database\n");
+     return 1;
+ }
+ ```
+ */
+struct matchy_t *matchy_open_with_options(const char *filename, const struct matchy_open_options_t *options);
+
+/*
  Open database from file (memory-mapped) - SAFE mode
 
  Opens a database file using memory mapping for optimal performance.
@@ -519,6 +629,60 @@ struct matchy_t *matchy_open_trusted(const char *filename);
  * Caller must not modify or free buffer while handle exists
  */
 struct matchy_t *matchy_open_buffer(const uint8_t *buffer, uintptr_t size);
+
+/*
+ Get database statistics
+
+ Returns statistics about query performance, cache effectiveness,
+ and query distribution.
+
+ # Parameters
+ * `db` - Database handle (must not be NULL)
+ * `stats` - Pointer to stats structure to fill (must not be NULL)
+
+ # Safety
+ * `db` must be a valid pointer from matchy_open
+ * `stats` must be a valid pointer to matchy_stats_t
+
+ # Example
+ ```c
+ matchy_stats_t stats;
+ matchy_get_stats(db, &stats);
+ printf("Total queries: %llu\n", stats.total_queries);
+
+ // Calculate hit rate
+ double cache_hit_rate = 0.0;
+ if (stats.cache_hits + stats.cache_misses > 0) {
+     cache_hit_rate = (double)stats.cache_hits /
+                      (stats.cache_hits + stats.cache_misses);
+ }
+ printf("Cache hit rate: %.1f%%\n", cache_hit_rate * 100.0);
+ ```
+ */
+void matchy_get_stats(const struct matchy_t *db, struct matchy_stats_t *stats);
+
+/*
+ Clear the query cache
+
+ Removes all cached query results. Useful for benchmarking or
+ forcing fresh lookups.
+
+ # Parameters
+ * `db` - Database handle (must not be NULL)
+
+ # Safety
+ * `db` must be a valid pointer from matchy_open
+
+ # Example
+ ```c
+ // Do some queries (fills cache)
+ matchy_query(db, "example.com");
+
+ // Clear cache to force fresh lookups
+ matchy_clear_cache(db);
+ ```
+ */
+void matchy_clear_cache(const struct matchy_t *db);
 
 /*
  Close database

@@ -25,6 +25,9 @@
 .DS_Store
 Thumbs.db
 
+flamegraph.svg
+/*.mxy
+
 # Benchmarks - ignore all generated data (baselines are local workflow artifacts)
 /benchmarks/criterion_data/
 /benchmarks/comparison_*/
