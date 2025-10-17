@@ -178,8 +178,7 @@ mod tests {
         let path = temp_dir.join("paraglob_test_file_roundtrip.pgb");
 
         let patterns = vec!["hello", "*.txt", "test_*"];
-        let mut pg =
-            Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        let pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
 
         // Save
         save(&pg, &path).unwrap();

@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&db_path, &db_bytes)?;
 
     // Load with mmap (zero-copy)
-    let db = Database::open(db_path.to_str().unwrap())?;
+    let db = Database::from(db_path.to_str().unwrap()).open()?;
     println!("   ✓ Database loaded (zero-copy mmap)");
 
     // Test queries

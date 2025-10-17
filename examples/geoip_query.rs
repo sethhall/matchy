@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Open the GeoIP database
     println!("Loading database: {}", db_path);
-    let db = Database::open(db_path)?;
+    let db = Database::from(db_path).open()?;
     println!("Database format: {}\n", db.format());
 
     // If IP address provided, query it

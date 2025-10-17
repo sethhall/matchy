@@ -31,6 +31,8 @@ db.lookup("sub.evil.example.com")?; // Matches *.example.com pattern
 - **7M+ queries/second** for IP lookups, 3M+ for glob patterns
 - **<1ms load time** via memory mapping, regardless of database size
 - **99% memory savings** in multi-process deployments
+- **Query result caching**: 2-10x speedup for high-traffic workloads
+- **Log scanning**: SIMD-accelerated extraction of domains, IPs, emails
 - **Unified database**: IPs, strings, and patterns in one file
 - **MaxMind compatible**: Extended MMDB format
 - **Rich metadata**: JSON-like structured data storage
@@ -62,8 +64,16 @@ matchy query threats.mxy 1.2.3.4
 matchy query threats.mxy sub.evil.com
 # [{"threat_level":"critical","category":"phishing"}]
 
-matchy query threats.mxy benign.com
-# []
+# Scan logs for threats (outputs JSON, one match per line)
+matchy match threats.mxy access.log --stats
+# Outputs JSON to stdout (one line per match):
+# {"matched_text":"evil.example.com","match_type":"pattern","data":[{"threat_level":"critical"}]}
+# {"matched_text":"1.2.3.4","match_type":"ip","cidr":"1.2.3.0/24",...}
+#
+# Statistics to stderr (with --stats flag):
+# [INFO] Lines processed: 15,234
+# [INFO] Lines with matches: 127 (0.8%)
+# [INFO] Throughput: 450.23 MB/s
 ```
 
 ### Rust API
@@ -73,7 +83,7 @@ cargo add matchy
 ```
 
 ```rust
-use matchy::{Database, DatabaseBuilder};
+use matchy::{Database, DatabaseBuilder, PatternExtractor};
 
 // Build
 let mut builder = DatabaseBuilder::new();
@@ -81,10 +91,21 @@ builder.add_ip("8.8.8.8", data)?;
 builder.add_pattern("*.evil.com", data)?;
 builder.save("db.mxy")?;
 
-// Query
-let db = Database::open("db.mxy")?;
+// Query with caching for high-traffic workloads
+let db = Database::from("db.mxy")
+    .cache_capacity(10_000)  // LRU cache for 10k queries
+    .open()?;
+
 if let Some(result) = db.lookup("sub.evil.com")? {
     println!("Match: {:?}", result);
+}
+
+// Extract patterns from logs
+let extractor = PatternExtractor::new()?;
+for line in log_file.lines() {
+    for match_item in extractor.extract_from_line(line.as_bytes()) {
+        println!("Found: {:?}", match_item);
+    }
 }
 ```
 

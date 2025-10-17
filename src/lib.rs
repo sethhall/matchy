@@ -96,6 +96,8 @@ pub mod database;
 pub mod endian;
 /// Error types for Paraglob operations
 pub mod error;
+/// Fast extraction of structured patterns (domains, IPs, emails) from text
+pub mod extractor;
 pub mod glob;
 /// IP tree builder for MMDB format
 pub mod ip_tree_builder;
@@ -129,7 +131,9 @@ pub mod c_api;
 // Re-exports for Rust consumers
 
 /// Unified database for IP and pattern lookups
-pub use crate::database::{Database, DatabaseError, QueryResult};
+pub use crate::database::{
+    Database, DatabaseError, DatabaseOpener, DatabaseOptions, DatabaseStats, QueryResult,
+};
 
 /// Data value type for database entries
 pub use crate::data_section::DataValue;
