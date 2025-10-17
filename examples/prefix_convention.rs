@@ -85,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Query examples
     println!("\n6. Querying the database:");
-    let db = Database::open(tmp_path.to_str().unwrap())?;
+    let db = Database::from(tmp_path.to_str().unwrap()).open()?;
 
     // Query IP
     if let Some(result) = db.lookup("8.8.8.8")? {

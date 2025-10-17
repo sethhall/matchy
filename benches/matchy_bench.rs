@@ -123,8 +123,7 @@ fn bench_match(c: &mut Criterion) {
     for &pattern_count in &pattern_counts {
         let patterns = generate_patterns(pattern_count, "mixed");
         let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
-        let mut pg =
-            Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
+        let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
 
         for &text_size in &text_sizes {
             for match_rate in ["none", "low", "medium", "high"].iter() {
@@ -245,7 +244,7 @@ fn bench_realistic_workload(c: &mut Criterion) {
     // - Processing 100 strings of varying sizes
     let patterns = generate_patterns(500, "mixed");
     let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
-    let mut pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
 
     let test_strings: Vec<String> = (0..100)
         .map(|i| generate_text(100 + i * 10, if i % 4 == 0 { "high" } else { "low" }))
@@ -274,7 +273,7 @@ fn bench_case_sensitivity(c: &mut Criterion) {
     let text = generate_text(1000, "medium");
 
     // Case sensitive
-    let mut pg_sensitive =
+    let pg_sensitive =
         Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
 
     group.bench_function("sensitive", |b| {
@@ -285,7 +284,7 @@ fn bench_case_sensitivity(c: &mut Criterion) {
     });
 
     // Case insensitive
-    let mut pg_insensitive =
+    let pg_insensitive =
         Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseInsensitive).unwrap();
 
     group.bench_function("insensitive", |b| {
@@ -318,7 +317,7 @@ fn bench_dense_nodes(c: &mut Criterion) {
     }
 
     let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
-    let mut pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
+    let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
 
     // Test traversing dense nodes
     let test_strings = vec!["prefix_msuffix", "num_55_end", "prefix_zsuffix"];

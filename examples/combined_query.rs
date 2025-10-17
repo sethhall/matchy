@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = &args[1];
 
     println!("Loading combined database: {}", db_path);
-    let db = Database::open(db_path)?;
+    let db = Database::from(db_path).open()?;
     println!("Format: {}", db.format());
     println!("Has IP data: {}", db.has_ip_data());
     println!("Has literal data: {}", db.has_literal_data());

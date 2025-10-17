@@ -131,7 +131,7 @@ pub enum ExtractedItem<'a> {
     Ipv4(Ipv4Addr),
     /// IPv6 address
     Ipv6(Ipv6Addr),
-    /// URL (e.g., "https://example.com/path")
+    /// URL (e.g., "<https://example.com/path>")
     Url(&'a str),
 }
 
@@ -188,17 +188,17 @@ impl PatternExtractor {
     }
 
     /// Extract patterns from a line using an iterator (zero-allocation)
-    /// 
+    ///
     /// Returns an iterator that lazily extracts matches as you iterate.
     /// This is more efficient than collecting into a Vec.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// for match_item in extractor.extract_from_line(line) {
     ///     // Process each match
     /// }
     /// ```
-    pub fn extract_from_line<'a>(&'a mut self, line: &'a [u8]) -> ExtractIter<'a> {
+    pub fn extract_from_line<'a>(&'a self, line: &'a [u8]) -> ExtractIter<'a> {
         ExtractIter::new(self, line)
     }
 
@@ -208,10 +208,10 @@ impl PatternExtractor {
     }
 
     /// Extract domains by finding TLD anchors and expanding boundaries
-    fn extract_domains<'a>(&mut self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+    fn extract_domains<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
         use memchr::memchr;
 
-        let tld_matcher = match self.tld_matcher.as_mut() {
+        let tld_matcher = match self.tld_matcher.as_ref() {
             Some(m) => m,
             None => return,
         };
@@ -290,10 +290,11 @@ impl PatternExtractor {
         }
 
         // Check word boundary at end if required
-        if self.config.require_word_boundaries {
-            if tld_end < line.len() && !is_word_boundary(line[tld_end]) {
-                return None; // Domain continues - not a real boundary
-            }
+        if self.config.require_word_boundaries
+            && tld_end < line.len()
+            && !is_word_boundary(line[tld_end])
+        {
+            return None; // Domain continues - not a real boundary
         }
 
         if start >= tld_end {
@@ -418,10 +419,8 @@ impl PatternExtractor {
         let mut octets = Vec::new();
 
         // Check word boundary at start if required
-        if self.config.require_word_boundaries && start > 0 {
-            if !is_word_boundary(line[start - 1]) {
-                return None;
-            }
+        if self.config.require_word_boundaries && start > 0 && !is_word_boundary(line[start - 1]) {
+            return None;
         }
 
         // Parse up to 4 octets
@@ -458,10 +457,8 @@ impl PatternExtractor {
         }
 
         // Check word boundary at end if required
-        if self.config.require_word_boundaries && pos < line.len() {
-            if !is_word_boundary(line[pos]) {
-                return None;
-            }
+        if self.config.require_word_boundaries && pos < line.len() && !is_word_boundary(line[pos]) {
+            return None;
         }
 
         if octets.len() == 4 {
@@ -473,7 +470,7 @@ impl PatternExtractor {
     }
 
     /// Extract email addresses using SIMD-accelerated @ search
-    fn extract_emails<'a>(&mut self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+    fn extract_emails<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
         use memchr::memchr_iter;
 
         // Find all @ symbols using SIMD - much faster than scanning every byte
@@ -504,10 +501,8 @@ impl PatternExtractor {
         }
 
         // Check word boundary at start if required
-        if self.config.require_word_boundaries && start > 0 {
-            if !is_word_boundary(line[start - 1]) {
-                return None;
-            }
+        if self.config.require_word_boundaries && start > 0 && !is_word_boundary(line[start - 1]) {
+            return None;
         }
 
         // Expand forwards for domain part
@@ -521,10 +516,8 @@ impl PatternExtractor {
         }
 
         // Check word boundary at end if required
-        if self.config.require_word_boundaries && end < line.len() {
-            if !is_word_boundary(line[end]) {
-                return None;
-            }
+        if self.config.require_word_boundaries && end < line.len() && !is_word_boundary(line[end]) {
+            return None;
         }
 
         // Validate domain part has at least one dot and valid TLD
@@ -544,12 +537,12 @@ impl Default for PatternExtractor {
 }
 
 /// Iterator over extracted patterns in a line
-/// 
+///
 /// Lazily extracts patterns as you iterate, avoiding allocation
 /// when not all matches are needed.
 pub struct ExtractIter<'a> {
     #[allow(dead_code)]
-    extractor: &'a mut PatternExtractor,
+    extractor: &'a PatternExtractor,
     #[allow(dead_code)]
     line: &'a [u8],
     matches: Vec<Match<'a>>,
@@ -557,7 +550,7 @@ pub struct ExtractIter<'a> {
 }
 
 impl<'a> ExtractIter<'a> {
-    fn new(extractor: &'a mut PatternExtractor, line: &'a [u8]) -> Self {
+    fn new(extractor: &'a PatternExtractor, line: &'a [u8]) -> Self {
         // Extract all matches upfront into a Vec
         // We can optimize this later to be truly lazy if needed
         let mut matches = Vec::new();
@@ -653,7 +646,7 @@ mod tests {
 
     #[test]
     fn test_extractor_creation() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
         assert!(extractor.config().extract_domains);
     }
 
@@ -690,7 +683,7 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_basic() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Visit example.com for more info";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -705,7 +698,7 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_multiple() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Check google.com and github.com";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -717,7 +710,7 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_subdomain() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Visit api.example.com today";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -728,7 +721,7 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_with_protocol() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Go to https://www.example.com/path";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -744,7 +737,7 @@ mod tests {
             .extract_domains(true)
             .min_domain_labels(3) // Require at least 3 labels
             .build();
-        let mut extractor = PatternExtractor::with_config(config).unwrap();
+        let extractor = PatternExtractor::with_config(config).unwrap();
 
         let line = b"Visit example.com and api.test.example.com";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -756,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_log_line() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         // Realistic log line
         let line =
@@ -779,7 +772,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_extraction_basic() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Server at 192.168.1.1 responded";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -799,7 +792,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_extraction_multiple() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Traffic from 10.0.0.5 to 172.16.0.10";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -819,7 +812,7 @@ mod tests {
 
     #[test]
     fn test_unicode_domain_extraction() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         // German domain with umlaut (münchen.de in UTF-8)
         let line = "Visit münchen.de for info".as_bytes();
@@ -838,7 +831,7 @@ mod tests {
 
     #[test]
     fn test_mixed_unicode_ascii_domains() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         // Line with both ASCII and Unicode domains
         let line = "Check café.fr and example.com".as_bytes();
@@ -865,7 +858,7 @@ mod tests {
 
     #[test]
     fn test_binary_log_with_ascii_domain() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         // Binary log line with non-UTF-8 bytes but ASCII domain
         let mut line = Vec::new();
@@ -894,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_invalid_utf8_in_domain_rejected() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         // Line with invalid UTF-8 sequence where domain would be
         let mut line = Vec::new();
@@ -919,7 +912,7 @@ mod tests {
 
     #[test]
     fn test_false_positive_rejection() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         // "blah.community" contains ".com" but shouldn't match as domain
         let line = b"This is blah.community stuff";
@@ -942,7 +935,7 @@ mod tests {
 
     #[test]
     fn test_key_value_pair_extraction() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         // Common log format with key=value pairs
         let line = b"Request: host=api.example.com method=GET path=/test";
@@ -965,7 +958,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_invalid() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         // Invalid IPs should not match
         let line = b"Not IPs: 256.1.1.1 1.2.3.999 1.2.3";
@@ -984,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_mixed_extraction() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         // Mix of domains and IPs
         let line = b"Request from 10.1.2.3 to api.example.com at 192.168.1.100";
@@ -1013,7 +1006,7 @@ mod tests {
 
     #[test]
     fn test_email_extraction_basic() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Contact user@example.com for info";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1032,7 +1025,7 @@ mod tests {
 
     #[test]
     fn test_email_extraction_multiple() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Email alice@test.com or bob@company.org";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1052,7 +1045,7 @@ mod tests {
 
     #[test]
     fn test_email_with_plus() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Send to user+tag@example.com";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1071,7 +1064,7 @@ mod tests {
 
     #[test]
     fn test_full_extraction() {
-        let mut extractor = PatternExtractor::new().unwrap();
+        let extractor = PatternExtractor::new().unwrap();
 
         // Realistic log line with everything
         let line = b"2024-01-15 user@example.com from 10.1.2.3 accessed api.test.com";

@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // === Test 1: Build Performance ===
     println!("--- Build Performance ---");
     let start = Instant::now();
-    let mut pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive)?;
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive)?;
     let build_time = start.elapsed();
     println!(
         "  Build time: {:.2}ms",

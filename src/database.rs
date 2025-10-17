@@ -780,7 +780,7 @@ impl Database {
 
         // 2. Check glob patterns (for wildcard matches)
         if let Some(pg_cell) = &self.pattern_matcher {
-            let mut pg = pg_cell.borrow_mut();
+            let pg = pg_cell.borrow();
             let glob_pattern_ids = pg.find_all(pattern);
 
             // Add glob matches
@@ -1295,7 +1295,9 @@ mod tests {
 
     #[test]
     fn test_detect_ip_database() {
-        let db = Database::open("tests/data/GeoLite2-Country.mmdb").unwrap();
+        let db = Database::from("tests/data/GeoLite2-Country.mmdb")
+            .open()
+            .unwrap();
         assert_eq!(db.format, DatabaseFormat::IpOnly);
         assert!(db.has_ip_data());
         assert!(!db.has_string_data());
@@ -1303,7 +1305,9 @@ mod tests {
 
     #[test]
     fn test_lookup_ip_address() {
-        let db = Database::open("tests/data/GeoLite2-Country.mmdb").unwrap();
+        let db = Database::from("tests/data/GeoLite2-Country.mmdb")
+            .open()
+            .unwrap();
 
         // Test IP lookup
         let result = db.lookup("1.1.1.1").unwrap();
@@ -1327,7 +1331,9 @@ mod tests {
 
     #[test]
     fn test_lookup_ipv6() {
-        let db = Database::open("tests/data/GeoLite2-Country.mmdb").unwrap();
+        let db = Database::from("tests/data/GeoLite2-Country.mmdb")
+            .open()
+            .unwrap();
 
         let result = db.lookup("2001:4860:4860::8888").unwrap();
         assert!(result.is_some());
@@ -1340,7 +1346,9 @@ mod tests {
 
     #[test]
     fn test_lookup_not_found() {
-        let db = Database::open("tests/data/GeoLite2-Country.mmdb").unwrap();
+        let db = Database::from("tests/data/GeoLite2-Country.mmdb")
+            .open()
+            .unwrap();
 
         let result = db.lookup("127.0.0.1").unwrap();
         assert!(matches!(result, Some(QueryResult::NotFound)));
@@ -1348,7 +1356,9 @@ mod tests {
 
     #[test]
     fn test_auto_detect_query_type() {
-        let db = Database::open("tests/data/GeoLite2-Country.mmdb").unwrap();
+        let db = Database::from("tests/data/GeoLite2-Country.mmdb")
+            .open()
+            .unwrap();
 
         // Should auto-detect as IP
         let result = db.lookup("8.8.8.8").unwrap();

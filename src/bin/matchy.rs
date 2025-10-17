@@ -490,7 +490,7 @@ fn cmd_match(
     }
 
     let config = builder.build();
-    let mut extractor =
+    let extractor =
         PatternExtractor::with_config(config).context("Failed to create pattern extractor")?;
 
     if show_stats {
@@ -1644,9 +1644,9 @@ fn cmd_bench(
             cache_size,
             cache_hit_rate,
         ),
-        "literal" => bench_literal_database(
+        "literal" => bench_literal_database(BenchConfig {
             count,
-            &temp_file,
+            temp_file: &temp_file,
             keep,
             load_iterations,
             query_count,
@@ -1654,7 +1654,7 @@ fn cmd_bench(
             trusted,
             cache_size,
             cache_hit_rate,
-        ),
+        }),
         "pattern" => bench_pattern_database(
             count,
             &temp_file,
@@ -1854,9 +1854,9 @@ fn bench_ip_database(
     Ok(())
 }
 
-fn bench_literal_database(
+struct BenchConfig<'a> {
     count: usize,
-    temp_file: &PathBuf,
+    temp_file: &'a PathBuf,
     keep: bool,
     load_iterations: usize,
     query_count: usize,
@@ -1864,7 +1864,20 @@ fn bench_literal_database(
     trusted: bool,
     cache_size: usize,
     cache_hit_rate: usize,
-) -> Result<()> {
+}
+
+fn bench_literal_database(config: BenchConfig) -> Result<()> {
+    let BenchConfig {
+        count,
+        temp_file,
+        keep,
+        load_iterations,
+        query_count,
+        hit_rate,
+        trusted,
+        cache_size,
+        cache_hit_rate,
+    } = config;
     use matchy::glob::MatchMode;
     use matchy::mmdb_builder::MmdbBuilder;
     use matchy::Database;

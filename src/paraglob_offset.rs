@@ -23,6 +23,7 @@ use crate::offset_format::{
     read_cstring, read_str_checked, read_str_unchecked, ACEdge, ParaglobHeader, PatternDataMapping,
     PatternEntry, SingleWildcard,
 };
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use zerocopy::Ref;
@@ -375,11 +376,11 @@ impl ParaglobBuilder {
             buffer: BufferStorage::Owned(buffer),
             mode,
             trusted: true, // Databases we build are trusted
-            glob_cache: HashMap::new(),
+            glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash,
             pattern_data_map,
-            candidate_buffer: HashSet::new(),
-            ac_literal_buffer: HashSet::new(),
+            candidate_buffer: RefCell::new(HashSet::new()),
+            ac_literal_buffer: RefCell::new(HashSet::new()),
         })
     }
 
@@ -704,15 +705,18 @@ pub struct Paraglob {
     /// Whether to trust database and skip UTF-8 validation (faster but unsafe for untrusted DBs)
     trusted: bool,
     /// Compiled glob patterns (cached on first use)
-    glob_cache: HashMap<u32, GlobPattern>,
+    /// Uses RefCell for interior mutability - allows &self methods while caching patterns
+    glob_cache: RefCell<HashMap<u32, GlobPattern>>,
     /// Memory-mapped hash table for AC literal ID to pattern IDs mapping (O(1) lookup)
     ac_literal_hash: Option<crate::ac_literal_hash::ACLiteralHash<'static>>,
     /// Pattern ID to data mapping (lazy-loaded from buffer)
     pattern_data_map: Option<PatternDataMetadata>,
     /// Reusable buffer for candidate patterns (avoids allocation on every query)
-    candidate_buffer: HashSet<u32>,
+    /// Uses RefCell for interior mutability - allows &self methods while mutating buffers
+    candidate_buffer: RefCell<HashSet<u32>>,
     /// Reusable buffer for AC literal IDs (avoids allocation on every query)
-    ac_literal_buffer: HashSet<u32>,
+    /// Uses RefCell for interior mutability - allows &self methods while mutating buffers
+    ac_literal_buffer: RefCell<HashSet<u32>>,
 }
 
 impl Paraglob {
@@ -727,11 +731,11 @@ impl Paraglob {
             buffer: BufferStorage::Owned(Vec::new()),
             mode,
             trusted: true, // Databases we build ourselves are trusted
-            glob_cache: HashMap::new(),
+            glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash: None,
             pattern_data_map: None,
-            candidate_buffer: HashSet::new(),
-            ac_literal_buffer: HashSet::new(),
+            candidate_buffer: RefCell::new(HashSet::new()),
+            ac_literal_buffer: RefCell::new(HashSet::new()),
         }
     }
 
@@ -790,7 +794,7 @@ impl Paraglob {
     ///
     /// Returns (end_position, pattern_id) for each match.
     /// The end_position is the byte offset immediately after the match.
-    pub fn find_matches_with_positions(&mut self, text: &str) -> Vec<(usize, u32)> {
+    pub fn find_matches_with_positions(&self, text: &str) -> Vec<(usize, u32)> {
         self.find_matches_with_positions_bytes(text.as_bytes())
     }
 
@@ -801,7 +805,7 @@ impl Paraglob {
     ///
     /// This method works directly on byte slices without requiring UTF-8 validation.
     /// Useful for processing binary logs or avoiding whole-line UTF-8 validation overhead.
-    pub fn find_matches_with_positions_bytes(&mut self, text: &[u8]) -> Vec<(usize, u32)> {
+    pub fn find_matches_with_positions_bytes(&self, text: &[u8]) -> Vec<(usize, u32)> {
         let buffer = self.buffer.as_slice();
         if buffer.is_empty() {
             return Vec::new();
@@ -827,7 +831,7 @@ impl Paraglob {
     }
 
     /// Find all matching pattern IDs
-    pub fn find_all(&mut self, text: &str) -> Vec<u32> {
+    pub fn find_all(&self, text: &str) -> Vec<u32> {
         let buffer = self.buffer.as_slice();
         if buffer.is_empty() {
             return Vec::new();
@@ -844,8 +848,8 @@ impl Paraglob {
         let ac_size = header.ac_edges_size as usize;
 
         // Reuse buffers (clear from previous query)
-        self.candidate_buffer.clear();
-        self.ac_literal_buffer.clear();
+        self.candidate_buffer.borrow_mut().clear();
+        self.ac_literal_buffer.borrow_mut().clear();
 
         if ac_size > 0 {
             // Extract AC buffer and run AC matching on it
@@ -858,15 +862,15 @@ impl Paraglob {
                 ac_buffer,
                 text_bytes,
                 mode,
-                &mut self.ac_literal_buffer,
+                &mut self.ac_literal_buffer.borrow_mut(),
             );
 
             // Map AC literal IDs to pattern IDs using hash table lookup (O(1))
-            if !self.ac_literal_buffer.is_empty() {
+            if !self.ac_literal_buffer.borrow().is_empty() {
                 if let Some(ref ac_hash) = self.ac_literal_hash {
-                    for &literal_id in &self.ac_literal_buffer {
+                    for &literal_id in self.ac_literal_buffer.borrow().iter() {
                         let pattern_ids = ac_hash.lookup_slice(literal_id);
-                        self.candidate_buffer.extend(pattern_ids);
+                        self.candidate_buffer.borrow_mut().extend(pattern_ids);
                     }
                 }
             }
@@ -936,22 +940,28 @@ impl Paraglob {
                     }
                 };
 
-                // Check glob pattern
-                let glob = self
-                    .glob_cache
-                    .entry(wildcard.pattern_id)
-                    .or_insert_with(|| {
-                        GlobPattern::new(pattern_str, self.mode).expect("Invalid wildcard pattern")
-                    });
+                // Check glob pattern - ensure it's cached first
+                if !self.glob_cache.borrow().contains_key(&wildcard.pattern_id) {
+                    self.glob_cache.borrow_mut().insert(
+                        wildcard.pattern_id,
+                        GlobPattern::new(pattern_str, self.mode).expect("Invalid wildcard pattern"),
+                    );
+                }
 
-                if glob.matches(text) {
+                if self
+                    .glob_cache
+                    .borrow()
+                    .get(&wildcard.pattern_id)
+                    .unwrap()
+                    .matches(text)
+                {
                     matching_ids.push(wildcard.pattern_id);
                 }
             }
         }
 
         // Check AC candidates (patterns that have literals that were found)
-        for &pattern_id in &self.candidate_buffer {
+        for &pattern_id in self.candidate_buffer.borrow().iter() {
             let patterns_offset = header.patterns_offset as usize;
             let entry_offset =
                 patterns_offset + (pattern_id as usize) * mem::size_of::<PatternEntry>();
@@ -996,11 +1006,22 @@ impl Paraglob {
                     }
                 };
 
-                let glob = self.glob_cache.entry(entry.pattern_id).or_insert_with(|| {
-                    GlobPattern::new(pattern_str, self.mode).expect("Invalid cached glob pattern")
-                });
+                // Ensure pattern is cached first
+                if !self.glob_cache.borrow().contains_key(&entry.pattern_id) {
+                    self.glob_cache.borrow_mut().insert(
+                        entry.pattern_id,
+                        GlobPattern::new(pattern_str, self.mode)
+                            .expect("Invalid cached glob pattern"),
+                    );
+                }
 
-                if glob.matches(text) {
+                if self
+                    .glob_cache
+                    .borrow()
+                    .get(&entry.pattern_id)
+                    .unwrap()
+                    .matches(text)
+                {
                     matching_ids.push(entry.pattern_id);
                 }
             }
@@ -1324,11 +1345,11 @@ impl Paraglob {
             buffer: BufferStorage::Owned(buffer),
             mode,
             trusted,
-            glob_cache: HashMap::new(),
+            glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash,
             pattern_data_map,
-            candidate_buffer: HashSet::new(),
-            ac_literal_buffer: HashSet::new(),
+            candidate_buffer: RefCell::new(HashSet::new()),
+            ac_literal_buffer: RefCell::new(HashSet::new()),
         })
     }
 
@@ -1416,11 +1437,11 @@ impl Paraglob {
             buffer: BufferStorage::Borrowed(slice),
             mode,
             trusted,
-            glob_cache: HashMap::new(),
+            glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash,
             pattern_data_map,
-            candidate_buffer: HashSet::new(),
-            ac_literal_buffer: HashSet::new(),
+            candidate_buffer: RefCell::new(HashSet::new()),
+            ac_literal_buffer: RefCell::new(HashSet::new()),
         })
     }
 
@@ -1616,8 +1637,7 @@ mod tests {
     #[test]
     fn test_literal_matching() {
         let patterns = vec!["hello", "world"];
-        let mut pg =
-            Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        let pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
 
         let matches = pg.find_all("hello world");
         assert_eq!(matches.len(), 2);
@@ -1628,8 +1648,7 @@ mod tests {
     #[test]
     fn test_glob_matching() {
         let patterns = vec!["*.txt", "test_*"];
-        let mut pg =
-            Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        let pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
 
         let matches = pg.find_all("test_file.txt");
         assert_eq!(matches.len(), 2);
@@ -1638,8 +1657,7 @@ mod tests {
     #[test]
     fn test_pure_wildcard() {
         let patterns = vec!["*", "??"];
-        let mut pg =
-            Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        let pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
 
         let matches = pg.find_all("ab");
         assert_eq!(matches.len(), 2); // Both match
@@ -1648,8 +1666,7 @@ mod tests {
     #[test]
     fn test_case_insensitive() {
         let patterns = vec!["Hello", "*.TXT"];
-        let mut pg =
-            Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseInsensitive).unwrap();
+        let pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseInsensitive).unwrap();
 
         let matches = pg.find_all("hello test.txt");
         assert_eq!(matches.len(), 2);
@@ -1658,8 +1675,7 @@ mod tests {
     #[test]
     fn test_no_match() {
         let patterns = vec!["hello", "*.txt"];
-        let mut pg =
-            Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        let pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
 
         let matches = pg.find_all("goodbye world");
         assert!(matches.is_empty());
@@ -1668,14 +1684,13 @@ mod tests {
     #[test]
     fn test_serialization_roundtrip() {
         let patterns = vec!["hello", "*.txt", "test_*"];
-        let mut pg =
-            Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
+        let pg = Paraglob::build_from_patterns(&patterns, GlobMatchMode::CaseSensitive).unwrap();
 
         // Get buffer
         let buffer = pg.buffer().to_vec();
 
         // Restore from buffer
-        let mut pg2 = Paraglob::from_buffer(buffer, GlobMatchMode::CaseSensitive).unwrap();
+        let pg2 = Paraglob::from_buffer(buffer, GlobMatchMode::CaseSensitive).unwrap();
 
         // Should produce same results
         let text = "hello test_file.txt";

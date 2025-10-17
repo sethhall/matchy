@@ -1,0 +1,256 @@
+# Pattern Extraction
+
+Matchy includes a high-performance pattern extractor for finding domains, IP addresses, and email addresses in unstructured text like log files.
+
+## Overview
+
+The `PatternExtractor` uses SIMD-accelerated algorithms to scan text and extract patterns at 200-500 MB/sec. This is useful for:
+
+- **Log scanning**: Find domains/IPs in access logs, firewall logs, etc.
+- **Threat detection**: Extract indicators from security logs
+- **Analytics**: Count unique domains/IPs in large datasets
+- **Compliance**: Find email addresses or PII in audit logs
+- **Forensics**: Extract patterns from binary logs
+
+## Quick Start
+
+```rust
+use matchy::extractor::PatternExtractor;
+
+let extractor = PatternExtractor::new()?;
+
+let log_line = b"2024-01-15 GET /api evil.example.com 192.168.1.1";
+
+for match_item in extractor.extract_from_line(log_line) {
+    println!("Found: {}", match_item.as_str(log_line));
+}
+// Output:
+// Found: evil.example.com
+// Found: 192.168.1.1
+```
+
+## Supported Patterns
+
+### Domains
+
+Extracts fully qualified domain names with TLD validation:
+
+```rust
+let line = b"Visit api.example.com or https://www.github.com/path";
+
+for match_item in extractor.extract_from_line(line) {
+    if let ExtractedItem::Domain(domain) = match_item.item {
+        println!("Domain: {}", domain);
+    }
+}
+// Output:
+// Domain: api.example.com
+// Domain: www.github.com
+```
+
+**Features:**
+- **TLD validation**: 3.6M+ real TLDs from Public Suffix List
+- **Unicode support**: Handles münchen.de, café.fr (with punycode)
+- **Subdomain extraction**: Extracts full domain from URLs
+- **Word boundaries**: Avoids false positives in non-domain text
+
+### IPv4 Addresses
+
+Extracts all valid IPv4 addresses:
+
+```rust
+let line = b"Traffic from 10.0.0.5 to 172.16.0.10";
+
+for match_item in extractor.extract_from_line(line) {
+    if let ExtractedItem::Ipv4(ip) = match_item.item {
+        println!("IP: {}", ip);
+    }
+}
+// Output:
+// IP: 10.0.0.5
+// IP: 172.16.0.10
+```
+
+**Features:**
+- **SIMD-accelerated**: Uses `memchr` for fast dot detection
+- **Validation**: Rejects invalid IPs (256.1.1.1, 999.0.0.1)
+- **Word boundaries**: Avoids false matches in version numbers
+
+### Email Addresses
+
+Extracts RFC 5322-compliant email addresses:
+
+```rust
+let line = b"Contact alice@example.com or bob+tag@company.org";
+
+for match_item in extractor.extract_from_line(line) {
+    if let ExtractedItem::Email(email) = match_item.item {
+        println!("Email: {}", email);
+    }
+}
+// Output:
+// Email: alice@example.com
+// Email: bob+tag@company.org
+```
+
+**Features:**
+- **Plus addressing**: Supports user+tag@example.com
+- **Subdomain validation**: Checks domain part for valid TLD
+
+## Configuration
+
+Customize extraction behavior using `ExtractorConfigBuilder`:
+
+```rust
+use matchy::extractor::ExtractorConfigBuilder;
+
+let config = ExtractorConfigBuilder::new()
+    .extract_domains(true)        // Enable domain extraction
+    .extract_ipv4(true)            // Enable IPv4 extraction
+    .extract_emails(false)         // Disable email extraction
+    .min_domain_labels(3)          // Require 3+ labels (api.test.com)
+    .require_word_boundaries(true) // Enforce word boundaries
+    .build();
+
+let extractor = PatternExtractor::with_config(config)?;
+```
+
+### Configuration Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `extract_domains` | `true` | Extract domain names |
+| `extract_ipv4` | `true` | Extract IPv4 addresses |
+| `extract_emails` | `true` | Extract email addresses |
+| `min_domain_labels` | `2` | Minimum labels (2 = example.com, 3 = api.example.com) |
+| `require_word_boundaries` | `true` | Ensure patterns have word boundaries |
+
+## Unicode and IDN Support
+
+The extractor handles Unicode domains automatically:
+
+```rust
+let line = "Visit münchen.de or café.fr".as_bytes();
+
+for match_item in extractor.extract_from_line(line) {
+    if let ExtractedItem::Domain(domain) = match_item.item {
+        println!("Unicode domain: {}", domain);
+    }
+}
+// Output:
+// Unicode domain: münchen.de
+// Unicode domain: café.fr
+```
+
+**How it works:**
+- Extracts Unicode text as-is
+- Validates TLD using punycode conversion internally
+- Returns original Unicode form (not punycode)
+
+## Binary Log Support
+
+The extractor can find ASCII patterns in binary data:
+
+```rust
+let mut binary_log = Vec::new();
+binary_log.extend_from_slice(b"Log: ");
+binary_log.push(0xFF); // Invalid UTF-8
+binary_log.extend_from_slice(b" evil.com ");
+
+for match_item in extractor.extract_from_line(&binary_log) {
+    println!("Found in binary: {}", match_item.as_str(&binary_log));
+}
+// Output:
+// Found in binary: evil.com
+```
+
+This is useful for scanning:
+- Binary protocol logs
+- Corrupted text files
+- Mixed encoding logs
+
+## Performance
+
+The extractor is highly optimized:
+
+- **Throughput**: 200-500 MB/sec on typical log files
+- **SIMD acceleration**: Uses `memchr` for byte scanning
+- **Zero-copy**: No string allocation until match
+- **Lazy UTF-8 validation**: Only validates matched patterns
+
+### Performance Tips
+
+1. **Disable unused extractors** to reduce overhead:
+   ```rust
+   let config = ExtractorConfigBuilder::new()
+       .extract_ipv4(true)    // Only extract IPs
+       .extract_domains(false)
+       .extract_emails(false)
+       .build();
+   ```
+
+2. **Process line-by-line** for better memory usage:
+   ```rust
+   for line in BufReader::new(file).lines() {
+       for match_item in extractor.extract_from_line(line?.as_bytes()) {
+           // Process match
+       }
+   }
+   ```
+
+3. **Use byte slices** to avoid UTF-8 conversion:
+   ```rust
+   // Fast: no UTF-8 validation on whole line
+   extractor.extract_from_line(line_bytes)
+   
+   // Slower: validates entire line as UTF-8 first
+   extractor.extract_from_line(line_str.as_bytes())
+   ```
+
+
+## CLI Integration
+
+The `matchy match` command uses the extractor internally:
+
+```bash
+# Scan logs for threats (outputs JSON to stdout)
+matchy match threats.mxy access.log
+
+# Each match is a JSON line:
+# {"timestamp":"123.456","line_number":1,"matched_text":"evil.com","match_type":"pattern",...}
+# {"timestamp":"123.789","line_number":2,"matched_text":"1.2.3.4","match_type":"ip",...}
+
+# Show statistics (to stderr)
+matchy match threats.mxy access.log --stats
+
+# Statistics output (stderr):
+# [INFO] Lines processed: 15,234
+# [INFO] Lines with matches: 127 (0.8%)
+# [INFO] Throughput: 450.23 MB/s
+```
+
+See [matchy match](../commands/matchy-match.md) for CLI details.
+
+## Examples
+
+Complete working examples:
+
+- **`examples/extractor_demo.rs`**: Demonstrates all extraction features
+- **`src/bin/matchy.rs`**: See `cmd_match()` for CLI implementation
+
+Run the demo:
+
+```bash
+cargo run --release --example extractor_demo
+```
+
+## Summary
+
+- **High performance**: 200-500 MB/sec throughput
+- **SIMD-accelerated**: Fast pattern finding
+- **Unicode support**: Handles international domains
+- **Binary logs**: Extracts ASCII from non-UTF-8
+- **Zero-copy**: Efficient memory usage
+- **Configurable**: Customize extraction behavior
+
+Pattern extraction makes it easy to scan large log files and find security indicators.
