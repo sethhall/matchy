@@ -28,6 +28,7 @@
 //! See: <https://maxmind.github.io/MaxMind-DB/>
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 /// Data value that can be stored in the data section
 ///
@@ -193,6 +194,50 @@ impl<'de> serde::Deserialize<'de> for DataValue {
         }
 
         deserializer.deserialize_any(DataValueVisitor)
+    }
+}
+
+// Implement Hash for DataValue to enable fast deduplication
+impl Hash for DataValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hash the discriminant first
+        std::mem::discriminant(self).hash(state);
+        
+        match self {
+            DataValue::Pointer(v) => v.hash(state),
+            DataValue::String(v) => v.hash(state),
+            DataValue::Double(v) => {
+                // For floats, hash the bit representation to handle NaN consistently
+                v.to_bits().hash(state);
+            }
+            DataValue::Bytes(v) => v.hash(state),
+            DataValue::Uint16(v) => v.hash(state),
+            DataValue::Uint32(v) => v.hash(state),
+            DataValue::Map(m) => {
+                // Hash maps require sorted keys for deterministic hashing
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort_unstable();
+                keys.len().hash(state);
+                for key in keys {
+                    key.hash(state);
+                    m[key].hash(state);
+                }
+            }
+            DataValue::Int32(v) => v.hash(state),
+            DataValue::Uint64(v) => v.hash(state),
+            DataValue::Uint128(v) => v.hash(state),
+            DataValue::Array(v) => {
+                v.len().hash(state);
+                for item in v {
+                    item.hash(state);
+                }
+            }
+            DataValue::Bool(v) => v.hash(state),
+            DataValue::Float(v) => {
+                // For floats, hash the bit representation to handle NaN consistently
+                v.to_bits().hash(state);
+            }
+        }
     }
 }
 

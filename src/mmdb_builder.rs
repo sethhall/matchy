@@ -10,7 +10,9 @@ use crate::ip_tree_builder::IpTreeBuilder;
 use crate::literal_hash::LiteralHashBuilder;
 use crate::mmdb::types::RecordSize;
 use crate::paraglob_offset::ParaglobBuilder;
+use rustc_hash::FxHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 
 /// Entry type classification
@@ -43,7 +45,7 @@ pub struct MmdbBuilder {
     /// Data encoder for streaming data encoding
     data_encoder: DataEncoder,
     /// Deduplication cache (data hash -> offset)
-    data_cache: HashMap<Vec<u8>, u32>,
+    data_cache: HashMap<u64, u32>,
     match_mode: MatchMode,
     /// Optional custom database type name
     database_type: Option<String>,
@@ -185,19 +187,20 @@ impl MmdbBuilder {
 
     /// Encode data and deduplicate to save memory
     fn encode_and_deduplicate_data(&mut self, data: HashMap<String, DataValue>) -> u32 {
-        // Create dedup key
-        let dedup_key = format!("{:?}", data);
-        let dedup_key_bytes = dedup_key.as_bytes().to_vec();
+        // Fast hash computation without string allocation
+        let data_value = DataValue::Map(data);
+        let mut hasher = FxHasher::default();
+        data_value.hash(&mut hasher);
+        let hash = hasher.finish();
 
         // Check cache
-        if let Some(&offset) = self.data_cache.get(&dedup_key_bytes) {
+        if let Some(&offset) = self.data_cache.get(&hash) {
             return offset;
         }
 
         // Encode and cache
-        let data_value = DataValue::Map(data);
         let offset = self.data_encoder.encode(&data_value);
-        self.data_cache.insert(dedup_key_bytes, offset);
+        self.data_cache.insert(hash, offset);
         offset
     }
 
@@ -350,9 +353,11 @@ impl MmdbBuilder {
         self.data_cache.clear();
 
         // Separate entries by type (using pre-encoded offsets)
-        let mut ip_entries = Vec::new();
-        let mut literal_entries = Vec::new();
-        let mut glob_entries = Vec::new();
+        // Pre-allocate with capacity to avoid reallocation
+        let entry_count = self.entries.len();
+        let mut ip_entries = Vec::with_capacity(entry_count);
+        let mut literal_entries = Vec::with_capacity(entry_count);
+        let mut glob_entries = Vec::with_capacity(entry_count);
 
         for entry in &self.entries {
             match &entry.entry_type {
@@ -391,11 +396,20 @@ impl MmdbBuilder {
                 RecordSize::Bits24
             };
 
+            // Sort IPs by prefix length (more specific first), then by address
+            // This minimizes tree reorganization and backfill operations
+            ip_entries.sort_unstable_by(|(addr1, prefix1, _), (addr2, prefix2, _)| {
+                prefix2.cmp(prefix1).then_with(|| addr1.cmp(addr2))
+            });
+
             let mut tree_builder = if needs_v6 {
                 IpTreeBuilder::new_v6(record_size)
             } else {
                 IpTreeBuilder::new_v4(record_size)
             };
+
+            // Pre-allocate nodes (estimate: ~1.5x entries for typical CIDR distributions)
+            tree_builder.reserve_nodes(estimated_nodes + estimated_nodes / 2);
 
             // Insert all IP entries using pre-encoded offsets
             for (addr, prefix_len, data_offset) in &ip_entries {
@@ -418,7 +432,7 @@ impl MmdbBuilder {
         // Build glob pattern section if we have glob entries (NOT literals)
         let (has_globs, glob_section_bytes) = if !glob_entries.is_empty() {
             let mut pattern_builder = ParaglobBuilder::new(self.match_mode);
-            let mut pattern_data = Vec::new();
+            let mut pattern_data = Vec::with_capacity(glob_entries.len());
 
             for (pattern, data_offset) in &glob_entries {
                 let pattern_id = pattern_builder.add_pattern(pattern)?;
@@ -459,10 +473,10 @@ impl MmdbBuilder {
         // Build literal hash table section for literal_entries
         let (has_literals, literal_section_bytes) = if !literal_entries.is_empty() {
             let mut literal_builder = LiteralHashBuilder::new(self.match_mode);
-            let mut literal_pattern_data = Vec::new();
+            let mut literal_pattern_data = Vec::with_capacity(literal_entries.len());
 
             for (next_pattern_id, (literal, data_offset)) in literal_entries.iter().enumerate() {
-                literal_builder.add_pattern(literal.to_string(), next_pattern_id as u32);
+                literal_builder.add_pattern(literal, next_pattern_id as u32);
                 literal_pattern_data.push((next_pattern_id as u32, *data_offset));
             }
 
