@@ -82,8 +82,6 @@ memory-stats = "1.2"  # For tracking memory usage during builds
 lru = "0.12"  # LRU cache for query results
 memchr = "2.7"  # SIMD-accelerated byte searching
 rayon = "1.10"  # Parallel sort for large hash builds
-boomphf = { version = "0.6.0", features = ["parallel", "serde"] }
-bincode = "1.3"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef"] }
 

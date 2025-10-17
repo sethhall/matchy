@@ -224,6 +224,10 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
 
+        /// Show detailed debug output (entry processing)
+        #[arg(long)]
+        debug: bool,
+
         /// Use case-insensitive matching for patterns (default: case-sensitive)
         #[arg(short = 'i', long)]
         case_insensitive: bool,
@@ -357,6 +361,7 @@ fn main() -> Result<()> {
             description,
             desc_lang,
             verbose,
+            debug,
             case_insensitive,
         } => cmd_build(
             inputs,
@@ -366,6 +371,7 @@ fn main() -> Result<()> {
             description,
             desc_lang,
             verbose,
+            debug,
             case_insensitive,
         ),
         Commands::Bench {
@@ -1093,6 +1099,7 @@ fn cmd_build(
     description: Option<String>,
     desc_lang: String,
     verbose: bool,
+    debug: bool,
     case_insensitive: bool,
 ) -> Result<()> {
     use matchy::glob::MatchMode;
@@ -1104,7 +1111,7 @@ fn cmd_build(
         MatchMode::CaseSensitive
     };
 
-    if verbose {
+    if debug {
         println!("Building unified MMDB database (IP + patterns)...");
         println!("  Input files: {}", inputs.len());
         for input in &inputs {
@@ -1141,7 +1148,7 @@ fn cmd_build(
             let mut total_count = 0;
 
             for input in &inputs {
-                if verbose && inputs.len() > 1 {
+                if debug && inputs.len() > 1 {
                     println!("  Reading: {}...", input.display());
                 }
 
@@ -1158,18 +1165,18 @@ fn cmd_build(
                         builder.add_entry(entry, HashMap::new())?;
                         count += 1;
                         total_count += 1;
-                        if verbose && total_count % 1000 == 0 {
+                        if debug && total_count % 1000 == 0 {
                             println!("    Added {} entries...", total_count);
                         }
                     }
                 }
 
-                if verbose && inputs.len() > 1 {
+                if debug && inputs.len() > 1 {
                     println!("    {} entries from this file", count);
                 }
             }
 
-            if verbose {
+            if debug {
                 println!("  Total: {} entries", total_count);
             }
         }
@@ -1180,7 +1187,7 @@ fn cmd_build(
             let mut total_entries = 0;
 
             for input in &inputs {
-                if verbose && inputs.len() > 1 {
+                if debug && inputs.len() > 1 {
                     println!("  Reading: {}...", input.display());
                 }
 
@@ -1244,17 +1251,17 @@ fn cmd_build(
                     builder.add_entry(entry, data)?;
                     total_entries += 1;
 
-                    if verbose && total_entries % 1000 == 0 {
+                    if debug && total_entries % 1000 == 0 {
                         println!("    Added {} entries...", total_entries);
                     }
                 }
 
-                if verbose && inputs.len() > 1 {
+                if debug && inputs.len() > 1 {
                     println!("    {} entries from this file", reader.position().line());
                 }
             }
 
-            if verbose {
+            if debug {
                 println!("  Total: {} entries", total_entries);
             }
         }
@@ -1264,7 +1271,7 @@ fn cmd_build(
             let mut total_entries = 0;
 
             for input in &inputs {
-                if verbose && inputs.len() > 1 {
+                if debug && inputs.len() > 1 {
                     println!("  Reading: {}...", input.display());
                 }
 
@@ -1288,17 +1295,17 @@ fn cmd_build(
                     builder.add_entry(key, data)?;
                     total_entries += 1;
 
-                    if verbose && total_entries % 1000 == 0 {
+                    if debug && total_entries % 1000 == 0 {
                         println!("    Added {} entries...", total_entries);
                     }
                 }
 
-                if verbose && inputs.len() > 1 {
+                if debug && inputs.len() > 1 {
                     println!("    {} entries from this file", entries.len());
                 }
             }
 
-            if verbose {
+            if debug {
                 println!("  Total: {} entries", total_entries);
             }
         }
@@ -1306,7 +1313,7 @@ fn cmd_build(
             // Read MISP JSON threat intelligence file(s) with streaming (low memory)
             use matchy::misp_importer::MispImporter;
 
-            if verbose {
+            if debug {
                 println!("  Processing MISP JSON files (streaming mode)...");
             }
 
@@ -1322,7 +1329,7 @@ fn cmd_build(
             )
             .context("Failed to process MISP JSON files")?;
 
-            if verbose {
+            if debug {
                 let stats = builder.stats();
                 println!("  Total indicators: {}", stats.total_entries);
             }
@@ -1337,19 +1344,21 @@ fn cmd_build(
 
     // Always show statistics
     let stats = builder.stats();
-    println!("\nBuilding database:");
-    println!("  Total entries:   {}", stats.total_entries);
-    println!("  IP entries:      {}", stats.ip_entries);
-    println!("  Literal entries: {}", stats.literal_entries);
-    println!("  Glob entries:    {}", stats.glob_entries);
+    if verbose || debug {
+        println!("\nBuilding database:");
+        println!("  Total entries:   {}", stats.total_entries);
+        println!("  IP entries:      {}", stats.ip_entries);
+        println!("  Literal entries: {}", stats.literal_entries);
+        println!("  Glob entries:    {}", stats.glob_entries);
+    }
 
-    if verbose {
+    if debug {
         println!("\nSerializing...");
     }
 
     let database_bytes = builder.build().context("Failed to build database")?;
 
-    if verbose {
+    if debug {
         println!("Writing to disk...");
     }
 
@@ -1364,16 +1373,20 @@ fn cmd_build(
         )
     })?;
 
-    // Always show success message
-    println!("\n✓ Database built successfully!");
-    println!("  Output:        {}", output.display());
-    println!(
-        "  Database size: {:.2} MB ({} bytes)",
-        database_bytes.len() as f64 / (1024.0 * 1024.0),
-        database_bytes.len()
-    );
+    // Always show success message (always displayed)
+    if verbose || debug {
+        println!("\n✓ Database built successfully!");
+        println!("  Output:        {}", output.display());
+        println!(
+            "  Database size: {:.2} MB ({} bytes)",
+            database_bytes.len() as f64 / (1024.0 * 1024.0),
+            database_bytes.len()
+        );
+    } else {
+        println!("✓ Database built: {}", output.display());
+    }
 
-    if verbose {
+    if debug {
         println!("  Format:        MMDB (extended with patterns)");
     }
 

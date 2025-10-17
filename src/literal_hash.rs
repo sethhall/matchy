@@ -197,9 +197,15 @@ impl LiteralHashBuilder {
         );
 
         // Build shards in batches to limit memory usage
-        // Process 8 shards at a time instead of all simultaneously
-        eprintln!("[LiteralHash] Building shards in batches (8 at a time)...");
-        let batch_size = 8;
+        // Batch size scales with available parallelism (respects RAYON_NUM_THREADS)
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8);
+        let batch_size = parallelism.min(num_shards).max(1);
+        eprintln!(
+            "[LiteralHash] Building shards in batches ({} at a time, {} cores available)...",
+            batch_size, parallelism
+        );
         let mut shards = Vec::with_capacity(num_shards);
 
         for chunk_start in (0..num_shards).step_by(batch_size) {
