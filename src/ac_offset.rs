@@ -649,7 +649,7 @@ impl ACAutomaton {
             }
 
             StateKind::Sparse => {
-                // Linear search through sparse edge array (2-8 edges)
+                // SIMD-accelerated search through sparse edge array (2-8 edges)
                 let edges_offset = node.edges_offset as usize;
                 let edge_size = mem::size_of::<ACEdge>();
                 let count = node.edge_count as usize;
@@ -660,21 +660,27 @@ impl ACAutomaton {
                     return None;
                 }
 
-                // Linear search through sorted edges
+                // Extract all edge characters into contiguous array for SIMD
+                // This is cache-friendly and enables vectorized search
+                let mut chars = [0u8; 8]; // Max 8 edges for sparse states
                 for i in 0..count {
                     let edge_offset = edges_offset + i * edge_size;
                     let edge_slice = &self.buffer[edge_offset..];
+                    if let Ok((edge_ref, _)) = Ref::<_, ACEdge>::from_prefix(edge_slice) {
+                        chars[i] = edge_ref.character;
+                    } else {
+                        return None; // Corrupted data
+                    }
+                }
+
+                // SIMD search: check all characters at once (SSE2/AVX2)
+                // For 2-8 bytes, this processes all in a single SIMD instruction
+                if let Some(idx) = memchr::memchr(ch, &chars[..count]) {
+                    // Found match at index - retrieve target offset
+                    let edge_offset = edges_offset + idx * edge_size;
+                    let edge_slice = &self.buffer[edge_offset..];
                     let (edge_ref, _) = Ref::<_, ACEdge>::from_prefix(edge_slice).ok()?;
-                    let edge = *edge_ref;
-
-                    if edge.character == ch {
-                        return Some(edge.target_offset as usize);
-                    }
-
-                    // Early exit: edges are sorted
-                    if edge.character > ch {
-                        return None;
-                    }
+                    return Some(edge_ref.target_offset as usize);
                 }
 
                 None
