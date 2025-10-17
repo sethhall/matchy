@@ -28,8 +28,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Parse PSL and extract TLD patterns for AC
     let mut patterns = Vec::new();
+<<<<<<< HEAD
     let mut unicode_count = 0;
     let mut punycode_added = 0;
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
     for line in data.lines() {
         let line = line.trim();
@@ -87,9 +90,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("Parsed {} TLD patterns", patterns.len());
+<<<<<<< HEAD
     println!("  - {} Unicode TLDs found", unicode_count);
     println!("  - {} punycode versions added", punycode_added);
     println!("  - Total patterns in automaton: {}", patterns.len());
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
     // Build AC automaton
     println!("Building Aho-Corasick automaton...");

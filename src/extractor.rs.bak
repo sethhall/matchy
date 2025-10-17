@@ -60,55 +60,82 @@ impl ExtractorConfigBuilder {
         }
     }
 
+<<<<<<< HEAD
     /// Enable or disable domain extraction
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     pub fn extract_domains(mut self, enable: bool) -> Self {
         self.config.extract_domains = enable;
         self
     }
 
+<<<<<<< HEAD
     /// Enable or disable email extraction
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     pub fn extract_emails(mut self, enable: bool) -> Self {
         self.config.extract_emails = enable;
         self
     }
 
+<<<<<<< HEAD
     /// Enable or disable IPv4 extraction
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     pub fn extract_ipv4(mut self, enable: bool) -> Self {
         self.config.extract_ipv4 = enable;
         self
     }
 
+<<<<<<< HEAD
     /// Enable or disable IPv6 extraction
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     pub fn extract_ipv6(mut self, enable: bool) -> Self {
         self.config.extract_ipv6 = enable;
         self
     }
 
+<<<<<<< HEAD
     /// Enable or disable URL extraction
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     pub fn extract_urls(mut self, enable: bool) -> Self {
         self.config.extract_urls = enable;
         self
     }
 
+<<<<<<< HEAD
     /// Require domain TLDs to be in Public Suffix List
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     pub fn require_valid_tld(mut self, require: bool) -> Self {
         self.config.require_valid_tld = require;
         self
     }
 
+<<<<<<< HEAD
     /// Set minimum number of domain labels (e.g., 2 for "example.com")
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     pub fn min_domain_labels(mut self, min: usize) -> Self {
         self.config.min_domain_labels = min;
         self
     }
 
+<<<<<<< HEAD
     /// Require word boundaries around extracted patterns
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     pub fn require_word_boundaries(mut self, require: bool) -> Self {
         self.config.require_word_boundaries = require;
         self
     }
 
+<<<<<<< HEAD
     /// Build the final configuration
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     pub fn build(self) -> ExtractorConfig {
         self.config
     }
@@ -187,6 +214,7 @@ impl PatternExtractor {
         ExtractorConfigBuilder::new()
     }
 
+<<<<<<< HEAD
     /// Extract patterns from a line using an iterator (zero-allocation)
     ///
     /// Returns an iterator that lazily extracts matches as you iterate.
@@ -202,16 +230,58 @@ impl PatternExtractor {
         ExtractIter::new(self, line)
     }
 
+=======
+    /// Extract all patterns from a line, returning owned matches
+    pub fn extract_from_line<'a>(&mut self, line: &'a [u8]) -> Vec<Match<'a>> {
+        let mut matches = Vec::new();
+
+        // Extract domains if enabled
+        if self.config.extract_domains {
+            self.extract_domains(line, &mut matches);
+        }
+
+        // Extract IPv4 addresses
+        if self.config.extract_ipv4 {
+            self.extract_ipv4(line, &mut matches);
+        }
+
+        // Extract email addresses
+        if self.config.extract_emails {
+            self.extract_emails(line, &mut matches);
+        }
+
+        // TODO: Extract IPv6, URLs
+
+        matches
+    }
+
+    /// Extract patterns using an iterator (zero-allocation when possible)
+    pub fn extract_iter<'a>(&'a self, line: &'a [u8]) -> ExtractIter<'a> {
+        ExtractIter {
+            extractor: self,
+            line,
+            pos: 0,
+        }
+    }
+
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     /// Get the configuration
     pub fn config(&self) -> &ExtractorConfig {
         &self.config
     }
 
     /// Extract domains by finding TLD anchors and expanding boundaries
+<<<<<<< HEAD
     fn extract_domains<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
         use memchr::memchr;
 
         let tld_matcher = match self.tld_matcher.as_ref() {
+=======
+    fn extract_domains<'a>(&mut self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+        use memchr::memchr;
+
+        let tld_matcher = match self.tld_matcher.as_mut() {
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
             Some(m) => m,
             None => return,
         };
@@ -222,14 +292,27 @@ impl PatternExtractor {
             return;
         }
 
+<<<<<<< HEAD
         // Find all TLD suffix matches with positions using byte-based matching
         // No UTF-8 validation needed - AC works on raw bytes
         // Returns (end_position, pattern_id) for each TLD match
         let tld_matches = tld_matcher.find_matches_with_positions_bytes(line);
+=======
+        // Convert to string for matching (TLD patterns are case-insensitive)
+        let text = match std::str::from_utf8(line) {
+            Ok(s) => s,
+            Err(_) => return, // Invalid UTF-8, skip
+        };
+
+        // Find all TLD suffix matches with positions
+        // Returns (end_position, pattern_id) for each TLD match
+        let tld_matches = tld_matcher.find_matches_with_positions(text);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         for (tld_end, _pattern_id) in tld_matches {
             // e.g., "evil.example.com" with ".com" match gives tld_end = 18
 
+<<<<<<< HEAD
             // Fast boundary check: TLD must be followed by non-domain char or end of line
             // This rejects false positives like "blah.community" (.com matches but continues)
             // Single byte check is much faster than backward scan
@@ -237,6 +320,8 @@ impl PatternExtractor {
                 continue; // TLD continues with domain chars - not a real TLD boundary
             }
 
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
             // Expand backwards to find domain start
             if let Some(domain_span) = self.expand_domain_backwards(line, tld_end) {
                 let domain_bytes = &line[domain_span.0..domain_span.1];
@@ -250,6 +335,14 @@ impl PatternExtractor {
 
                 // Validate the extracted domain (label checks, etc.)
                 if self.is_valid_domain(line, domain_span) {
+<<<<<<< HEAD
+=======
+                    // Safe: we validated UTF-8 above
+                    let domain_str = unsafe {
+                        std::str::from_utf8_unchecked(&line[domain_span.0..domain_span.1])
+                    };
+
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
                     matches.push(Match {
                         item: ExtractedItem::Domain(domain_str),
                         span: domain_span,
@@ -269,6 +362,7 @@ impl PatternExtractor {
         // Find the start of the domain by scanning backwards
         let mut start = tld_end;
 
+<<<<<<< HEAD
         // Walk backwards through all bytes until we hit a boundary
         // This includes:
         // - ASCII alphanumeric, hyphen, dot
@@ -295,6 +389,22 @@ impl PatternExtractor {
             && !is_word_boundary(line[tld_end])
         {
             return None; // Domain continues - not a real boundary
+=======
+        // Scan backwards while we see valid domain characters
+        while start > 0 && is_domain_char(line[start - 1]) {
+            start -= 1;
+        }
+
+        // Check word boundary at start if required
+        if self.config.require_word_boundaries {
+            if start > 0 && !is_word_boundary(line[start - 1]) {
+                return None;
+            }
+            // Also check boundary at end (if not at line end)
+            if tld_end < line.len() && !is_word_boundary(line[tld_end]) {
+                return None;
+            }
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
         }
 
         if start >= tld_end {
@@ -308,6 +418,7 @@ impl PatternExtractor {
     fn is_valid_domain(&self, line: &[u8], span: (usize, usize)) -> bool {
         let domain_bytes = &line[span.0..span.1];
 
+<<<<<<< HEAD
         // Note: UTF-8 validation is unnecessary here because:
         // 1. The entire line was validated as UTF-8 before TLD matching (line 234)
         // 2. is_valid_label() enforces ASCII-only ([a-z0-9-]), which is always valid UTF-8
@@ -359,6 +470,57 @@ impl PatternExtractor {
         true
     }
 
+=======
+        // Must be valid UTF-8 (we don't need the str, just validation)
+        if std::str::from_utf8(domain_bytes).is_err() {
+            return false;
+        }
+
+        // Validate labels without allocating - iterate and count simultaneously
+        let mut label_count = 0;
+        let mut label_start = 0;
+
+        for (i, &byte) in domain_bytes.iter().enumerate() {
+            if byte == b'.' {
+                // Validate the label we just passed
+                if !self.is_valid_label(&domain_bytes[label_start..i]) {
+                    return false;
+                }
+                label_count += 1;
+                label_start = i + 1;
+            }
+        }
+
+        // Validate final label (after last dot or entire domain if no dots)
+        if !self.is_valid_label(&domain_bytes[label_start..]) {
+            return false;
+        }
+        label_count += 1;
+
+        // Check minimum label count
+        label_count >= self.config.min_domain_labels
+    }
+
+    /// Validate a single domain label (bytes between dots)
+    #[inline]
+    fn is_valid_label(&self, label: &[u8]) -> bool {
+        if label.is_empty() {
+            return false; // Empty label (e.g., "..")
+        }
+
+        // Label can't start or end with hyphen
+        if label[0] == b'-' || label[label.len() - 1] == b'-' {
+            return false;
+        }
+
+        // Label must be alphanumeric + hyphens (ASCII only)
+        // Using byte operations instead of chars() avoids UTF-8 decoding overhead
+        label
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'-')
+    }
+
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     /// Extract IPv4 addresses using SIMD-accelerated dot search
     /// Strategy: Find dots (rare), check for digit.digit pattern, then parse
     fn extract_ipv4<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
@@ -439,7 +601,11 @@ impl PatternExtractor {
                 return None; // No digits found
             }
 
+<<<<<<< HEAD
             // Parse octet value (u8::parse already ensures 0-255 range)
+=======
+            // Parse octet value
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
             let octet: u8 = match octet_str.parse() {
                 Ok(val) => val,
                 _ => return None, // Invalid octet
@@ -470,7 +636,11 @@ impl PatternExtractor {
     }
 
     /// Extract email addresses using SIMD-accelerated @ search
+<<<<<<< HEAD
     fn extract_emails<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+=======
+    fn extract_emails<'a>(&mut self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
         use memchr::memchr_iter;
 
         // Find all @ symbols using SIMD - much faster than scanning every byte
@@ -635,8 +805,11 @@ fn is_word_boundary(b: u8) -> bool {
                 | b'>'
                 | b'"'
                 | b'\''
+<<<<<<< HEAD
                 | b'@'  // Stop domain extraction at @ (emails)
                 | b'=' // Stop at = (key-value pairs: domain=example.com)
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
         )
 }
 
@@ -683,10 +856,17 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_basic() {
+<<<<<<< HEAD
         let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Visit example.com for more info";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Visit example.com for more info";
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].as_str(line), "example.com");
@@ -698,10 +878,17 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_multiple() {
+<<<<<<< HEAD
         let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Check google.com and github.com";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Check google.com and github.com";
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].as_str(line), "google.com");
@@ -710,10 +897,17 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_subdomain() {
+<<<<<<< HEAD
         let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Visit api.example.com today";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Visit api.example.com today";
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].as_str(line), "api.example.com");
@@ -721,10 +915,17 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_with_protocol() {
+<<<<<<< HEAD
         let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Go to https://www.example.com/path";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Go to https://www.example.com/path";
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         // Should extract just the domain, not the protocol or path
         assert_eq!(matches.len(), 1);
@@ -737,10 +938,17 @@ mod tests {
             .extract_domains(true)
             .min_domain_labels(3) // Require at least 3 labels
             .build();
+<<<<<<< HEAD
         let extractor = PatternExtractor::with_config(config).unwrap();
 
         let line = b"Visit example.com and api.test.example.com";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let mut extractor = PatternExtractor::with_config(config).unwrap();
+
+        let line = b"Visit example.com and api.test.example.com";
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         // Only the 3-label domain should match
         assert_eq!(matches.len(), 1);
@@ -749,12 +957,20 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_log_line() {
+<<<<<<< HEAD
         let extractor = PatternExtractor::new().unwrap();
+=======
+        let mut extractor = PatternExtractor::new().unwrap();
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         // Realistic log line
         let line =
             b"2024-01-15 10:32:45 GET /api evil.example.com 192.168.1.1 - malware.badsite.org";
+<<<<<<< HEAD
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         assert!(matches.len() >= 2);
         // Should find both domains
@@ -772,10 +988,17 @@ mod tests {
 
     #[test]
     fn test_ipv4_extraction_basic() {
+<<<<<<< HEAD
         let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Server at 192.168.1.1 responded";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Server at 192.168.1.1 responded";
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         // Should find the IP
         let ips: Vec<Ipv4Addr> = matches
@@ -792,10 +1015,17 @@ mod tests {
 
     #[test]
     fn test_ipv4_extraction_multiple() {
+<<<<<<< HEAD
         let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Traffic from 10.0.0.5 to 172.16.0.10";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Traffic from 10.0.0.5 to 172.16.0.10";
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         let ips: Vec<Ipv4Addr> = matches
             .iter()
@@ -811,6 +1041,7 @@ mod tests {
     }
 
     #[test]
+<<<<<<< HEAD
     fn test_unicode_domain_extraction() {
         let extractor = PatternExtractor::new().unwrap();
 
@@ -839,6 +1070,41 @@ mod tests {
 
         // Should extract both domains
         assert!(matches.len() >= 2);
+=======
+    fn test_ipv4_invalid() {
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        // Invalid IPs should not match
+        let line = b"Not IPs: 256.1.1.1 1.2.3.999 1.2.3";
+        let matches = extractor.extract_from_line(line);
+
+        let ips: Vec<Ipv4Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv4(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ips.len(), 0);
+    }
+
+    #[test]
+    fn test_mixed_extraction() {
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        // Mix of domains and IPs
+        let line = b"Request from 10.1.2.3 to api.example.com at 192.168.1.100";
+        let matches = extractor.extract_from_line(line);
+
+        let ips: Vec<Ipv4Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv4(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         let domains: Vec<&str> = matches
             .iter()
@@ -848,6 +1114,7 @@ mod tests {
             })
             .collect();
 
+<<<<<<< HEAD
         // ASCII domain should be extracted normally
         assert!(domains.iter().any(|d| d.contains("example.com")));
         // Unicode domain should be extracted (either as-is or punycode)
@@ -999,6 +1266,8 @@ mod tests {
             })
             .collect();
 
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
         assert_eq!(ips.len(), 2);
         assert_eq!(domains.len(), 1);
         assert_eq!(domains[0], "api.example.com");
@@ -1006,10 +1275,17 @@ mod tests {
 
     #[test]
     fn test_email_extraction_basic() {
+<<<<<<< HEAD
         let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Contact user@example.com for info";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Contact user@example.com for info";
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         let emails: Vec<&str> = matches
             .iter()
@@ -1025,10 +1301,17 @@ mod tests {
 
     #[test]
     fn test_email_extraction_multiple() {
+<<<<<<< HEAD
         let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Email alice@test.com or bob@company.org";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Email alice@test.com or bob@company.org";
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         let emails: Vec<&str> = matches
             .iter()
@@ -1045,10 +1328,17 @@ mod tests {
 
     #[test]
     fn test_email_with_plus() {
+<<<<<<< HEAD
         let extractor = PatternExtractor::new().unwrap();
 
         let line = b"Send to user+tag@example.com";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        let line = b"Send to user+tag@example.com";
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         let emails: Vec<&str> = matches
             .iter()
@@ -1064,11 +1354,19 @@ mod tests {
 
     #[test]
     fn test_full_extraction() {
+<<<<<<< HEAD
         let extractor = PatternExtractor::new().unwrap();
 
         // Realistic log line with everything
         let line = b"2024-01-15 user@example.com from 10.1.2.3 accessed api.test.com";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
+=======
+        let mut extractor = PatternExtractor::new().unwrap();
+
+        // Realistic log line with everything
+        let line = b"2024-01-15 user@example.com from 10.1.2.3 accessed api.test.com";
+        let matches = extractor.extract_from_line(line);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         let emails: Vec<&str> = matches
             .iter()
@@ -1096,7 +1394,11 @@ mod tests {
 
         assert_eq!(emails.len(), 1);
         assert_eq!(ips.len(), 1);
+<<<<<<< HEAD
         assert_eq!(domains.len(), 2); // Both example.com (from email) and api.test.com
+=======
+        assert_eq!(domains.len(), 1);
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         assert_eq!(emails[0], "user@example.com");
         assert_eq!(ips[0].to_string(), "10.1.2.3");

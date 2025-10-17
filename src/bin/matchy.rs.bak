@@ -438,6 +438,10 @@ fn cmd_match(
 ) -> Result<()> {
     use matchy::extractor::PatternExtractor;
     use matchy::Database;
+<<<<<<< HEAD
+=======
+    use std::io::Write;
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
     // Load database
     let load_start = Instant::now();
@@ -490,7 +494,11 @@ fn cmd_match(
     }
 
     let config = builder.build();
+<<<<<<< HEAD
     let extractor =
+=======
+    let mut extractor =
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
         PatternExtractor::with_config(config).context("Failed to create pattern extractor")?;
 
     if show_stats {
@@ -505,6 +513,7 @@ fn cmd_match(
         eprintln!("[INFO] Extractor configured for: {}", extracting.join(", "));
     }
 
+<<<<<<< HEAD
     // Open input for streaming (file or stdin) with 128KB buffer
     const BUFFER_SIZE: usize = 128 * 1024; // 128KB - optimal for log file processing
     let reader: Box<dyn io::BufRead> = if input.to_str() == Some("-") {
@@ -515,6 +524,15 @@ fn cmd_match(
             fs::File::open(&input)
                 .with_context(|| format!("Failed to open input file: {}", input.display()))?,
         ))
+=======
+    // Open input (file or stdin)
+    let reader: Box<dyn io::BufRead> = if input.to_str() == Some("-") {
+        Box::new(io::BufReader::new(io::stdin()))
+    } else {
+        Box::new(io::BufReader::new(fs::File::open(&input).with_context(
+            || format!("Failed to open input file: {}", input.display()),
+        )?))
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     };
 
     let mut lines_processed = 0;
@@ -524,8 +542,11 @@ fn cmd_match(
     let mut total_bytes = 0usize;
     let mut extraction_time = std::time::Duration::ZERO;
     let mut lookup_time = std::time::Duration::ZERO;
+<<<<<<< HEAD
     let mut extraction_samples = 0usize;
     let mut lookup_samples = 0usize;
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
     // Detailed stats (only tracked if --stats flag is set)
     let mut ipv4_count = 0usize;
@@ -537,6 +558,7 @@ fn cmd_match(
     let overall_start = Instant::now();
     let output_json = format == "json";
 
+<<<<<<< HEAD
     // Get base timestamp once, use monotonic clock for offsets (avoids syscalls)
     // Resync periodically to handle clock adjustments in long-running processes
     let mut base_timestamp = std::time::SystemTime::now()
@@ -549,10 +571,13 @@ fn cmd_match(
     // Sampling: Only measure timing every Nth line/candidate to reduce Instant::now() overhead
     const SAMPLE_INTERVAL: usize = 100;
 
+=======
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
     if show_stats {
         eprintln!("[INFO] Processing stdin...");
     }
 
+<<<<<<< HEAD
     // Process lines using LineScanner (zero-copy streaming + memchr)
     let mut scanner = LineScanner::new(reader);
     let mut line_buf = Vec::new(); // Reusable buffer, grows once to max line size
@@ -595,6 +620,22 @@ fn cmd_match(
             extraction_time += start.elapsed();
             extraction_samples += 1;
         }
+=======
+    for line in reader.lines() {
+        let text = line?;
+        let text = text.trim();
+        if text.is_empty() || text.starts_with('#') {
+            continue;
+        }
+
+        lines_processed += 1;
+        total_bytes += text.len();
+
+        // Extract candidates from the line
+        let extract_start = Instant::now();
+        let extracted = extractor.extract_from_line(text.as_bytes());
+        extraction_time += extract_start.elapsed();
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
         let mut line_had_match = false;
 
@@ -614,11 +655,15 @@ fn cmd_match(
             }
 
             // Lookup candidate (use specialized IP lookup to avoid string conversion)
+<<<<<<< HEAD
             let lookup_start = if show_stats && candidates_tested % SAMPLE_INTERVAL == 0 {
                 Some(Instant::now())
             } else {
                 None
             };
+=======
+            let start = Instant::now();
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
             let (result, candidate_str) = match &item.item {
                 // IP addresses: use direct lookup_ip (no string conversion needed)
                 matchy::extractor::ExtractedItem::Ipv4(ip) => {
@@ -632,10 +677,15 @@ fn cmd_match(
                 matchy::extractor::ExtractedItem::Email(s) => (db.lookup(s)?, s.to_string()),
                 matchy::extractor::ExtractedItem::Url(s) => (db.lookup(s)?, s.to_string()),
             };
+<<<<<<< HEAD
             if let Some(start) = lookup_start {
                 lookup_time += start.elapsed();
                 lookup_samples += 1;
             }
+=======
+            let elapsed = start.elapsed();
+            lookup_time += elapsed;
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
 
             let is_match = match &result {
                 Some(matchy::QueryResult::Pattern { pattern_ids, .. }) => !pattern_ids.is_empty(),
@@ -652,11 +702,23 @@ fn cmd_match(
 
                 // Output match to stdout as NDJSON
                 if output_json {
+<<<<<<< HEAD
+=======
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs_f64();
+
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
                     let mut match_obj = json!({
                         "timestamp": format!("{:.3}", timestamp),
                         "line_number": lines_processed,
                         "matched_text": candidate_str,
+<<<<<<< HEAD
                         "input_line": String::from_utf8_lossy(&line_buf),
+=======
+                        "input_line": text,
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
                     });
 
                     // Add match-specific fields
@@ -740,6 +802,7 @@ fn cmd_match(
         );
         eprintln!("[INFO] Total time: {:.2}s", overall_elapsed.as_secs_f64());
         eprintln!(
+<<<<<<< HEAD
             "[INFO] Extraction time (sampled): {:.2}s ({:.2}µs per sample, {} samples)",
             extraction_time.as_secs_f64(),
             if extraction_samples > 0 {
@@ -763,6 +826,29 @@ fn cmd_match(
             "[INFO] Query rate: {} candidates/sec (overall)",
             format_qps(if overall_elapsed.as_secs_f64() > 0.0 {
                 candidates_tested as f64 / overall_elapsed.as_secs_f64()
+=======
+            "[INFO] Extraction time: {:.2}s ({:.2}µs per line)",
+            extraction_time.as_secs_f64(),
+            if lines_processed > 0 {
+                extraction_time.as_nanos() as f64 / 1000.0 / lines_processed as f64
+            } else {
+                0.0
+            }
+        );
+        eprintln!(
+            "[INFO] Lookup time: {:.2}s ({:.2}µs per candidate)",
+            lookup_time.as_secs_f64(),
+            if candidates_tested > 0 {
+                lookup_time.as_nanos() as f64 / 1000.0 / candidates_tested as f64
+            } else {
+                0.0
+            }
+        );
+        eprintln!(
+            "[INFO] Query rate: {} candidates/sec",
+            format_qps(if candidates_tested > 0 {
+                candidates_tested as f64 / lookup_time.as_secs_f64()
+>>>>>>> 909c555 (feat(extractor): add SIMD-accelerated pattern extraction and match command)
             } else {
                 0.0
             })
