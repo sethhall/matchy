@@ -234,7 +234,7 @@ impl PatternExtractor {
                     Ok(s) => s,
                     Err(_) => continue, // Invalid UTF-8 in domain - skip
                 };
-                
+
                 // Reject bare TLDs (e.g., ".app", ".com")
                 // A valid domain must have at least one label before the TLD
                 if domain_bytes[0] == b'.' {
@@ -391,33 +391,35 @@ impl PatternExtractor {
 
             // Find actual end (only digits and dots)
             let mut candidate_end = start;
-            while candidate_end < line.len() && (line[candidate_end].is_ascii_digit() || line[candidate_end] == b'.') {
+            while candidate_end < line.len()
+                && (line[candidate_end].is_ascii_digit() || line[candidate_end] == b'.')
+            {
                 candidate_end += 1;
             }
-            
+
             let candidate = &line[start..candidate_end];
-            
+
             // Early validation before expensive parsing:
-            
+
             // 1. Must have exactly 3 dots (4 octets)
             let dot_count = memchr::memchr_iter(b'.', candidate).count();
             if dot_count != 3 {
                 last_end = candidate_end;
                 continue;
             }
-            
+
             // 2. Can't have consecutive dots (e.g., "26.0..26.0")
             if candidate.windows(2).any(|w| w == b"..") {
                 last_end = candidate_end;
                 continue;
             }
-            
+
             // 3. Can't start or end with dot
             if candidate.starts_with(b".") || candidate.ends_with(b".") {
                 last_end = candidate_end;
                 continue;
             }
-            
+
             // 4. Each octet must be 1-3 digits
             // Walk through and count digits between dots
             // Filters: "2025.36.0.72591908" (4 and 8 digit octets), "460.1.1.2" (3 digits but >255)
@@ -567,34 +569,34 @@ impl PatternExtractor {
 
         let local_part = &line[start..at_pos];
         let domain_part = &line[at_pos + 1..end];
-        
+
         // Validate local part:
         // 1. No consecutive dots (e.g., "s...@")
         if local_part.windows(2).any(|w| w == b"..") {
             return None;
         }
-        
+
         // 2. Must have at least one letter (not just dots/numbers/symbols)
         //    Filters: ".@..", "34480FE2-5610-4973-AA09-3ABB60D38D55@" is OK
         let has_letter = local_part.iter().any(|&b| b.is_ascii_alphabetic());
         if !has_letter {
             return None;
         }
-        
+
         // Validate domain part:
         // 1. Must have at least one dot
         if !domain_part.contains(&b'.') {
             return None;
         }
-        
+
         // 2. Must have a valid TLD from the public suffix list
         //    This rejects IP addresses ("192.168.1.222") and fake TLDs ("Uv3.peer")
         if let Some(tld_matcher) = self.tld_matcher.as_ref() {
             let tld_matches = tld_matcher.find_matches_with_positions_bytes(domain_part);
             // Must have at least one TLD match that ends at the domain boundary
             let has_valid_tld = tld_matches.iter().any(|(end_pos, _)| {
-                *end_pos == domain_part.len() && 
-                (*end_pos >= domain_part.len() || !is_domain_char(domain_part[*end_pos]))
+                *end_pos == domain_part.len()
+                    && (*end_pos >= domain_part.len() || !is_domain_char(domain_part[*end_pos]))
             });
             if !has_valid_tld {
                 return None;
@@ -619,10 +621,10 @@ impl PatternExtractor {
             if colon_pos == 0 || colon_pos + 1 >= line.len() {
                 continue;
             }
-            
+
             let before = line[colon_pos - 1];
             let after = line[colon_pos + 1];
-            
+
             // Must have valid IPv6 char on at least one side
             if !is_ipv6_char_fast(before) || !is_ipv6_char_fast(after) {
                 continue;
@@ -647,9 +649,9 @@ impl PatternExtractor {
             }
 
             let candidate = &line[start..candidate_end];
-            
+
             // Early rejection filters before expensive parsing:
-            
+
             // 1. Minimum length check - filter tiny addresses unlikely in threat data
             // Filters: "e::f" (4 bytes), "ce::A" (5 bytes), "e::add" (6 bytes)
             // Real threat IPs are typically longer: "fe80::1" (7 bytes minimum)
@@ -657,14 +659,14 @@ impl PatternExtractor {
                 last_end = candidate_end;
                 continue;
             }
-            
+
             // 2. Can't start or end with single colon (malformed)
             //    If it starts/ends with colon, must be :: (and we reject those too)
             if candidate.starts_with(b":") || candidate.ends_with(b":") {
                 last_end = candidate_end;
                 continue;
             }
-            
+
             // 3. IPv6 has 8 groups, so 7 colons in full form
             //    If < 7 colons, MUST have :: compression
             let colon_count = memchr::memchr_iter(b':', candidate).count();
@@ -673,7 +675,7 @@ impl PatternExtractor {
                 last_end = candidate_end;
                 continue;
             }
-            
+
             if colon_count < 7 {
                 // Compressed form - must have ::
                 let has_compression = candidate.windows(2).any(|w| w == b"::");
@@ -683,7 +685,7 @@ impl PatternExtractor {
                 }
             }
             // Note: colon_count >= 7 is OK (full address or with ::)
-            
+
             // 4. Each segment between colons must be 1-4 hex digits
             // Walk through and count chars between colons
             // Filters: "FEC0050519FB::c" (12-digit segment), "7::31BD71E4" (8-digit segment)
@@ -709,7 +711,7 @@ impl PatternExtractor {
                 last_end = candidate_end;
                 continue;
             }
-            
+
             // 5. Filter link-local addresses (fe80::/10) - not in threat databases
             if candidate.len() >= 4 {
                 let prefix = &candidate[..4];
@@ -876,8 +878,8 @@ static BOUNDARY_LOOKUP: [bool; 256] = {
     table[b'>' as usize] = true;
     table[b'"' as usize] = true;
     table[b'\'' as usize] = true;
-    table[b'@' as usize] = true;  // Stop domain extraction at @ (emails)
-    table[b'=' as usize] = true;  // Stop at = (key-value pairs: domain=example.com)
+    table[b'@' as usize] = true; // Stop domain extraction at @ (emails)
+    table[b'=' as usize] = true; // Stop at = (key-value pairs: domain=example.com)
     table
 };
 
@@ -904,9 +906,9 @@ static DOMAIN_CHAR_LOOKUP: [bool; 256] = {
         i += 1;
     }
     // Special chars
-    table[b'-' as usize] = true;  // Hyphen in labels
-    table[b'.' as usize] = true;  // Dot separator
-    
+    table[b'-' as usize] = true; // Hyphen in labels
+    table[b'.' as usize] = true; // Dot separator
+
     // High bytes (0x80-0xFF) for IDN domains (UTF-8 continuation bytes)
     i = 0x80;
     while i < 0xFF {
@@ -974,11 +976,6 @@ fn is_email_local_char(b: u8) -> bool {
 fn is_word_boundary(b: u8) -> bool {
     // Delegate to fast lookup table
     is_boundary_fast(b)
-}
-
-#[inline]
-fn is_hex_char(b: u8) -> bool {
-    b.is_ascii_hexdigit()
 }
 
 /// Fast domain character check using lookup table (branch-free, O(1))
@@ -1647,7 +1644,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(emails.len(), 0, "Should reject email with consecutive dots in local part");
+        assert_eq!(
+            emails.len(),
+            0,
+            "Should reject email with consecutive dots in local part"
+        );
     }
 
     #[test]
@@ -1666,7 +1667,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(emails.len(), 0, "Should reject email without letter in local part");
+        assert_eq!(
+            emails.len(),
+            0,
+            "Should reject email without letter in local part"
+        );
     }
 
     #[test]
@@ -1685,8 +1690,15 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(emails.len(), 1, "Should accept email with UUID containing letters");
-        assert_eq!(emails[0], "34480FE2-5610-4973-AA09-3ABB60D38D55@example.com");
+        assert_eq!(
+            emails.len(),
+            1,
+            "Should accept email with UUID containing letters"
+        );
+        assert_eq!(
+            emails[0],
+            "34480FE2-5610-4973-AA09-3ABB60D38D55@example.com"
+        );
     }
 
     #[test]
@@ -1705,7 +1717,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(emails.len(), 0, "Should reject email with IP address as domain");
+        assert_eq!(
+            emails.len(),
+            0,
+            "Should reject email with IP address as domain"
+        );
     }
 
     #[test]
@@ -1749,7 +1765,11 @@ mod tests {
                 })
                 .collect();
 
-            assert_eq!(ips.len(), 0, "Should reject tiny IPv6 addresses (< 8 bytes)");
+            assert_eq!(
+                ips.len(),
+                0,
+                "Should reject tiny IPv6 addresses (< 8 bytes)"
+            );
         }
     }
 
@@ -1769,7 +1789,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(ips.len(), 0, "Should reject IPv6 with segment > 4 hex digits");
+        assert_eq!(
+            ips.len(),
+            0,
+            "Should reject IPv6 with segment > 4 hex digits"
+        );
     }
 
     #[test]
@@ -1788,7 +1812,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(ips.len(), 0, "Should reject IPv6 with segment > 4 hex digits");
+        assert_eq!(
+            ips.len(),
+            0,
+            "Should reject IPv6 with segment > 4 hex digits"
+        );
     }
 
     #[test]
@@ -1854,6 +1882,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(ips.len(), 0, "Should reject link-local IPv6 addresses (fe80::/10)");
+        assert_eq!(
+            ips.len(),
+            0,
+            "Should reject link-local IPv6 addresses (fe80::/10)"
+        );
     }
 }

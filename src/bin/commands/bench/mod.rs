@@ -9,7 +9,7 @@ use std::path::PathBuf;
 pub use combined::bench_combined_database;
 pub use ip::bench_ip_database;
 pub use literal::bench_literal_database;
-pub use pattern::bench_pattern_database;
+pub use pattern::{bench_pattern_database, BenchConfig as PatternBenchConfig};
 
 use crate::commands::utils::format_number;
 
@@ -100,9 +100,9 @@ pub fn cmd_bench(
             cache_size,
             cache_hit_rate,
         }),
-        "pattern" => bench_pattern_database(
+        "pattern" => bench_pattern_database(PatternBenchConfig {
             count,
-            &temp_file,
+            temp_file: &temp_file,
             keep,
             load_iterations,
             query_count,
@@ -110,8 +110,8 @@ pub fn cmd_bench(
             trusted,
             cache_size,
             cache_hit_rate,
-            &pattern_style,
-        ),
+            pattern_style: &pattern_style,
+        }),
         "combined" => bench_combined_database(
             count,
             &temp_file,

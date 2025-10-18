@@ -1402,7 +1402,7 @@ impl Paraglob {
             0,
             "ACNode offset must be 8-byte aligned"
         );
-        
+
         let ptr = ac_buffer.as_ptr().add(offset) as *const ACNode;
         ptr.read()
     }
@@ -1436,7 +1436,8 @@ impl Paraglob {
 
         // Check if buffer is properly aligned for fast path
         // ACNode requires 8-byte alignment
-        let is_aligned = (ac_buffer.as_ptr() as usize) % std::mem::align_of::<crate::offset_format::ACNode>() == 0;
+        let is_aligned = (ac_buffer.as_ptr() as usize)
+            .is_multiple_of(std::mem::align_of::<crate::offset_format::ACNode>());
 
         if trusted && is_aligned {
             // FAST PATH: Trusted database with aligned buffer - use aligned reads
@@ -1477,7 +1478,6 @@ impl Paraglob {
         };
 
         for (pos, &search_ch) in search_text.iter().enumerate() {
-
             // Traverse to next state
             loop {
                 // SAFETY: Trusted database, validated at load time
@@ -1550,7 +1550,6 @@ impl Paraglob {
         };
 
         for (pos, &search_ch) in search_text.iter().enumerate() {
-
             // Traverse to next state
             loop {
                 if let Some(next_offset) =
@@ -1665,7 +1664,6 @@ impl Paraglob {
         };
 
         for &search_ch in search_text.iter() {
-
             // Traverse to next state
             loop {
                 // SAFETY: Trusted database, validated at load time
@@ -1737,7 +1735,6 @@ impl Paraglob {
         };
 
         for &search_ch in search_text.iter() {
-
             // Traverse to next state
             let mut current_node = {
                 let node_slice = match ac_buffer.get(current_offset..) {
@@ -1953,22 +1950,22 @@ impl Paraglob {
                 // Load all edge characters into a stack array for cache-friendly access
                 // LLVM will auto-vectorize the character comparison loop
                 let mut chars = [0u8; 8];
-                for i in 0..count {
+                for (i, char_slot) in chars.iter_mut().enumerate().take(count) {
                     let edge_ptr = unsafe {
                         ac_buffer.as_ptr().add(edges_offset + i * edge_size) as *const ACEdge
                     };
-                    chars[i] = unsafe { (*edge_ptr).character };
+                    *char_slot = unsafe { (*edge_ptr).character };
                 }
 
                 // Find matching character (auto-vectorizes on modern CPUs)
-                for i in 0..count {
-                    if chars[i] == ch {
+                for (i, &char_val) in chars.iter().enumerate().take(count) {
+                    if char_val == ch {
                         let edge_ptr = unsafe {
                             ac_buffer.as_ptr().add(edges_offset + i * edge_size) as *const ACEdge
                         };
                         return Some(unsafe { (*edge_ptr).target_offset as usize });
                     }
-                    if chars[i] > ch {
+                    if char_val > ch {
                         return None; // Early exit - edges are sorted
                     }
                 }
