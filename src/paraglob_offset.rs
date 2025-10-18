@@ -1337,8 +1337,20 @@ impl Paraglob {
     /// # Safety
     ///
     /// Caller must ensure:
-    /// - `ac_buffer` is from a trusted source (built by this library)
+    /// - `ac_buffer` is from a trusted source (built by this library AND properly aligned)
     /// - `offset + size_of::<ACNode>()` is within buffer bounds
+    /// - `ac_buffer` base pointer is 8-byte aligned (checked at runtime)
+    /// - `offset` is a multiple of 32 (ACNode size), ensuring 8-byte alignment
+    ///
+    /// # When to Use
+    ///
+    /// Only for:
+    /// - Embedded compile-time data wrapped in #[repr(align(8))]
+    /// - Data from `Vec<u8>` allocated by this library (heap is 8-byte aligned)
+    ///
+    /// Do NOT use for:
+    /// - Memory-mapped files (alignment not guaranteed)
+    /// - Data from external sources
     #[inline(always)]
     unsafe fn load_ac_node_unchecked(
         ac_buffer: &[u8],
@@ -1346,12 +1358,30 @@ impl Paraglob {
     ) -> crate::offset_format::ACNode {
         use crate::offset_format::ACNode;
 
-        // SAFETY: Caller guarantees bounds
-        // ACNode is repr(C) with fixed 32-byte layout
-        // Use read_unaligned for safety - ARM64 handles this efficiently
-        // The nodes are likely 4-byte aligned naturally, but not guaranteed 8-byte
+        // SAFETY: Caller guarantees bounds and alignment
+        // ACNode is repr(C) with 32-byte size and 8-byte alignment requirement
+        // Our serialization guarantees:
+        // 1. Nodes start at offset 0 within AC buffer
+        // 2. Each node is 32 bytes (divisible by 8)
+        // 3. Therefore all node offsets are 8-byte aligned IF base pointer is aligned
+        //
+        // The caller MUST ensure the buffer itself is 8-byte aligned:
+        // - Vec<u8> from Rust allocator: always 8-byte aligned
+        // - #[repr(align(8))] static data: guaranteed by compiler
+        // - mmap: NOT guaranteed, must use safe path
+        debug_assert_eq!(
+            ac_buffer.as_ptr() as usize % std::mem::align_of::<ACNode>(),
+            0,
+            "AC buffer must be 8-byte aligned for trusted fast path"
+        );
+        debug_assert_eq!(
+            offset % std::mem::align_of::<ACNode>(),
+            0,
+            "ACNode offset must be 8-byte aligned"
+        );
+        
         let ptr = ac_buffer.as_ptr().add(offset) as *const ACNode;
-        ptr.read_unaligned()
+        ptr.read()
     }
 
     /// Load pattern IDs from buffer using unsafe direct slice cast (trusted mode)
@@ -1381,16 +1411,24 @@ impl Paraglob {
             return;
         }
 
-        if trusted {
-            // FAST PATH: Trusted database - use unsafe direct reads
+        // Check if buffer is properly aligned for fast path
+        // ACNode requires 8-byte alignment
+        let is_aligned = (ac_buffer.as_ptr() as usize) % std::mem::align_of::<crate::offset_format::ACNode>() == 0;
+
+        if trusted && is_aligned {
+            // FAST PATH: Trusted database with aligned buffer - use aligned reads
             Self::run_ac_matching_with_positions_trusted(ac_buffer, text, mode, matches);
         } else {
-            // SAFE PATH: Untrusted database - use zerocopy validation
+            // SAFE PATH: Untrusted database OR misaligned buffer - use zerocopy validation
+            // Note: mmap'd files may not be aligned even if trusted
             Self::run_ac_matching_with_positions_safe(ac_buffer, text, mode, matches);
         }
     }
 
-    /// Fast path for trusted databases - bypasses all zerocopy overhead
+    /// Fast path for trusted AND ALIGNED databases - bypasses all zerocopy overhead
+    ///
+    /// IMPORTANT: Only called when buffer is verified to be 8-byte aligned.
+    /// Caller must check alignment before calling this function.
     #[inline(never)] // Separate for better profiling
     fn run_ac_matching_with_positions_trusted(
         ac_buffer: &[u8],
@@ -1864,10 +1902,18 @@ impl Paraglob {
                     }
 
                     // SAFETY: Trusted database, bounds checked above
-                    // ACEdge is repr(C) with 8-byte layout
+                    // ACEdge is repr(C) with 8-byte size and 4-byte alignment
+                    // Edges start after nodes in our serialization, and since nodes
+                    // are 8-byte aligned and their total size is 8-byte aligned,
+                    // edges are also 8-byte aligned (better than required 4-byte)
                     let edge = unsafe {
+                        debug_assert_eq!(
+                            edge_offset % std::mem::align_of::<ACEdge>(),
+                            0,
+                            "ACEdge must be 4-byte aligned"
+                        );
                         let ptr = ac_buffer.as_ptr().add(edge_offset) as *const ACEdge;
-                        ptr.read_unaligned()
+                        ptr.read()
                     };
 
                     if edge.character == ch {
