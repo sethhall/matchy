@@ -82,6 +82,7 @@ memory-stats = "1.2"  # For tracking memory usage during builds
 lru = "0.12"  # LRU cache for query results
 memchr = "2.7"  # SIMD-accelerated byte searching
 rayon = "1.10"  # Parallel sort for large hash builds
+notify = "6.1"  # File system watching for log tailing
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef"] }
 
@@ -92,6 +93,8 @@ proptest = "1.4"
 tempfile = "3.8"
 rand = "0.9"
 dhat = "0.3"  # Heap profiling for benchmarks
+assert_cmd = "2.0"  # CLI integration testing
+predicates = "3.0"  # Assertions for command output
 
 [build-dependencies]
 cbindgen = "0.29"
