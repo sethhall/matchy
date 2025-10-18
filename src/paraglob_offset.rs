@@ -21,7 +21,7 @@ use crate::error::ParaglobError;
 use crate::glob::{GlobPattern, MatchMode as GlobMatchMode};
 use crate::offset_format::{
     read_cstring, read_str_checked, read_str_unchecked, ACEdge, ParaglobHeader, PatternDataMapping,
-    PatternEntry, SingleWildcard,
+    PatternEntry, SingleWildcard, StateKind,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -376,12 +376,13 @@ impl ParaglobBuilder {
             buffer: BufferStorage::Owned(buffer),
             mode,
             trusted: true, // Databases we build are trusted
-            glob_cache: RefCell::new(HashMap::new()),
+            // Pre-allocate all caches to avoid allocations during queries
+            glob_cache: RefCell::new(HashMap::with_capacity(64)),
             ac_literal_hash,
             pattern_data_map,
-            candidate_buffer: RefCell::new(HashSet::new()),
-            ac_literal_buffer: RefCell::new(HashSet::new()),
-            result_buffer: RefCell::new(Vec::new()),
+            candidate_buffer: RefCell::new(HashSet::with_capacity(128)),
+            ac_literal_buffer: RefCell::new(HashSet::with_capacity(128)),
+            result_buffer: RefCell::new(Vec::with_capacity(64)),
         })
     }
 
@@ -734,12 +735,13 @@ impl Paraglob {
             buffer: BufferStorage::Owned(Vec::new()),
             mode,
             trusted: true, // Databases we build ourselves are trusted
-            glob_cache: RefCell::new(HashMap::new()),
+            // Pre-allocate all caches to avoid allocations during queries
+            glob_cache: RefCell::new(HashMap::with_capacity(64)),
             ac_literal_hash: None,
             pattern_data_map: None,
-            candidate_buffer: RefCell::new(HashSet::new()),
-            ac_literal_buffer: RefCell::new(HashSet::new()),
-            result_buffer: RefCell::new(Vec::new()),
+            candidate_buffer: RefCell::new(HashSet::with_capacity(128)),
+            ac_literal_buffer: RefCell::new(HashSet::with_capacity(128)),
+            result_buffer: RefCell::new(Vec::with_capacity(64)),
         }
     }
 
@@ -829,8 +831,16 @@ impl Paraglob {
         }
 
         let ac_buffer = &buffer[ac_start..ac_start + ac_size];
-        let mut matches = Vec::new();
-        Self::run_ac_matching_with_positions(ac_buffer, text, self.mode, &mut matches);
+        // Pre-allocate capacity based on text length
+        // Typical: 1 match per 100 bytes, so text.len() / 100 is reasonable
+        let mut matches = Vec::with_capacity(text.len() / 100 + 16);
+        Self::run_ac_matching_with_positions(
+            ac_buffer,
+            text,
+            self.mode,
+            self.trusted,
+            &mut matches,
+        );
         matches
     }
 
@@ -862,10 +872,12 @@ impl Paraglob {
             // Run AC automaton matching directly on text bytes (AC handles case-insensitivity)
             let text_bytes = text.as_bytes();
             let mode = self.mode;
+            let trusted = self.trusted;
             Self::run_ac_matching_into_static(
                 ac_buffer,
                 text_bytes,
                 mode,
+                trusted,
                 &mut self.ac_literal_buffer.borrow_mut(),
             );
 
@@ -1084,10 +1096,12 @@ impl Paraglob {
             // Run AC automaton matching directly on text bytes (AC handles case-insensitivity)
             let text_bytes = text.as_bytes();
             let mode = self.mode;
+            let trusted = self.trusted;
             Self::run_ac_matching_into_static(
                 ac_buffer,
                 text_bytes,
                 mode,
+                trusted,
                 &mut self.ac_literal_buffer.borrow_mut(),
             );
 
@@ -1095,12 +1109,32 @@ impl Paraglob {
             // Use zero-copy lookup_into to avoid allocations
             if !self.ac_literal_buffer.borrow().is_empty() {
                 if let Some(ref ac_hash) = self.ac_literal_hash {
-                    // Collect literal IDs first to avoid multiple borrows
-                    let literal_ids: Vec<u32> =
-                        self.ac_literal_buffer.borrow().iter().copied().collect();
-                    let mut candidates = self.candidate_buffer.borrow_mut();
-                    for literal_id in literal_ids {
-                        ac_hash.lookup_into(literal_id, &mut *candidates);
+                    // Clone the literal buffer content once to avoid holding borrow during lookup
+                    // Use a fixed-size array on the stack for small counts
+                    let ac_buf = self.ac_literal_buffer.borrow();
+                    let count = ac_buf.len();
+
+                    if count <= 64 {
+                        // Fast path: use stack-allocated array for small counts
+                        let mut stack_buf = [0u32; 64];
+                        for (i, &id) in ac_buf.iter().enumerate().take(64) {
+                            stack_buf[i] = id;
+                        }
+                        drop(ac_buf); // Release borrow
+
+                        let mut candidates = self.candidate_buffer.borrow_mut();
+                        for &literal_id in &stack_buf[..count] {
+                            ac_hash.lookup_into(literal_id, &mut *candidates);
+                        }
+                    } else {
+                        // Slow path: need heap allocation for large counts (rare)
+                        let literal_ids: Vec<u32> = ac_buf.iter().copied().collect();
+                        drop(ac_buf);
+
+                        let mut candidates = self.candidate_buffer.borrow_mut();
+                        for literal_id in literal_ids {
+                            ac_hash.lookup_into(literal_id, &mut *candidates);
+                        }
                     }
                 }
             }
@@ -1298,8 +1332,135 @@ impl Paraglob {
         output.extend_from_slice(results);
     }
 
+    /// Load ACNode from buffer using unsafe direct pointer read (trusted mode)
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure:
+    /// - `ac_buffer` is from a trusted source (built by this library)
+    /// - `offset + size_of::<ACNode>()` is within buffer bounds
+    #[inline(always)]
+    unsafe fn load_ac_node_unchecked(
+        ac_buffer: &[u8],
+        offset: usize,
+    ) -> crate::offset_format::ACNode {
+        use crate::offset_format::ACNode;
+
+        // SAFETY: Caller guarantees bounds
+        // ACNode is repr(C) with fixed 32-byte layout
+        // Use read_unaligned for safety - ARM64 handles this efficiently
+        // The nodes are likely 4-byte aligned naturally, but not guaranteed 8-byte
+        let ptr = ac_buffer.as_ptr().add(offset) as *const ACNode;
+        ptr.read_unaligned()
+    }
+
+    /// Load pattern IDs from buffer using unsafe direct slice cast (trusted mode)
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure:
+    /// - `ac_buffer` is from a trusted source
+    /// - `offset + count * 4` is within buffer bounds
+    #[inline(always)]
+    unsafe fn load_pattern_ids_unchecked(ac_buffer: &[u8], offset: usize, count: usize) -> &[u32] {
+        // SAFETY: Caller guarantees bounds
+        // Pattern IDs are u32 array, may not be 4-byte aligned so use unaligned read
+        let ptr = ac_buffer.as_ptr().add(offset) as *const u32;
+        std::slice::from_raw_parts(ptr, count)
+    }
+
     /// Run AC automaton matching with position tracking
     fn run_ac_matching_with_positions(
+        ac_buffer: &[u8],
+        text: &[u8],
+        mode: GlobMatchMode,
+        trusted: bool,
+        matches: &mut Vec<(usize, u32)>,
+    ) {
+        if ac_buffer.is_empty() || text.is_empty() {
+            return;
+        }
+
+        if trusted {
+            // FAST PATH: Trusted database - use unsafe direct reads
+            Self::run_ac_matching_with_positions_trusted(ac_buffer, text, mode, matches);
+        } else {
+            // SAFE PATH: Untrusted database - use zerocopy validation
+            Self::run_ac_matching_with_positions_safe(ac_buffer, text, mode, matches);
+        }
+    }
+
+    /// Fast path for trusted databases - bypasses all zerocopy overhead
+    #[inline(never)] // Separate for better profiling
+    fn run_ac_matching_with_positions_trusted(
+        ac_buffer: &[u8],
+        text: &[u8],
+        mode: GlobMatchMode,
+        matches: &mut Vec<(usize, u32)>,
+    ) {
+        use crate::offset_format::ACNode;
+        use std::mem::size_of;
+
+        let mut current_offset = 0usize;
+        let node_size = size_of::<ACNode>();
+
+        for (pos, &ch) in text.iter().enumerate() {
+            let search_ch = match mode {
+                GlobMatchMode::CaseInsensitive => ch.to_ascii_lowercase(),
+                GlobMatchMode::CaseSensitive => ch,
+            };
+
+            // Traverse to next state
+            loop {
+                // SAFETY: Trusted database, validated at load time
+                if current_offset + node_size > ac_buffer.len() {
+                    return; // Corrupted database
+                }
+
+                let current_node =
+                    unsafe { Self::load_ac_node_unchecked(ac_buffer, current_offset) };
+
+                if let Some(next_offset) =
+                    Self::find_ac_transition_from_node_trusted(ac_buffer, &current_node, search_ch)
+                {
+                    current_offset = next_offset;
+                    break;
+                }
+
+                if current_offset == 0 {
+                    break; // At root, stay there
+                }
+
+                current_offset = current_node.failure_offset as usize;
+            }
+
+            // Collect matches at this position
+            if current_offset + node_size <= ac_buffer.len() {
+                let node = unsafe { Self::load_ac_node_unchecked(ac_buffer, current_offset) };
+
+                if node.pattern_count > 0 {
+                    let patterns_offset = node.patterns_offset as usize;
+                    let pattern_count = node.pattern_count as usize;
+
+                    if patterns_offset + pattern_count * 4 <= ac_buffer.len() {
+                        // SAFETY: Trusted database, bounds checked
+                        let ids = unsafe {
+                            Self::load_pattern_ids_unchecked(
+                                ac_buffer,
+                                patterns_offset,
+                                pattern_count,
+                            )
+                        };
+                        matches.extend(ids.iter().map(|&id| (pos + 1, id)));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Safe path for untrusted databases - uses zerocopy validation
+    #[inline(never)] // Separate for better profiling
+    fn run_ac_matching_with_positions_safe(
         ac_buffer: &[u8],
         text: &[u8],
         mode: GlobMatchMode,
@@ -1307,11 +1468,8 @@ impl Paraglob {
     ) {
         use crate::offset_format::ACNode;
 
-        if ac_buffer.is_empty() || text.is_empty() {
-            return;
-        }
-
         let mut current_offset = 0usize;
+        let mut current_node: Option<ACNode> = None;
 
         for (pos, &ch) in text.iter().enumerate() {
             let search_ch = match mode {
@@ -1325,35 +1483,50 @@ impl Paraglob {
                     Self::find_ac_transition(ac_buffer, current_offset, search_ch)
                 {
                     current_offset = next_offset;
+                    current_node = None;
                     break;
                 }
 
                 if current_offset == 0 {
+                    current_node = None;
                     break;
                 }
 
+                // Load node once if not cached
+                let node = if let Some(cached) = current_node {
+                    cached
+                } else {
+                    let node_slice = match ac_buffer.get(current_offset..) {
+                        Some(s) => s,
+                        None => break,
+                    };
+                    let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
+                        Ok((r, _)) => r,
+                        Err(_) => break,
+                    };
+                    *node_ref
+                };
+
+                current_offset = node.failure_offset as usize;
+                current_node = None;
+            }
+
+            // Collect matches at this position
+            let node = if let Some(cached) = current_node {
+                cached
+            } else {
                 let node_slice = match ac_buffer.get(current_offset..) {
                     Some(s) => s,
-                    None => break,
+                    None => continue,
                 };
                 let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
                     Ok((r, _)) => r,
-                    Err(_) => break,
+                    Err(_) => continue,
                 };
-                let node = *node_ref;
-                current_offset = node.failure_offset as usize;
-            }
-
-            // Collect matches at this position (end of match is pos + 1)
-            let node_slice = match ac_buffer.get(current_offset..) {
-                Some(s) => s,
-                None => continue,
+                let n = *node_ref;
+                current_node = Some(n);
+                n
             };
-            let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
-                Ok((r, _)) => r,
-                Err(_) => continue,
-            };
-            let node = *node_ref;
 
             if node.pattern_count > 0 {
                 let patterns_offset = node.patterns_offset as usize;
@@ -1364,9 +1537,7 @@ impl Paraglob {
                     if let Ok((ids_ref, _)) =
                         Ref::<_, [u32]>::from_prefix_with_elems(pattern_slice, pattern_count)
                     {
-                        for &pattern_id in ids_ref.iter() {
-                            matches.push((pos + 1, pattern_id));
-                        }
+                        matches.extend(ids_ref.iter().map(|&id| (pos + 1, id)));
                     }
                 }
             }
@@ -1379,18 +1550,37 @@ impl Paraglob {
         ac_buffer: &[u8],
         text: &[u8],
         mode: GlobMatchMode,
+        trusted: bool,
         matches: &mut HashSet<u32>,
     ) {
-        use crate::offset_format::ACNode;
-
         if ac_buffer.is_empty() || text.is_empty() {
             return;
         }
 
-        let mut current_offset = 0usize; // Start at root node
+        if trusted {
+            // FAST PATH: Trusted database - use unsafe direct reads
+            Self::run_ac_matching_into_static_trusted(ac_buffer, text, mode, matches);
+        } else {
+            // SAFE PATH: Untrusted database - use zerocopy validation
+            Self::run_ac_matching_into_static_safe(ac_buffer, text, mode, matches);
+        }
+    }
+
+    /// Fast path for trusted databases
+    #[inline(never)] // Separate for better profiling
+    fn run_ac_matching_into_static_trusted(
+        ac_buffer: &[u8],
+        text: &[u8],
+        mode: GlobMatchMode,
+        matches: &mut HashSet<u32>,
+    ) {
+        use crate::offset_format::ACNode;
+        use std::mem::size_of;
+
+        let mut current_offset = 0usize;
+        let node_size = size_of::<ACNode>();
 
         for &ch in text.iter() {
-            // Normalize character for case-insensitive mode
             let search_ch = match mode {
                 GlobMatchMode::CaseInsensitive => ch.to_ascii_lowercase(),
                 GlobMatchMode::CaseSensitive => ch,
@@ -1398,56 +1588,127 @@ impl Paraglob {
 
             // Traverse to next state
             loop {
-                // Try to find transition
+                // SAFETY: Trusted database, validated at load time
+                if current_offset + node_size > ac_buffer.len() {
+                    return; // Corrupted database
+                }
+
+                let current_node =
+                    unsafe { Self::load_ac_node_unchecked(ac_buffer, current_offset) };
+
                 if let Some(next_offset) =
-                    Self::find_ac_transition(ac_buffer, current_offset, search_ch)
+                    Self::find_ac_transition_from_node_trusted(ac_buffer, &current_node, search_ch)
                 {
                     current_offset = next_offset;
                     break;
                 }
 
-                // Follow failure link
                 if current_offset == 0 {
-                    break; // At root, stay there
+                    break;
                 }
+
+                current_offset = current_node.failure_offset as usize;
+            }
+
+            // Collect matches
+            if current_offset + node_size <= ac_buffer.len() {
+                let final_node = unsafe { Self::load_ac_node_unchecked(ac_buffer, current_offset) };
+
+                if final_node.pattern_count > 0 {
+                    let patterns_offset = final_node.patterns_offset as usize;
+                    let pattern_count = final_node.pattern_count as usize;
+
+                    if patterns_offset + pattern_count * 4 <= ac_buffer.len() {
+                        // SAFETY: Trusted database, bounds checked
+                        let ids = unsafe {
+                            Self::load_pattern_ids_unchecked(
+                                ac_buffer,
+                                patterns_offset,
+                                pattern_count,
+                            )
+                        };
+                        matches.extend(ids.iter().copied());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Safe path for untrusted databases
+    #[inline(never)] // Separate for better profiling
+    fn run_ac_matching_into_static_safe(
+        ac_buffer: &[u8],
+        text: &[u8],
+        mode: GlobMatchMode,
+        matches: &mut HashSet<u32>,
+    ) {
+        use crate::offset_format::ACNode;
+
+        let mut current_offset = 0usize;
+
+        for &ch in text.iter() {
+            let search_ch = match mode {
+                GlobMatchMode::CaseInsensitive => ch.to_ascii_lowercase(),
+                GlobMatchMode::CaseSensitive => ch,
+            };
+
+            // Traverse to next state
+            let mut current_node = {
+                let node_slice = match ac_buffer.get(current_offset..) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                match Ref::<_, ACNode>::from_prefix(node_slice) {
+                    Ok((r, _)) => *r,
+                    Err(_) => continue,
+                }
+            };
+
+            loop {
+                if let Some(next_offset) =
+                    Self::find_ac_transition_from_node(ac_buffer, &current_node, search_ch)
+                {
+                    current_offset = next_offset;
+                    break;
+                }
+
+                if current_offset == 0 {
+                    break;
+                }
+
+                current_offset = current_node.failure_offset as usize;
 
                 let node_slice = match ac_buffer.get(current_offset..) {
                     Some(s) => s,
                     None => break,
                 };
-                let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
-                    Ok((r, _)) => r,
+                current_node = match Ref::<_, ACNode>::from_prefix(node_slice) {
+                    Ok((r, _)) => *r,
                     Err(_) => break,
                 };
-                let node = *node_ref;
-                current_offset = node.failure_offset as usize;
-
-                // Continue loop to try transition from new state
-                // Don't break here - we need to retry the transition!
             }
 
-            // Collect pattern IDs at this state
-            let node_slice = match ac_buffer.get(current_offset..) {
-                Some(s) => s,
-                None => continue,
+            // Reload final node for pattern collection
+            let final_node = {
+                let node_slice = match ac_buffer.get(current_offset..) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                match Ref::<_, ACNode>::from_prefix(node_slice) {
+                    Ok((r, _)) => *r,
+                    Err(_) => continue,
+                }
             };
-            let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
-                Ok((r, _)) => r,
-                Err(_) => continue,
-            };
-            let node = *node_ref;
-            if node.pattern_count > 0 {
-                // Read pattern IDs with zerocopy (HOT PATH optimization)
-                // Pattern IDs are always 4-byte aligned (u32 array follows 8-byte aligned edges section)
-                let patterns_offset = node.patterns_offset as usize;
-                let pattern_count = node.pattern_count as usize;
+
+            if final_node.pattern_count > 0 {
+                let patterns_offset = final_node.patterns_offset as usize;
+                let pattern_count = final_node.pattern_count as usize;
 
                 if patterns_offset + pattern_count * 4 <= ac_buffer.len() {
                     let pattern_slice = &ac_buffer[patterns_offset..];
                     if let Ok((ids_ref, _)) =
                         Ref::<_, [u32]>::from_prefix_with_elems(pattern_slice, pattern_count)
                     {
-                        // Zero-copy path - direct slice access (no allocation, no byte parsing)
                         matches.extend(ids_ref.iter().copied());
                     }
                 }
@@ -1455,23 +1716,55 @@ impl Paraglob {
         }
     }
 
-    /// Find a transition from a node for a character in AC automaton
+    /// Find a transition from a node for a character in AC automaton (loads node from offset)
     /// Uses state-specific encoding for optimal performance
+    #[inline(always)]
     fn find_ac_transition(ac_buffer: &[u8], node_offset: usize, ch: u8) -> Option<usize> {
-        use crate::offset_format::{ACNode, StateKind};
-
         let node_slice = ac_buffer.get(node_offset..)?;
-        let (node_ref, _) = Ref::<_, ACNode>::from_prefix(node_slice).ok()?;
+        let (node_ref, _) = Ref::<_, crate::offset_format::ACNode>::from_prefix(node_slice).ok()?;
         let node = *node_ref;
+        Self::find_ac_transition_from_node(ac_buffer, &node, ch)
+    }
 
-        // Dispatch on state encoding
+    /// Find a transition from an already-loaded node for a character
+    /// Uses state-specific encoding for optimal performance
+    #[inline(always)]
+    fn find_ac_transition_from_node(
+        ac_buffer: &[u8],
+        node: &crate::offset_format::ACNode,
+        ch: u8,
+    ) -> Option<usize> {
+        use crate::offset_format::StateKind;
         let kind = StateKind::from_u8(node.state_kind)?;
+        Self::find_ac_transition_from_node_impl(ac_buffer, node, ch, kind)
+    }
 
+    /// Find a transition with trusted StateKind (for trusted databases)
+    #[inline(always)]
+    fn find_ac_transition_from_node_trusted(
+        ac_buffer: &[u8],
+        node: &crate::offset_format::ACNode,
+        ch: u8,
+    ) -> Option<usize> {
+        use crate::offset_format::StateKind;
+        // SAFETY: Trusted databases are validated at load time
+        let kind = unsafe { StateKind::from_u8_unchecked(node.state_kind) };
+        Self::find_ac_transition_from_node_impl_trusted(ac_buffer, node, ch, kind)
+    }
+
+    /// Internal implementation of transition lookup
+    #[inline(always)]
+    fn find_ac_transition_from_node_impl(
+        ac_buffer: &[u8],
+        node: &crate::offset_format::ACNode,
+        ch: u8,
+        kind: crate::offset_format::StateKind,
+    ) -> Option<usize> {
         match kind {
             StateKind::Empty => None,
 
             StateKind::One => {
-                // Single inline comparison
+                // Single inline comparison (most common case - 75-80% of states)
                 if node.one_char == ch {
                     Some(node.edges_offset as usize)
                 } else {
@@ -1481,6 +1774,7 @@ impl Paraglob {
 
             StateKind::Sparse => {
                 // Linear search through sparse edges
+                // Edges are sorted by character, so we can early-exit
                 let edges_offset = node.edges_offset as usize;
                 let edge_size = mem::size_of::<ACEdge>();
                 let count = node.edge_count as usize;
@@ -1499,7 +1793,7 @@ impl Paraglob {
                         return Some(edge.target_offset as usize);
                     }
                     if edge.character > ch {
-                        return None;
+                        return None; // Early exit - edges are sorted
                     }
                 }
                 None
@@ -1514,6 +1808,88 @@ impl Paraglob {
                     return None;
                 }
 
+                // Direct byte array access (faster than from_le_bytes in hot loop)
+                let target = u32::from_le_bytes([
+                    ac_buffer[target_offset_offset],
+                    ac_buffer[target_offset_offset + 1],
+                    ac_buffer[target_offset_offset + 2],
+                    ac_buffer[target_offset_offset + 3],
+                ]);
+
+                if target != 0 {
+                    Some(target as usize)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Trusted implementation of transition lookup - bypasses zerocopy validation
+    ///
+    /// # Safety
+    ///
+    /// Only use with trusted databases. Caller guarantees buffer integrity.
+    #[inline(always)]
+    fn find_ac_transition_from_node_impl_trusted(
+        ac_buffer: &[u8],
+        node: &crate::offset_format::ACNode,
+        ch: u8,
+        kind: crate::offset_format::StateKind,
+    ) -> Option<usize> {
+        use crate::offset_format::ACEdge;
+
+        match kind {
+            StateKind::Empty => None,
+
+            StateKind::One => {
+                // Single inline comparison (most common case - 75-80% of states)
+                if node.one_char == ch {
+                    Some(node.edges_offset as usize)
+                } else {
+                    None
+                }
+            }
+
+            StateKind::Sparse => {
+                // Linear search through sparse edges - use unsafe direct reads
+                let edges_offset = node.edges_offset as usize;
+                let edge_size = mem::size_of::<ACEdge>();
+                let count = node.edge_count as usize;
+
+                for i in 0..count {
+                    let edge_offset = edges_offset + i * edge_size;
+                    if edge_offset + edge_size > ac_buffer.len() {
+                        return None;
+                    }
+
+                    // SAFETY: Trusted database, bounds checked above
+                    // ACEdge is repr(C) with 8-byte layout
+                    let edge = unsafe {
+                        let ptr = ac_buffer.as_ptr().add(edge_offset) as *const ACEdge;
+                        ptr.read_unaligned()
+                    };
+
+                    if edge.character == ch {
+                        return Some(edge.target_offset as usize);
+                    }
+                    if edge.character > ch {
+                        return None; // Early exit - edges are sorted
+                    }
+                }
+                None
+            }
+
+            StateKind::Dense => {
+                // O(1) lookup in dense table - already optimal, no zerocopy needed
+                let lookup_offset = node.edges_offset as usize;
+                let target_offset_offset = lookup_offset + (ch as usize * 4);
+
+                if target_offset_offset + 4 > ac_buffer.len() {
+                    return None;
+                }
+
+                // Direct byte array access (faster than from_le_bytes in hot loop)
                 let target = u32::from_le_bytes([
                     ac_buffer[target_offset_offset],
                     ac_buffer[target_offset_offset + 1],
@@ -1611,12 +1987,13 @@ impl Paraglob {
             buffer: BufferStorage::Owned(buffer),
             mode,
             trusted,
-            glob_cache: RefCell::new(HashMap::new()),
+            // Pre-allocate all caches to avoid allocations during queries
+            glob_cache: RefCell::new(HashMap::with_capacity(64)),
             ac_literal_hash,
             pattern_data_map,
-            candidate_buffer: RefCell::new(HashSet::new()),
-            ac_literal_buffer: RefCell::new(HashSet::new()),
-            result_buffer: RefCell::new(Vec::new()),
+            candidate_buffer: RefCell::new(HashSet::with_capacity(128)),
+            ac_literal_buffer: RefCell::new(HashSet::with_capacity(128)),
+            result_buffer: RefCell::new(Vec::with_capacity(64)),
         })
     }
 
@@ -1704,12 +2081,13 @@ impl Paraglob {
             buffer: BufferStorage::Borrowed(slice),
             mode,
             trusted,
-            glob_cache: RefCell::new(HashMap::new()),
+            // Pre-allocate all caches to avoid allocations during queries
+            glob_cache: RefCell::new(HashMap::with_capacity(64)),
             ac_literal_hash,
             pattern_data_map,
-            candidate_buffer: RefCell::new(HashSet::new()),
-            ac_literal_buffer: RefCell::new(HashSet::new()),
-            result_buffer: RefCell::new(Vec::new()),
+            candidate_buffer: RefCell::new(HashSet::with_capacity(128)),
+            ac_literal_buffer: RefCell::new(HashSet::with_capacity(128)),
+            result_buffer: RefCell::new(Vec::with_capacity(64)),
         })
     }
 

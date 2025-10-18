@@ -128,3 +128,4 @@ harness = false
 name = "query_profile"
 path = "benches/query_profile.rs"
 harness = false
+

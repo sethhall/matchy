@@ -184,6 +184,19 @@ impl StateKind {
             _ => None,
         }
     }
+
+    /// Convert from u8 without validation (for trusted databases)
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `value` is 0, 1, 2, or 3.
+    /// For untrusted input, use `from_u8()` instead.
+    #[inline(always)]
+    pub unsafe fn from_u8_unchecked(value: u8) -> Self {
+        // SAFETY: Caller guarantees value is 0-3
+        // This uses transmute which is instant, no branch
+        std::mem::transmute(value)
+    }
 }
 
 /// AC Automaton node (32 bytes, 8-byte aligned)
