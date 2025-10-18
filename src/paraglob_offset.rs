@@ -1442,11 +1442,18 @@ impl Paraglob {
         let mut current_offset = 0usize;
         let node_size = size_of::<ACNode>();
 
-        for (pos, &ch) in text.iter().enumerate() {
-            let search_ch = match mode {
-                GlobMatchMode::CaseInsensitive => ch.to_ascii_lowercase(),
-                GlobMatchMode::CaseSensitive => ch,
-            };
+        // Pre-lowercase entire input once if case-insensitive
+        // Eliminates per-character lowercasing in hot loop
+        let normalized_text: Vec<u8>;
+        let search_text = match mode {
+            GlobMatchMode::CaseInsensitive => {
+                normalized_text = text.iter().map(|&b| b.to_ascii_lowercase()).collect();
+                &normalized_text[..]
+            }
+            GlobMatchMode::CaseSensitive => text,
+        };
+
+        for (pos, &search_ch) in search_text.iter().enumerate() {
 
             // Traverse to next state
             loop {
@@ -1509,11 +1516,17 @@ impl Paraglob {
         let mut current_offset = 0usize;
         let mut current_node: Option<ACNode> = None;
 
-        for (pos, &ch) in text.iter().enumerate() {
-            let search_ch = match mode {
-                GlobMatchMode::CaseInsensitive => ch.to_ascii_lowercase(),
-                GlobMatchMode::CaseSensitive => ch,
-            };
+        // Pre-lowercase entire input once if case-insensitive
+        let normalized_text: Vec<u8>;
+        let search_text = match mode {
+            GlobMatchMode::CaseInsensitive => {
+                normalized_text = text.iter().map(|&b| b.to_ascii_lowercase()).collect();
+                &normalized_text[..]
+            }
+            GlobMatchMode::CaseSensitive => text,
+        };
+
+        for (pos, &search_ch) in search_text.iter().enumerate() {
 
             // Traverse to next state
             loop {
@@ -1618,11 +1631,17 @@ impl Paraglob {
         let mut current_offset = 0usize;
         let node_size = size_of::<ACNode>();
 
-        for &ch in text.iter() {
-            let search_ch = match mode {
-                GlobMatchMode::CaseInsensitive => ch.to_ascii_lowercase(),
-                GlobMatchMode::CaseSensitive => ch,
-            };
+        // Pre-lowercase entire input once if case-insensitive
+        let normalized_text: Vec<u8>;
+        let search_text = match mode {
+            GlobMatchMode::CaseInsensitive => {
+                normalized_text = text.iter().map(|&b| b.to_ascii_lowercase()).collect();
+                &normalized_text[..]
+            }
+            GlobMatchMode::CaseSensitive => text,
+        };
+
+        for &search_ch in search_text.iter() {
 
             // Traverse to next state
             loop {
@@ -1684,11 +1703,17 @@ impl Paraglob {
 
         let mut current_offset = 0usize;
 
-        for &ch in text.iter() {
-            let search_ch = match mode {
-                GlobMatchMode::CaseInsensitive => ch.to_ascii_lowercase(),
-                GlobMatchMode::CaseSensitive => ch,
-            };
+        // Pre-lowercase entire input once if case-insensitive
+        let normalized_text: Vec<u8>;
+        let search_text = match mode {
+            GlobMatchMode::CaseInsensitive => {
+                normalized_text = text.iter().map(|&b| b.to_ascii_lowercase()).collect();
+                &normalized_text[..]
+            }
+            GlobMatchMode::CaseSensitive => text,
+        };
+
+        for &search_ch in search_text.iter() {
 
             // Traverse to next state
             let mut current_node = {
@@ -1890,36 +1915,37 @@ impl Paraglob {
             }
 
             StateKind::Sparse => {
-                // Linear search through sparse edges - use unsafe direct reads
+                // Optimized sparse edge search (2-8 edges)
+                // LLVM auto-vectorizes this pattern effectively for small fixed counts
                 let edges_offset = node.edges_offset as usize;
                 let edge_size = mem::size_of::<ACEdge>();
                 let count = node.edge_count as usize;
 
+                // Bounds check once upfront
+                if edges_offset + count * edge_size > ac_buffer.len() {
+                    return None;
+                }
+
+                // SAFETY: Trusted database, bounds checked above
+                // Load all edge characters into a stack array for cache-friendly access
+                // LLVM will auto-vectorize the character comparison loop
+                let mut chars = [0u8; 8];
                 for i in 0..count {
-                    let edge_offset = edges_offset + i * edge_size;
-                    if edge_offset + edge_size > ac_buffer.len() {
-                        return None;
-                    }
-
-                    // SAFETY: Trusted database, bounds checked above
-                    // ACEdge is repr(C) with 8-byte size and 4-byte alignment
-                    // Edges start after nodes in our serialization, and since nodes
-                    // are 8-byte aligned and their total size is 8-byte aligned,
-                    // edges are also 8-byte aligned (better than required 4-byte)
-                    let edge = unsafe {
-                        debug_assert_eq!(
-                            edge_offset % std::mem::align_of::<ACEdge>(),
-                            0,
-                            "ACEdge must be 4-byte aligned"
-                        );
-                        let ptr = ac_buffer.as_ptr().add(edge_offset) as *const ACEdge;
-                        ptr.read()
+                    let edge_ptr = unsafe {
+                        ac_buffer.as_ptr().add(edges_offset + i * edge_size) as *const ACEdge
                     };
+                    chars[i] = unsafe { (*edge_ptr).character };
+                }
 
-                    if edge.character == ch {
-                        return Some(edge.target_offset as usize);
+                // Find matching character (auto-vectorizes on modern CPUs)
+                for i in 0..count {
+                    if chars[i] == ch {
+                        let edge_ptr = unsafe {
+                            ac_buffer.as_ptr().add(edges_offset + i * edge_size) as *const ACEdge
+                        };
+                        return Some(unsafe { (*edge_ptr).target_offset as usize });
                     }
-                    if edge.character > ch {
+                    if chars[i] > ch {
                         return None; // Early exit - edges are sorted
                     }
                 }
