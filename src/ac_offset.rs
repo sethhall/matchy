@@ -697,6 +697,7 @@ impl ACAutomaton {
                 }
 
                 // Read target offset directly (4 bytes, little-endian)
+                // NOTE: Compiler optimizes this to a single load on little-endian
                 let target = u32::from_le_bytes([
                     self.buffer[target_offset_offset],
                     self.buffer[target_offset_offset + 1],

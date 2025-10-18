@@ -234,6 +234,12 @@ impl PatternExtractor {
                     Ok(s) => s,
                     Err(_) => continue, // Invalid UTF-8 in domain - skip
                 };
+                
+                // Reject bare TLDs (e.g., ".app", ".com")
+                // A valid domain must have at least one label before the TLD
+                if domain_bytes[0] == b'.' {
+                    continue;
+                }
 
                 // Validate the extracted domain (label checks, etc.)
                 if self.is_valid_domain(line, domain_span) {
@@ -258,21 +264,17 @@ impl PatternExtractor {
         let scan_limit = tld_end.saturating_sub(MAX_DOMAIN_LEN);
         let mut start = tld_end;
 
-        // OPTIMIZED: Single pass with branch-free lookup table
-        // Replaces the old byte-by-byte loop with is_ascii() check
-        // The lookup table handles all boundary chars in O(1) with no branches
+        // OPTIMIZED: Single pass with whitelist lookup table
+        // Only accept valid domain characters (alphanumeric, hyphen, dot, UTF-8)
         while start > scan_limit {
             let b = line[start - 1];
 
-            // Fast path: Use lookup table for ASCII boundary check (branch-free)
-            // For non-ASCII bytes (UTF-8), we continue scanning (they're valid in domains)
-            if b.is_ascii() && is_boundary_fast(b) {
+            // Use whitelist: only continue if it's a valid domain char
+            // This rejects % and other invalid chars like in "Kagi%20Assistant.app"
+            if !is_domain_char_fast(b) {
                 break;
             }
 
-            // Continue through:
-            // - ASCII alphanumeric/hyphen/dot (not in boundary table)
-            // - All UTF-8 bytes (0x80-0xFF) - IDN domains
             start -= 1;
         }
 
@@ -387,6 +389,61 @@ impl PatternExtractor {
                 continue;
             }
 
+            // Find actual end (only digits and dots)
+            let mut candidate_end = start;
+            while candidate_end < line.len() && (line[candidate_end].is_ascii_digit() || line[candidate_end] == b'.') {
+                candidate_end += 1;
+            }
+            
+            let candidate = &line[start..candidate_end];
+            
+            // Early validation before expensive parsing:
+            
+            // 1. Must have exactly 3 dots (4 octets)
+            let dot_count = memchr::memchr_iter(b'.', candidate).count();
+            if dot_count != 3 {
+                last_end = candidate_end;
+                continue;
+            }
+            
+            // 2. Can't have consecutive dots (e.g., "26.0..26.0")
+            if candidate.windows(2).any(|w| w == b"..") {
+                last_end = candidate_end;
+                continue;
+            }
+            
+            // 3. Can't start or end with dot
+            if candidate.starts_with(b".") || candidate.ends_with(b".") {
+                last_end = candidate_end;
+                continue;
+            }
+            
+            // 4. Each octet must be 1-3 digits
+            // Walk through and count digits between dots
+            // Filters: "2025.36.0.72591908" (4 and 8 digit octets), "460.1.1.2" (3 digits but >255)
+            let mut octet_len = 0;
+            let mut valid_octets = true;
+            for &b in candidate {
+                if b == b'.' {
+                    // End of octet
+                    if octet_len == 0 || octet_len > 3 {
+                        valid_octets = false;
+                        break;
+                    }
+                    octet_len = 0;
+                } else {
+                    octet_len += 1;
+                }
+            }
+            // Check final octet
+            if octet_len == 0 || octet_len > 3 {
+                valid_octets = false;
+            }
+            if !valid_octets {
+                last_end = candidate_end;
+                continue;
+            }
+
             // Now try full parse from the start of this number sequence
             if let Some((ip, end)) = self.try_parse_ipv4(line, start) {
                 matches.push(Match {
@@ -394,6 +451,9 @@ impl PatternExtractor {
                     span: (start, end),
                 });
                 last_end = end;
+            } else {
+                // Failed validation - skip dots in this failed region
+                last_end = candidate_end;
             }
         }
     }
@@ -505,10 +565,40 @@ impl PatternExtractor {
             return None;
         }
 
-        // Validate domain part has at least one dot and valid TLD
+        let local_part = &line[start..at_pos];
         let domain_part = &line[at_pos + 1..end];
+        
+        // Validate local part:
+        // 1. No consecutive dots (e.g., "s...@")
+        if local_part.windows(2).any(|w| w == b"..") {
+            return None;
+        }
+        
+        // 2. Must have at least one letter (not just dots/numbers/symbols)
+        //    Filters: ".@..", "34480FE2-5610-4973-AA09-3ABB60D38D55@" is OK
+        let has_letter = local_part.iter().any(|&b| b.is_ascii_alphabetic());
+        if !has_letter {
+            return None;
+        }
+        
+        // Validate domain part:
+        // 1. Must have at least one dot
         if !domain_part.contains(&b'.') {
-            return None; // Domain must have at least one dot
+            return None;
+        }
+        
+        // 2. Must have a valid TLD from the public suffix list
+        //    This rejects IP addresses ("192.168.1.222") and fake TLDs ("Uv3.peer")
+        if let Some(tld_matcher) = self.tld_matcher.as_ref() {
+            let tld_matches = tld_matcher.find_matches_with_positions_bytes(domain_part);
+            // Must have at least one TLD match that ends at the domain boundary
+            let has_valid_tld = tld_matches.iter().any(|(end_pos, _)| {
+                *end_pos == domain_part.len() && 
+                (*end_pos >= domain_part.len() || !is_domain_char(domain_part[*end_pos]))
+            });
+            if !has_valid_tld {
+                return None;
+            }
         }
 
         Some((start, end))
@@ -524,42 +614,110 @@ impl PatternExtractor {
 
         // Find all colons using SIMD - much faster than scanning every byte
         for colon_pos in memchr_iter(b':', line) {
-            // Quick reject: need space for at least "::1" (3 chars)
-            if colon_pos + 2 > line.len() {
+            // Quick reject: colon must be surrounded by valid IPv6 chars
+            // (The character whitelist will handle the rest during expansion)
+            if colon_pos == 0 || colon_pos + 1 >= line.len() {
                 continue;
             }
-
-            // Quick check: is this colon between hex chars or another colon? (hex:hex or :: pattern)
-            let before_is_hex = colon_pos > 0 && is_hex_char(line[colon_pos - 1]);
-            let after_is_hex = is_hex_char(line[colon_pos + 1]);
-            let before_is_colon = colon_pos > 0 && line[colon_pos - 1] == b':';
-            let after_is_colon = line[colon_pos + 1] == b':';
-
-            if !(before_is_hex || before_is_colon) || !(after_is_hex || after_is_colon) {
+            
+            let before = line[colon_pos - 1];
+            let after = line[colon_pos + 1];
+            
+            // Must have valid IPv6 char on at least one side
+            if !is_ipv6_char_fast(before) || !is_ipv6_char_fast(after) {
                 continue;
-            }
-
-            // Look for at least 2 colons in a reasonable window around this position
-            // This is a strong signal of an IPv6 address
-            let window_start = colon_pos.saturating_sub(10);
-            let window_end = (colon_pos + 40).min(line.len());
-            let window = &line[window_start..window_end];
-
-            // Count colons in window (we need at least 2 for an IPv6)
-            let colon_count = memchr_iter(b':', window).count();
-            if colon_count < 2 {
-                continue; // Not enough colons for a full IPv6
             }
 
             // High confidence this is near an IPv6 - find start of sequence
+            // Only accept valid IPv6 characters (hex digits and colons)
             let mut start = colon_pos;
-            while start > 0 && is_ipv6_char(line[start - 1]) {
+            while start > 0 && is_ipv6_char_fast(line[start - 1]) {
                 start -= 1;
             }
 
             // Skip if we already parsed this area
             if start < last_end {
                 continue;
+            }
+
+            // Find actual end using character whitelist
+            let mut candidate_end = start;
+            while candidate_end < line.len() && is_ipv6_char_fast(line[candidate_end]) {
+                candidate_end += 1;
+            }
+
+            let candidate = &line[start..candidate_end];
+            
+            // Early rejection filters before expensive parsing:
+            
+            // 1. Minimum length check - filter tiny addresses unlikely in threat data
+            // Filters: "e::f" (4 bytes), "ce::A" (5 bytes), "e::add" (6 bytes)
+            // Real threat IPs are typically longer: "fe80::1" (7 bytes minimum)
+            if candidate.len() < 8 {
+                last_end = candidate_end;
+                continue;
+            }
+            
+            // 2. Can't start or end with single colon (malformed)
+            //    If it starts/ends with colon, must be :: (and we reject those too)
+            if candidate.starts_with(b":") || candidate.ends_with(b":") {
+                last_end = candidate_end;
+                continue;
+            }
+            
+            // 3. IPv6 has 8 groups, so 7 colons in full form
+            //    If < 7 colons, MUST have :: compression
+            let colon_count = memchr::memchr_iter(b':', candidate).count();
+            if colon_count < 2 {
+                // Too few colons
+                last_end = candidate_end;
+                continue;
+            }
+            
+            if colon_count < 7 {
+                // Compressed form - must have ::
+                let has_compression = candidate.windows(2).any(|w| w == b"::");
+                if !has_compression {
+                    last_end = candidate_end;
+                    continue;
+                }
+            }
+            // Note: colon_count >= 7 is OK (full address or with ::)
+            
+            // 4. Each segment between colons must be 1-4 hex digits
+            // Walk through and count chars between colons
+            // Filters: "FEC0050519FB::c" (12-digit segment), "7::31BD71E4" (8-digit segment)
+            let mut segment_len = 0;
+            let mut valid_segments = true;
+            for &b in candidate {
+                if b == b':' {
+                    // End of segment (segment_len can be 0 for ::)
+                    if segment_len > 4 {
+                        valid_segments = false;
+                        break;
+                    }
+                    segment_len = 0;
+                } else {
+                    segment_len += 1;
+                }
+            }
+            // Check final segment
+            if segment_len > 4 {
+                valid_segments = false;
+            }
+            if !valid_segments {
+                last_end = candidate_end;
+                continue;
+            }
+            
+            // 5. Filter link-local addresses (fe80::/10) - not in threat databases
+            if candidate.len() >= 4 {
+                let prefix = &candidate[..4];
+                // Case-insensitive check for "fe80"
+                if prefix.eq_ignore_ascii_case(b"fe80") {
+                    last_end = candidate_end;
+                    continue;
+                }
             }
 
             // Now try full parse from the start of this sequence
@@ -569,6 +727,10 @@ impl PatternExtractor {
                     span: (start, end),
                 });
                 last_end = end;
+            } else {
+                // Failed validation - update last_end to skip colons within this failed region
+                // Any colons between start and candidate_end have already been examined
+                last_end = candidate_end;
             }
         }
     }
@@ -581,8 +743,9 @@ impl PatternExtractor {
         }
 
         // Find the end of the IPv6 candidate
+        // Only accept valid IPv6 characters (hex digits and colons)
         let mut end = start;
-        while end < line.len() && is_ipv6_char(line[end]) {
+        while end < line.len() && is_ipv6_char_fast(line[end]) {
             end += 1;
         }
 
@@ -594,7 +757,7 @@ impl PatternExtractor {
         // Extract the candidate string
         let candidate = &line[start..end];
 
-        // Convert to string for parsing
+        // Convert to string for parsing (early filtering already done)
         let candidate_str = match std::str::from_utf8(candidate) {
             Ok(s) => s,
             Err(_) => return None,
@@ -718,6 +881,76 @@ static BOUNDARY_LOOKUP: [bool; 256] = {
     table
 };
 
+/// Domain character whitelist - only alphanumeric, hyphen, dot, and high UTF-8 bytes
+/// Used for fast backward scanning from TLD matches
+static DOMAIN_CHAR_LOOKUP: [bool; 256] = {
+    let mut table = [false; 256];
+    // Digits: 0-9
+    let mut i = b'0';
+    while i <= b'9' {
+        table[i as usize] = true;
+        i += 1;
+    }
+    // Lowercase: a-z
+    i = b'a';
+    while i <= b'z' {
+        table[i as usize] = true;
+        i += 1;
+    }
+    // Uppercase: A-Z
+    i = b'A';
+    while i <= b'Z' {
+        table[i as usize] = true;
+        i += 1;
+    }
+    // Special chars
+    table[b'-' as usize] = true;  // Hyphen in labels
+    table[b'.' as usize] = true;  // Dot separator
+    
+    // High bytes (0x80-0xFF) for IDN domains (UTF-8 continuation bytes)
+    i = 0x80;
+    while i < 0xFF {
+        table[i as usize] = true;
+        i += 1;
+    }
+    table[0xFF] = true;
+    table
+};
+
+/// IPv6 character whitelist - only hex digits and colons are valid
+/// Everything else stops IPv6 scanning
+static IPV6_CHAR_LOOKUP: [bool; 256] = {
+    let mut table = [false; 256];
+    // Hex digits: 0-9
+    table[b'0' as usize] = true;
+    table[b'1' as usize] = true;
+    table[b'2' as usize] = true;
+    table[b'3' as usize] = true;
+    table[b'4' as usize] = true;
+    table[b'5' as usize] = true;
+    table[b'6' as usize] = true;
+    table[b'7' as usize] = true;
+    table[b'8' as usize] = true;
+    table[b'9' as usize] = true;
+    // Hex letters: a-f
+    table[b'a' as usize] = true;
+    table[b'b' as usize] = true;
+    table[b'c' as usize] = true;
+    table[b'd' as usize] = true;
+    table[b'e' as usize] = true;
+    table[b'f' as usize] = true;
+    // Hex letters: A-F
+    table[b'A' as usize] = true;
+    table[b'B' as usize] = true;
+    table[b'C' as usize] = true;
+    table[b'D' as usize] = true;
+    table[b'E' as usize] = true;
+    table[b'F' as usize] = true;
+    // Colon separator
+    table[b':' as usize] = true;
+    table
+};
+
 /// Fast boundary check using lookup table (branch-free, O(1))
 #[inline(always)]
 fn is_boundary_fast(b: u8) -> bool {
@@ -748,9 +981,20 @@ fn is_hex_char(b: u8) -> bool {
     b.is_ascii_hexdigit()
 }
 
-#[inline]
-fn is_ipv6_char(b: u8) -> bool {
-    is_hex_char(b) || b == b':'
+/// Fast domain character check using lookup table (branch-free, O(1))
+/// Returns true for valid domain chars: 0-9, a-z, A-Z, hyphen, dot, UTF-8 high bytes
+#[inline(always)]
+fn is_domain_char_fast(b: u8) -> bool {
+    // SAFETY: b is u8, so it's always a valid index into [0..256)
+    unsafe { *DOMAIN_CHAR_LOOKUP.get_unchecked(b as usize) }
+}
+
+/// Fast IPv6 character check using lookup table (branch-free, O(1))
+/// Returns true only for valid IPv6 characters: 0-9, a-f, A-F, :
+#[inline(always)]
+fn is_ipv6_char_fast(b: u8) -> bool {
+    // SAFETY: b is u8, so it's always a valid index into [0..256)
+    unsafe { *IPV6_CHAR_LOOKUP.get_unchecked(b as usize) }
 }
 
 #[cfg(test)]
@@ -1258,10 +1502,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ipv6_extraction_loopback() {
+    fn test_ipv6_extraction_realistic() {
         let extractor = PatternExtractor::new().unwrap();
 
-        let line = b"Localhost is ::1 or ::ffff:127.0.0.1";
+        // Use realistic global unicast addresses (not loopback/link-local)
+        let line = b"Address 2001:0db8::1 connects to 2606:2800:220:1:248:1893:25c8:1946";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let ips: Vec<Ipv6Addr> = matches
@@ -1272,16 +1517,17 @@ mod tests {
             })
             .collect();
 
-        // Should find at least ::1
-        assert!(!ips.is_empty());
-        assert!(ips.iter().any(|ip| ip.to_string() == "::1"));
+        // Should extract both global unicast addresses
+        assert_eq!(ips.len(), 2);
+        assert_eq!(ips[0].to_string(), "2001:db8::1");
+        assert_eq!(ips[1].to_string(), "2606:2800:220:1:248:1893:25c8:1946");
     }
 
     #[test]
     fn test_ipv6_extraction_multiple() {
         let extractor = PatternExtractor::new().unwrap();
 
-        let line = b"Traffic from 2001:db8::1 to fe80::1";
+        let line = b"Traffic from 2001:db8::1 to 2001:db8::2";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let ips: Vec<Ipv6Addr> = matches
@@ -1294,7 +1540,7 @@ mod tests {
 
         assert_eq!(ips.len(), 2);
         assert_eq!(ips[0].to_string(), "2001:db8::1");
-        assert_eq!(ips[1].to_string(), "fe80::1");
+        assert_eq!(ips[1].to_string(), "2001:db8::2");
     }
 
     #[test]
@@ -1324,5 +1570,290 @@ mod tests {
         assert_eq!(ipv6s.len(), 1);
         assert_eq!(ipv4s[0].to_string(), "192.168.1.1");
         assert_eq!(ipv6s[0].to_string(), "2001:db8::1");
+    }
+
+    // Tests for prefiltered invalid patterns (from comment examples)
+
+    #[test]
+    fn test_reject_ipv4_with_4_and_8_digit_octets() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 423 filter: "2025.36.0.72591908" (4 and 8 digit octets)
+        let line = b"Invalid IP: 2025.36.0.72591908";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let ips: Vec<Ipv4Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv4(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ips.len(), 0, "Should reject IPv4 with 4 and 8 digit octets");
+    }
+
+    #[test]
+    fn test_reject_ipv4_with_octet_over_255() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 423 filter: "460.1.1.2" (3 digits but >255)
+        let line = b"Invalid IP: 460.1.1.2";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let ips: Vec<Ipv4Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv4(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ips.len(), 0, "Should reject IPv4 with octet > 255");
+    }
+
+    #[test]
+    fn test_reject_ipv4_with_consecutive_dots() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 410 filter: "26.0..26.0" (consecutive dots)
+        let line = b"Invalid IP: 26.0..26.0";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let ips: Vec<Ipv4Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv4(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ips.len(), 0, "Should reject IPv4 with consecutive dots");
+    }
+
+    #[test]
+    fn test_reject_email_with_consecutive_dots_in_local() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 578 filter: "s...@" (consecutive dots in local part)
+        let line = b"Invalid email: s...@example.com";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let emails: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Email(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(emails.len(), 0, "Should reject email with consecutive dots in local part");
+    }
+
+    #[test]
+    fn test_reject_email_without_letter_in_local() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 578 filter: ".@.." (no letter in local part)
+        let line = b"Invalid email: .@example.com";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let emails: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Email(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(emails.len(), 0, "Should reject email without letter in local part");
+    }
+
+    #[test]
+    fn test_accept_email_with_uuid_in_local() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 578 comment: "34480FE2-5610-4973-AA09-3ABB60D38D55@" is OK
+        let line = b"Valid email: 34480FE2-5610-4973-AA09-3ABB60D38D55@example.com";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let emails: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Email(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(emails.len(), 1, "Should accept email with UUID containing letters");
+        assert_eq!(emails[0], "34480FE2-5610-4973-AA09-3ABB60D38D55@example.com");
+    }
+
+    #[test]
+    fn test_reject_email_with_ip_address_domain() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 591 filter: "192.168.1.222" (IP address as domain)
+        let line = b"Invalid email: user@192.168.1.222";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let emails: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Email(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(emails.len(), 0, "Should reject email with IP address as domain");
+    }
+
+    #[test]
+    fn test_reject_email_with_fake_tld() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 591 filter: "Uv3.peer" (fake TLD)
+        let line = b"Invalid email: test@Uv3.peer";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let emails: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Email(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(emails.len(), 0, "Should reject email with fake TLD");
+    }
+
+    #[test]
+    fn test_reject_tiny_ipv6_addresses() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 654 filters: "e::f" (4 bytes), "ce::A" (5 bytes), "e::add" (6 bytes)
+        let test_cases = [
+            b"Tiny IPv6: e::f" as &[u8],
+            b"Tiny IPv6: ce::A" as &[u8],
+            b"Tiny IPv6: e::add" as &[u8],
+        ];
+
+        for line in test_cases {
+            let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+            let ips: Vec<Ipv6Addr> = matches
+                .iter()
+                .filter_map(|m| match m.item {
+                    ExtractedItem::Ipv6(ip) => Some(ip),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(ips.len(), 0, "Should reject tiny IPv6 addresses (< 8 bytes)");
+        }
+    }
+
+    #[test]
+    fn test_reject_ipv6_with_12_digit_segment() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 689 filter: "FEC0050519FB::c" (12-digit segment)
+        let line = b"Invalid IPv6: FEC0050519FB::c";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let ips: Vec<Ipv6Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv6(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ips.len(), 0, "Should reject IPv6 with segment > 4 hex digits");
+    }
+
+    #[test]
+    fn test_reject_ipv6_with_8_digit_segment() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 689 filter: "7::31BD71E4" (8-digit segment)
+        let line = b"Invalid IPv6: 7::31BD71E4";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let ips: Vec<Ipv6Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv6(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ips.len(), 0, "Should reject IPv6 with segment > 4 hex digits");
+    }
+
+    #[test]
+    fn test_reject_domain_with_percent_encoding() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 274 comment: "Kagi%20Assistant.app" (% is invalid in domain chars)
+        let line = b"Invalid domain: Kagi%20Assistant.app";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let domains: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Domain(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+
+        // Should only extract "Assistant.app" after the %20, not the full string
+        assert!(
+            !domains.iter().any(|d| d.contains('%')),
+            "Should not extract domain with percent encoding"
+        );
+    }
+
+    #[test]
+    fn test_reject_bare_tld() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 240 filter: bare TLDs like ".app", ".com"
+        let line = b"Visit .app or .com for info";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let domains: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Domain(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+
+        // Should not extract bare TLDs
+        assert!(
+            !domains.iter().any(|d| d.starts_with('.')),
+            "Should not extract bare TLDs"
+        );
+        assert_eq!(domains.len(), 0, "Should reject bare TLDs");
+    }
+
+    #[test]
+    fn test_reject_link_local_ipv6() {
+        let extractor = PatternExtractor::new().unwrap();
+
+        // Line 713 filter: fe80::/10 link-local addresses
+        let line = b"Link-local address: fe80::1 and fe80::dead:beef";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let ips: Vec<Ipv6Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv6(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ips.len(), 0, "Should reject link-local IPv6 addresses (fe80::/10)");
     }
 }
