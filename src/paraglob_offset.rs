@@ -817,11 +817,18 @@ impl Paraglob {
             return Vec::new();
         }
 
-        let (header_ref, _) = match Ref::<_, ParaglobHeader>::from_prefix(buffer) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
+        // Fast path for trusted+aligned databases: skip zerocopy validation
+        let header = if self.trusted && buffer.len() >= mem::size_of::<ParaglobHeader>() {
+            // SAFETY: Trusted database, length checked, header is at offset 0
+            unsafe { Self::load_header_unchecked(buffer) }
+        } else {
+            // Safe path: use zerocopy validation for untrusted databases
+            let (header_ref, _) = match Ref::<_, ParaglobHeader>::from_prefix(buffer) {
+                Ok(r) => r,
+                Err(_) => return Vec::new(),
+            };
+            *header_ref
         };
-        let header = *header_ref;
 
         let ac_start = header.ac_nodes_offset as usize;
         let ac_size = header.ac_edges_size as usize;
@@ -1330,6 +1337,22 @@ impl Paraglob {
         let results = self.find_all_ref(text);
         output.clear();
         output.extend_from_slice(results);
+    }
+
+    /// Load ParaglobHeader from buffer using unsafe direct pointer read (trusted mode)
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure:
+    /// - `buffer` is from a trusted source (built by this library)
+    /// - `buffer.len() >= size_of::<ParaglobHeader>()`
+    /// - Header is at offset 0
+    #[inline(always)]
+    unsafe fn load_header_unchecked(buffer: &[u8]) -> ParaglobHeader {
+        // SAFETY: Caller guarantees buffer length and trust
+        // ParaglobHeader is repr(C), so this is safe
+        let ptr = buffer.as_ptr() as *const ParaglobHeader;
+        ptr.read()
     }
 
     /// Load ACNode from buffer using unsafe direct pointer read (trusted mode)

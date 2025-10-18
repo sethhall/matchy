@@ -246,8 +246,8 @@ impl PatternExtractor {
         }
     }
 
-    /// Expand backwards from TLD end to find domain start
-    /// Walks through all bytes (ASCII + UTF-8) until hitting a boundary character
+    /// Expand backwards from TLD end to find domain start using fast lookup table
+    /// Scans backwards using branch-free boundary detection for optimal performance
     fn expand_domain_backwards(&self, line: &[u8], tld_end: usize) -> Option<(usize, usize)> {
         if tld_end == 0 {
             return None;
@@ -258,28 +258,26 @@ impl PatternExtractor {
         let scan_limit = tld_end.saturating_sub(MAX_DOMAIN_LEN);
         let mut start = tld_end;
 
-        // Walk backwards through all bytes until we hit a boundary or limit
-        // This includes:
-        // - ASCII alphanumeric, hyphen, dot
-        // - UTF-8 start bytes (0xC0-0xFF)
-        // - UTF-8 continuation bytes (0x80-0xBF)
-        // We stop at ASCII boundary characters (whitespace, punctuation)
+        // OPTIMIZED: Single pass with branch-free lookup table
+        // Replaces the old byte-by-byte loop with is_ascii() check
+        // The lookup table handles all boundary chars in O(1) with no branches
         while start > scan_limit {
             let b = line[start - 1];
 
-            // Stop at ASCII boundary characters
-            if b.is_ascii() && is_word_boundary(b) {
+            // Fast path: Use lookup table for ASCII boundary check (branch-free)
+            // For non-ASCII bytes (UTF-8), we continue scanning (they're valid in domains)
+            if b.is_ascii() && is_boundary_fast(b) {
                 break;
             }
 
             // Continue through:
-            // - ASCII alphanumeric/hyphen/dot
-            // - All UTF-8 bytes (0x80-0xFF)
+            // - ASCII alphanumeric/hyphen/dot (not in boundary table)
+            // - All UTF-8 bytes (0x80-0xFF) - IDN domains
             start -= 1;
         }
 
-        // Check word boundary at end if required
-        if self.require_word_boundaries && tld_end < line.len() && !is_word_boundary(line[tld_end])
+        // Check word boundary at end if required (also uses fast lookup)
+        if self.require_word_boundaries && tld_end < line.len() && !is_boundary_fast(line[tld_end])
         {
             return None; // Domain continues - not a real boundary
         }
@@ -690,6 +688,43 @@ static TLD_AUTOMATON_ALIGNED: AlignedTldData =
 
 const TLD_AUTOMATON: &[u8] = &TLD_AUTOMATON_ALIGNED.0;
 
+/// Compile-time boundary character lookup table for O(1) checking
+/// This replaces the branch-heavy is_word_boundary() function with a single array lookup.
+/// Marked as boundary: whitespace, punctuation commonly found in logs
+static BOUNDARY_LOOKUP: [bool; 256] = {
+    let mut table = [false; 256];
+    // Whitespace characters
+    table[b' ' as usize] = true;
+    table[b'\t' as usize] = true;
+    table[b'\n' as usize] = true;
+    table[b'\r' as usize] = true;
+    // Punctuation and delimiters
+    table[b'/' as usize] = true;
+    table[b',' as usize] = true;
+    table[b';' as usize] = true;
+    table[b':' as usize] = true;
+    table[b'(' as usize] = true;
+    table[b')' as usize] = true;
+    table[b'[' as usize] = true;
+    table[b']' as usize] = true;
+    table[b'{' as usize] = true;
+    table[b'}' as usize] = true;
+    table[b'<' as usize] = true;
+    table[b'>' as usize] = true;
+    table[b'"' as usize] = true;
+    table[b'\'' as usize] = true;
+    table[b'@' as usize] = true;  // Stop domain extraction at @ (emails)
+    table[b'=' as usize] = true;  // Stop at = (key-value pairs: domain=example.com)
+    table
+};
+
+/// Fast boundary check using lookup table (branch-free, O(1))
+#[inline(always)]
+fn is_boundary_fast(b: u8) -> bool {
+    // SAFETY: b is u8, so it's always a valid index into [0..256)
+    unsafe { *BOUNDARY_LOOKUP.get_unchecked(b as usize) }
+}
+
 /// Character classification helpers for fast boundary scanning
 #[inline]
 fn is_domain_char(b: u8) -> bool {
@@ -704,25 +739,8 @@ fn is_email_local_char(b: u8) -> bool {
 
 #[inline]
 fn is_word_boundary(b: u8) -> bool {
-    b.is_ascii_whitespace()
-        || matches!(
-            b,
-            b'/' | b','
-                | b';'
-                | b':'
-                | b'('
-                | b')'
-                | b'['
-                | b']'
-                | b'{'
-                | b'}'
-                | b'<'
-                | b'>'
-                | b'"'
-                | b'\''
-                | b'@'  // Stop domain extraction at @ (emails)
-                | b'=' // Stop at = (key-value pairs: domain=example.com)
-        )
+    // Delegate to fast lookup table
+    is_boundary_fast(b)
 }
 
 #[inline]
