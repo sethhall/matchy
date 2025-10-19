@@ -1,4 +1,6 @@
+mod cli_utils;
 mod commands;
+mod match_processor;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -42,14 +44,21 @@ enum Commands {
         database: PathBuf,
 
         /// Log files to process (one entry per line), or "-" for stdin
-        /// Multiple files are processed in sequence
         #[arg(value_name = "INPUT", required = true)]
         inputs: Vec<PathBuf>,
 
         /// Follow log file(s) for new data (like tail -f)
-        /// Continuously reads new lines as they are appended
         #[arg(short = 'f', long)]
         follow: bool,
+
+        /// Number of worker threads (default: auto-detect, use 1 for sequential)
+        /// "auto" or "0" uses all available CPU cores
+        #[arg(short = 'j', long)]
+        threads: Option<String>,
+
+        /// Batch size in bytes for parallel mode (default: 131072 = 128KB)
+        #[arg(long, default_value = "131072")]
+        batch_bytes: usize,
 
         /// Output format: json (default, NDJSON), or summary (statistics only)
         #[arg(long, default_value = "json")]
@@ -59,11 +68,15 @@ enum Commands {
         #[arg(short, long)]
         stats: bool,
 
+        /// Show live progress updates during processing (single-line updates if terminal)
+        #[arg(short, long)]
+        progress: bool,
+
         /// Trust database and skip UTF-8 validation (faster, only for trusted sources)
         #[arg(long)]
         trusted: bool,
 
-        /// LRU cache capacity (default: 10000, use 0 to disable)
+        /// LRU cache capacity per worker (default: 10000, use 0 to disable)
         #[arg(long, default_value = "10000")]
         cache_size: usize,
     },
@@ -217,11 +230,25 @@ fn main() -> Result<()> {
             database,
             inputs,
             follow,
+            threads,
+            batch_bytes,
             format,
             stats,
+            progress,
             trusted,
             cache_size,
-        } => cmd_match(database, inputs, follow, format, stats, trusted, cache_size),
+        } => cmd_match(
+            database,
+            inputs,
+            follow,
+            threads,
+            batch_bytes,
+            format,
+            stats,
+            progress,
+            trusted,
+            cache_size,
+        ),
         Commands::Query {
             database,
             query,

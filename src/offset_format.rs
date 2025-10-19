@@ -173,29 +173,20 @@ pub enum StateKind {
 }
 
 impl StateKind {
-    /// Convert from u8 (for deserialization)
-    #[inline]
-    pub fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(StateKind::Empty),
-            1 => Some(StateKind::One),
-            2 => Some(StateKind::Sparse),
-            3 => Some(StateKind::Dense),
-            _ => None,
-        }
-    }
+    /// Lookup table for fast u8 -> StateKind conversion
+    const LOOKUP: [Option<StateKind>; 256] = {
+        let mut table = [None; 256];
+        table[0] = Some(StateKind::Empty);
+        table[1] = Some(StateKind::One);
+        table[2] = Some(StateKind::Sparse);
+        table[3] = Some(StateKind::Dense);
+        table
+    };
 
-    /// Convert from u8 without validation (for trusted databases)
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that `value` is 0, 1, 2, or 3.
-    /// For untrusted input, use `from_u8()` instead.
+    /// Convert from u8 (for deserialization) - O(1) lookup
     #[inline(always)]
-    pub unsafe fn from_u8_unchecked(value: u8) -> Self {
-        // SAFETY: Caller guarantees value is 0-3
-        // This uses transmute which is instant, no branch
-        std::mem::transmute(value)
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        Self::LOOKUP[value as usize]
     }
 }
 

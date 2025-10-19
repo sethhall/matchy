@@ -9,6 +9,9 @@ repository = "https://github.com/sethhall/matchy"
 readme = "README.md"
 keywords = ["ip", "pattern", "database", "geoip", "matching"]
 categories = ["network-programming", "database", "algorithms"]
+# Disable automatic binary discovery - we explicitly specify binaries
+autobins = false
+autobenches = false
 include = [
     # Source code
     "src/**/*",
@@ -83,6 +86,8 @@ lru = "0.12"  # LRU cache for query results
 memchr = "2.7"  # SIMD-accelerated byte searching
 rayon = "1.10"  # Parallel sort for large hash builds
 notify = "6.1"  # File system watching for log tailing
+ctrlc = "3.4"  # Cross-platform Ctrl+C handling
+atty = "0.2"  # TTY detection for progress display
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef"] }
 
@@ -131,9 +136,3 @@ harness = false
 name = "query_profile"
 path = "benches/query_profile.rs"
 harness = false
-
-# Domain/IP/Email extraction benchmark
-[[bench]]
-name = "extractor_bench"
-harness = false
-

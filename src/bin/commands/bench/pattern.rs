@@ -3,35 +3,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::commands::utils::{format_bytes, format_number, format_qps};
+use crate::cli_utils::{format_bytes, format_number, format_qps};
 
-/// Configuration for pattern database benchmarking
-pub struct BenchConfig<'a> {
-    pub count: usize,
-    pub temp_file: &'a PathBuf,
-    pub keep: bool,
-    pub load_iterations: usize,
-    pub query_count: usize,
-    pub hit_rate: usize,
-    pub trusted: bool,
-    pub cache_size: usize,
-    pub cache_hit_rate: usize,
-    pub pattern_style: &'a str,
-}
-
-pub fn bench_pattern_database(config: BenchConfig) -> Result<()> {
-    let BenchConfig {
-        count,
-        temp_file,
-        keep,
-        load_iterations,
-        query_count,
-        hit_rate,
-        trusted,
-        cache_size,
-        cache_hit_rate,
-        pattern_style,
-    } = config;
+#[allow(clippy::too_many_arguments)]
+pub fn bench_pattern_database(
+    count: usize,
+    temp_file: &PathBuf,
+    keep: bool,
+    load_iterations: usize,
+    query_count: usize,
+    hit_rate: usize,
+    trusted: bool,
+    cache_size: usize,
+    cache_hit_rate: usize,
+    pattern_style: &str,
+) -> Result<()> {
     use matchy::glob::MatchMode;
     use matchy::mmdb_builder::MmdbBuilder;
     use matchy::Database;

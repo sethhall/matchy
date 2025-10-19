@@ -159,7 +159,7 @@ pub fn from_bytes(data: &[u8], mode: GlobMatchMode) -> Result<Paraglob, Paraglob
 /// Create a Paraglob from trusted bytes (e.g., embedded data compiled into binary)
 ///
 /// **SECURITY WARNING**: Only use for data from trusted sources (e.g., compile-time embedded data)!
-/// Skips UTF-8 validation and uses unsafe fast paths for ~50% performance improvement.
+/// Skips UTF-8 validation and uses unsafe fast paths for ~15-20% performance improvement.
 ///
 /// # Example
 ///

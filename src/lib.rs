@@ -113,6 +113,12 @@ pub mod mmdb_builder;
 pub mod offset_format;
 pub mod paraglob_offset;
 pub mod serialization;
+/// SIMD-accelerated utilities for pattern matching
+///
+/// Provides optimized implementations of common operations using SIMD instructions:
+/// - ASCII lowercase conversion (4-8x faster than iterator chains)
+/// - Byte searching and comparison
+pub mod simd_utils;
 /// Database validation for untrusted files
 ///
 /// Provides comprehensive validation of `.mxy` database files including:

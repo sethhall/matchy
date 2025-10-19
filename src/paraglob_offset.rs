@@ -21,7 +21,7 @@ use crate::error::ParaglobError;
 use crate::glob::{GlobPattern, MatchMode as GlobMatchMode};
 use crate::offset_format::{
     read_cstring, read_str_checked, read_str_unchecked, ACEdge, ParaglobHeader, PatternDataMapping,
-    PatternEntry, SingleWildcard, StateKind,
+    PatternEntry, SingleWildcard,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -376,13 +376,12 @@ impl ParaglobBuilder {
             buffer: BufferStorage::Owned(buffer),
             mode,
             trusted: true, // Databases we build are trusted
-            // Pre-allocate all caches to avoid allocations during queries
-            glob_cache: RefCell::new(HashMap::with_capacity(64)),
+            glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash,
             pattern_data_map,
-            candidate_buffer: RefCell::new(HashSet::with_capacity(128)),
-            ac_literal_buffer: RefCell::new(HashSet::with_capacity(128)),
-            result_buffer: RefCell::new(Vec::with_capacity(64)),
+            candidate_buffer: RefCell::new(HashSet::new()),
+            ac_literal_buffer: RefCell::new(HashSet::new()),
+            result_buffer: RefCell::new(Vec::new()),
         })
     }
 
@@ -702,8 +701,8 @@ struct PatternDataMetadata {
 pub struct Paraglob {
     /// Binary buffer containing all data
     buffer: BufferStorage,
-    /// Matching mode
-    mode: GlobMatchMode,
+    /// Matching mode (public for Database::mode() access)
+    pub(crate) mode: GlobMatchMode,
     /// Whether to trust database and skip UTF-8 validation (faster but unsafe for untrusted DBs)
     trusted: bool,
     /// Compiled glob patterns (cached on first use)
@@ -735,13 +734,12 @@ impl Paraglob {
             buffer: BufferStorage::Owned(Vec::new()),
             mode,
             trusted: true, // Databases we build ourselves are trusted
-            // Pre-allocate all caches to avoid allocations during queries
-            glob_cache: RefCell::new(HashMap::with_capacity(64)),
+            glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash: None,
             pattern_data_map: None,
-            candidate_buffer: RefCell::new(HashSet::with_capacity(128)),
-            ac_literal_buffer: RefCell::new(HashSet::with_capacity(128)),
-            result_buffer: RefCell::new(Vec::with_capacity(64)),
+            candidate_buffer: RefCell::new(HashSet::new()),
+            ac_literal_buffer: RefCell::new(HashSet::new()),
+            result_buffer: RefCell::new(Vec::new()),
         }
     }
 
@@ -817,17 +815,13 @@ impl Paraglob {
             return Vec::new();
         }
 
-        // Fast path for trusted+aligned databases: skip zerocopy validation
-        let header = if self.trusted && buffer.len() >= mem::size_of::<ParaglobHeader>() {
-            // SAFETY: Trusted database, length checked, header is at offset 0
-            unsafe { Self::load_header_unchecked(buffer) }
-        } else {
-            // Safe path: use zerocopy validation for untrusted databases
-            let (header_ref, _) = match Ref::<_, ParaglobHeader>::from_prefix(buffer) {
-                Ok(r) => r,
-                Err(_) => return Vec::new(),
-            };
-            *header_ref
+        // SAFETY: Fast path - header is at offset 0, always aligned
+        let header = unsafe {
+            if buffer.len() < mem::size_of::<ParaglobHeader>() {
+                return Vec::new();
+            }
+            let ptr = buffer.as_ptr() as *const ParaglobHeader;
+            ptr.read()
         };
 
         let ac_start = header.ac_nodes_offset as usize;
@@ -838,16 +832,8 @@ impl Paraglob {
         }
 
         let ac_buffer = &buffer[ac_start..ac_start + ac_size];
-        // Pre-allocate capacity based on text length
-        // Typical: 1 match per 100 bytes, so text.len() / 100 is reasonable
-        let mut matches = Vec::with_capacity(text.len() / 100 + 16);
-        Self::run_ac_matching_with_positions(
-            ac_buffer,
-            text,
-            self.mode,
-            self.trusted,
-            &mut matches,
-        );
+        let mut matches = Vec::new();
+        Self::run_ac_matching_with_positions(ac_buffer, text, self.mode, &mut matches);
         matches
     }
 
@@ -858,11 +844,14 @@ impl Paraglob {
             return Vec::new();
         }
 
-        let (header_ref, _) = match Ref::<_, ParaglobHeader>::from_prefix(buffer) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(), // Invalid header, return empty
+        // SAFETY: Fast path - header is at offset 0, always aligned
+        let header = unsafe {
+            if buffer.len() < mem::size_of::<ParaglobHeader>() {
+                return Vec::new();
+            }
+            let ptr = buffer.as_ptr() as *const ParaglobHeader;
+            ptr.read()
         };
-        let header = *header_ref;
 
         // Phase 1: Use AC automaton to find literal matches and candidate patterns
         let ac_start = header.ac_nodes_offset as usize;
@@ -879,12 +868,10 @@ impl Paraglob {
             // Run AC automaton matching directly on text bytes (AC handles case-insensitivity)
             let text_bytes = text.as_bytes();
             let mode = self.mode;
-            let trusted = self.trusted;
             Self::run_ac_matching_into_static(
                 ac_buffer,
                 text_bytes,
                 mode,
-                trusted,
                 &mut self.ac_literal_buffer.borrow_mut(),
             );
 
@@ -1103,12 +1090,10 @@ impl Paraglob {
             // Run AC automaton matching directly on text bytes (AC handles case-insensitivity)
             let text_bytes = text.as_bytes();
             let mode = self.mode;
-            let trusted = self.trusted;
             Self::run_ac_matching_into_static(
                 ac_buffer,
                 text_bytes,
                 mode,
-                trusted,
                 &mut self.ac_literal_buffer.borrow_mut(),
             );
 
@@ -1116,32 +1101,12 @@ impl Paraglob {
             // Use zero-copy lookup_into to avoid allocations
             if !self.ac_literal_buffer.borrow().is_empty() {
                 if let Some(ref ac_hash) = self.ac_literal_hash {
-                    // Clone the literal buffer content once to avoid holding borrow during lookup
-                    // Use a fixed-size array on the stack for small counts
-                    let ac_buf = self.ac_literal_buffer.borrow();
-                    let count = ac_buf.len();
-
-                    if count <= 64 {
-                        // Fast path: use stack-allocated array for small counts
-                        let mut stack_buf = [0u32; 64];
-                        for (i, &id) in ac_buf.iter().enumerate().take(64) {
-                            stack_buf[i] = id;
-                        }
-                        drop(ac_buf); // Release borrow
-
-                        let mut candidates = self.candidate_buffer.borrow_mut();
-                        for &literal_id in &stack_buf[..count] {
-                            ac_hash.lookup_into(literal_id, &mut *candidates);
-                        }
-                    } else {
-                        // Slow path: need heap allocation for large counts (rare)
-                        let literal_ids: Vec<u32> = ac_buf.iter().copied().collect();
-                        drop(ac_buf);
-
-                        let mut candidates = self.candidate_buffer.borrow_mut();
-                        for literal_id in literal_ids {
-                            ac_hash.lookup_into(literal_id, &mut *candidates);
-                        }
+                    // Collect literal IDs first to avoid multiple borrows
+                    let literal_ids: Vec<u32> =
+                        self.ac_literal_buffer.borrow().iter().copied().collect();
+                    let mut candidates = self.candidate_buffer.borrow_mut();
+                    for literal_id in literal_ids {
+                        ac_hash.lookup_into(literal_id, &mut *candidates);
                     }
                 }
             }
@@ -1339,278 +1304,80 @@ impl Paraglob {
         output.extend_from_slice(results);
     }
 
-    /// Load ParaglobHeader from buffer using unsafe direct pointer read (trusted mode)
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure:
-    /// - `buffer` is from a trusted source (built by this library)
-    /// - `buffer.len() >= size_of::<ParaglobHeader>()`
-    /// - Header is at offset 0
-    #[inline(always)]
-    unsafe fn load_header_unchecked(buffer: &[u8]) -> ParaglobHeader {
-        // SAFETY: Caller guarantees buffer length and trust
-        // ParaglobHeader is repr(C), so this is safe
-        let ptr = buffer.as_ptr() as *const ParaglobHeader;
-        ptr.read()
-    }
-
-    /// Load ACNode from buffer using unsafe direct pointer read (trusted mode)
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure:
-    /// - `ac_buffer` is from a trusted source (built by this library AND properly aligned)
-    /// - `offset + size_of::<ACNode>()` is within buffer bounds
-    /// - `ac_buffer` base pointer is 8-byte aligned (checked at runtime)
-    /// - `offset` is a multiple of 32 (ACNode size), ensuring 8-byte alignment
-    ///
-    /// # When to Use
-    ///
-    /// Only for:
-    /// - Embedded compile-time data wrapped in #[repr(align(8))]
-    /// - Data from `Vec<u8>` allocated by this library (heap is 8-byte aligned)
-    ///
-    /// Do NOT use for:
-    /// - Memory-mapped files (alignment not guaranteed)
-    /// - Data from external sources
-    #[inline(always)]
-    unsafe fn load_ac_node_unchecked(
-        ac_buffer: &[u8],
-        offset: usize,
-    ) -> crate::offset_format::ACNode {
-        use crate::offset_format::ACNode;
-
-        // SAFETY: Caller guarantees bounds and alignment
-        // ACNode is repr(C) with 32-byte size and 8-byte alignment requirement
-        // Our serialization guarantees:
-        // 1. Nodes start at offset 0 within AC buffer
-        // 2. Each node is 32 bytes (divisible by 8)
-        // 3. Therefore all node offsets are 8-byte aligned IF base pointer is aligned
-        //
-        // The caller MUST ensure the buffer itself is 8-byte aligned:
-        // - Vec<u8> from Rust allocator: always 8-byte aligned
-        // - #[repr(align(8))] static data: guaranteed by compiler
-        // - mmap: NOT guaranteed, must use safe path
-        debug_assert_eq!(
-            ac_buffer.as_ptr() as usize % std::mem::align_of::<ACNode>(),
-            0,
-            "AC buffer must be 8-byte aligned for trusted fast path"
-        );
-        debug_assert_eq!(
-            offset % std::mem::align_of::<ACNode>(),
-            0,
-            "ACNode offset must be 8-byte aligned"
-        );
-
-        let ptr = ac_buffer.as_ptr().add(offset) as *const ACNode;
-        ptr.read()
-    }
-
-    /// Load pattern IDs from buffer using unsafe direct slice cast (trusted mode)
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure:
-    /// - `ac_buffer` is from a trusted source
-    /// - `offset + count * 4` is within buffer bounds
-    #[inline(always)]
-    unsafe fn load_pattern_ids_unchecked(ac_buffer: &[u8], offset: usize, count: usize) -> &[u32] {
-        // SAFETY: Caller guarantees bounds
-        // Pattern IDs are u32 array, may not be 4-byte aligned so use unaligned read
-        let ptr = ac_buffer.as_ptr().add(offset) as *const u32;
-        std::slice::from_raw_parts(ptr, count)
-    }
-
     /// Run AC automaton matching with position tracking
     fn run_ac_matching_with_positions(
         ac_buffer: &[u8],
         text: &[u8],
         mode: GlobMatchMode,
-        trusted: bool,
         matches: &mut Vec<(usize, u32)>,
     ) {
+        use crate::offset_format::ACNode;
+
         if ac_buffer.is_empty() || text.is_empty() {
             return;
         }
 
-        // Check if buffer is properly aligned for fast path
-        // ACNode requires 8-byte alignment
-        let is_aligned = (ac_buffer.as_ptr() as usize)
-            .is_multiple_of(std::mem::align_of::<crate::offset_format::ACNode>());
-
-        if trusted && is_aligned {
-            // FAST PATH: Trusted database with aligned buffer - use aligned reads
-            Self::run_ac_matching_with_positions_trusted(ac_buffer, text, mode, matches);
-        } else {
-            // SAFE PATH: Untrusted database OR misaligned buffer - use zerocopy validation
-            // Note: mmap'd files may not be aligned even if trusted
-            Self::run_ac_matching_with_positions_safe(ac_buffer, text, mode, matches);
-        }
-    }
-
-    /// Fast path for trusted AND ALIGNED databases - bypasses all zerocopy overhead
-    ///
-    /// IMPORTANT: Only called when buffer is verified to be 8-byte aligned.
-    /// Caller must check alignment before calling this function.
-    #[inline(never)] // Separate for better profiling
-    fn run_ac_matching_with_positions_trusted(
-        ac_buffer: &[u8],
-        text: &[u8],
-        mode: GlobMatchMode,
-        matches: &mut Vec<(usize, u32)>,
-    ) {
-        use crate::offset_format::ACNode;
-        use std::mem::size_of;
-
-        let mut current_offset = 0usize;
-        let node_size = size_of::<ACNode>();
-
-        // Pre-lowercase entire input once if case-insensitive
-        // Eliminates per-character lowercasing in hot loop
-        let normalized_text: Vec<u8>;
+        // Pre-lowercase text once for case-insensitive mode using SIMD (4-8x faster)
+        let mut normalized_text_buf: Vec<u8> = Vec::new();
         let search_text = match mode {
             GlobMatchMode::CaseInsensitive => {
-                normalized_text = text.iter().map(|&b| b.to_ascii_lowercase()).collect();
-                &normalized_text[..]
+                crate::simd_utils::ascii_lowercase(text, &mut normalized_text_buf);
+                normalized_text_buf.as_slice()
             }
             GlobMatchMode::CaseSensitive => text,
         };
 
-        for (pos, &search_ch) in search_text.iter().enumerate() {
-            // Traverse to next state
-            loop {
-                // SAFETY: Trusted database, validated at load time
-                if current_offset + node_size > ac_buffer.len() {
-                    return; // Corrupted database
-                }
-
-                let current_node =
-                    unsafe { Self::load_ac_node_unchecked(ac_buffer, current_offset) };
-
-                if let Some(next_offset) =
-                    Self::find_ac_transition_from_node_trusted(ac_buffer, &current_node, search_ch)
-                {
-                    current_offset = next_offset;
-                    break;
-                }
-
-                if current_offset == 0 {
-                    break; // At root, stay there
-                }
-
-                current_offset = current_node.failure_offset as usize;
-            }
-
-            // Collect matches at this position
-            if current_offset + node_size <= ac_buffer.len() {
-                let node = unsafe { Self::load_ac_node_unchecked(ac_buffer, current_offset) };
-
-                if node.pattern_count > 0 {
-                    let patterns_offset = node.patterns_offset as usize;
-                    let pattern_count = node.pattern_count as usize;
-
-                    if patterns_offset + pattern_count * 4 <= ac_buffer.len() {
-                        // SAFETY: Trusted database, bounds checked
-                        let ids = unsafe {
-                            Self::load_pattern_ids_unchecked(
-                                ac_buffer,
-                                patterns_offset,
-                                pattern_count,
-                            )
-                        };
-                        matches.extend(ids.iter().map(|&id| (pos + 1, id)));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Safe path for untrusted databases - uses zerocopy validation
-    #[inline(never)] // Separate for better profiling
-    fn run_ac_matching_with_positions_safe(
-        ac_buffer: &[u8],
-        text: &[u8],
-        mode: GlobMatchMode,
-        matches: &mut Vec<(usize, u32)>,
-    ) {
-        use crate::offset_format::ACNode;
-
         let mut current_offset = 0usize;
-        let mut current_node: Option<ACNode> = None;
-
-        // Pre-lowercase entire input once if case-insensitive
-        let normalized_text: Vec<u8>;
-        let search_text = match mode {
-            GlobMatchMode::CaseInsensitive => {
-                normalized_text = text.iter().map(|&b| b.to_ascii_lowercase()).collect();
-                &normalized_text[..]
-            }
-            GlobMatchMode::CaseSensitive => text,
-        };
 
         for (pos, &search_ch) in search_text.iter().enumerate() {
+
             // Traverse to next state
             loop {
                 if let Some(next_offset) =
                     Self::find_ac_transition(ac_buffer, current_offset, search_ch)
                 {
                     current_offset = next_offset;
-                    current_node = None;
                     break;
                 }
 
                 if current_offset == 0 {
-                    current_node = None;
                     break;
                 }
 
-                // Load node once if not cached
-                let node = if let Some(cached) = current_node {
-                    cached
-                } else {
-                    let node_slice = match ac_buffer.get(current_offset..) {
-                        Some(s) => s,
-                        None => break,
-                    };
-                    let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
-                        Ok((r, _)) => r,
-                        Err(_) => break,
-                    };
-                    *node_ref
+                // Fast path: aligned pointer read for failure link
+                // SAFETY: ACNode is always 8-byte aligned (written at 32-byte intervals)
+                let node = unsafe {
+                    if current_offset + mem::size_of::<ACNode>() > ac_buffer.len() {
+                        break;
+                    }
+                    let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNode;
+                    ptr.read()
                 };
-
                 current_offset = node.failure_offset as usize;
-                current_node = None;
             }
 
-            // Collect matches at this position
-            let node = if let Some(cached) = current_node {
-                cached
-            } else {
-                let node_slice = match ac_buffer.get(current_offset..) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let node_ref = match Ref::<_, ACNode>::from_prefix(node_slice) {
-                    Ok((r, _)) => r,
-                    Err(_) => continue,
-                };
-                let n = *node_ref;
-                current_node = Some(n);
-                n
+            // Collect matches at this position (end of match is pos + 1)
+            // SAFETY: Fast path with aligned pointer reads
+            let node = unsafe {
+                if current_offset + mem::size_of::<ACNode>() > ac_buffer.len() {
+                    continue;
+                }
+                let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNode;
+                ptr.read()
             };
 
             if node.pattern_count > 0 {
                 let patterns_offset = node.patterns_offset as usize;
                 let pattern_count = node.pattern_count as usize;
 
-                if patterns_offset + pattern_count * 4 <= ac_buffer.len() {
-                    let pattern_slice = &ac_buffer[patterns_offset..];
-                    if let Ok((ids_ref, _)) =
-                        Ref::<_, [u32]>::from_prefix_with_elems(pattern_slice, pattern_count)
-                    {
-                        matches.extend(ids_ref.iter().map(|&id| (pos + 1, id)));
+                // SAFETY: Read u32 array directly (4-byte aligned)
+                unsafe {
+                    if patterns_offset + pattern_count * 4 <= ac_buffer.len() {
+                        let ids_ptr = ac_buffer.as_ptr().add(patterns_offset) as *const u32;
+                        for i in 0..pattern_count {
+                            let pattern_id = ids_ptr.add(i).read();
+                            matches.push((pos + 1, pattern_id));
+                        }
                     }
                 }
             }
@@ -1623,231 +1390,111 @@ impl Paraglob {
         ac_buffer: &[u8],
         text: &[u8],
         mode: GlobMatchMode,
-        trusted: bool,
         matches: &mut HashSet<u32>,
     ) {
+        use crate::offset_format::ACNode;
+
         if ac_buffer.is_empty() || text.is_empty() {
             return;
         }
 
-        if trusted {
-            // FAST PATH: Trusted database - use unsafe direct reads
-            Self::run_ac_matching_into_static_trusted(ac_buffer, text, mode, matches);
-        } else {
-            // SAFE PATH: Untrusted database - use zerocopy validation
-            Self::run_ac_matching_into_static_safe(ac_buffer, text, mode, matches);
-        }
-    }
-
-    /// Fast path for trusted databases
-    #[inline(never)] // Separate for better profiling
-    fn run_ac_matching_into_static_trusted(
-        ac_buffer: &[u8],
-        text: &[u8],
-        mode: GlobMatchMode,
-        matches: &mut HashSet<u32>,
-    ) {
-        use crate::offset_format::ACNode;
-        use std::mem::size_of;
-
-        let mut current_offset = 0usize;
-        let node_size = size_of::<ACNode>();
-
-        // Pre-lowercase entire input once if case-insensitive
-        let normalized_text: Vec<u8>;
+        // Pre-lowercase text once for case-insensitive mode using SIMD (4-8x faster)
+        let mut normalized_text_buf: Vec<u8> = Vec::new();
         let search_text = match mode {
             GlobMatchMode::CaseInsensitive => {
-                normalized_text = text.iter().map(|&b| b.to_ascii_lowercase()).collect();
-                &normalized_text[..]
+                crate::simd_utils::ascii_lowercase(text, &mut normalized_text_buf);
+                normalized_text_buf.as_slice()
             }
             GlobMatchMode::CaseSensitive => text,
         };
 
+        let mut current_offset = 0usize; // Start at root node
+
         for &search_ch in search_text.iter() {
+
             // Traverse to next state
             loop {
-                // SAFETY: Trusted database, validated at load time
-                if current_offset + node_size > ac_buffer.len() {
-                    return; // Corrupted database
-                }
-
-                let current_node =
-                    unsafe { Self::load_ac_node_unchecked(ac_buffer, current_offset) };
-
+                // Try to find transition
                 if let Some(next_offset) =
-                    Self::find_ac_transition_from_node_trusted(ac_buffer, &current_node, search_ch)
+                    Self::find_ac_transition(ac_buffer, current_offset, search_ch)
                 {
                     current_offset = next_offset;
                     break;
                 }
 
+                // Follow failure link
                 if current_offset == 0 {
-                    break;
+                    break; // At root, stay there
                 }
 
-                current_offset = current_node.failure_offset as usize;
+                // SAFETY: Fast path with aligned pointer read
+                let node = unsafe {
+                    if current_offset + mem::size_of::<ACNode>() > ac_buffer.len() {
+                        break;
+                    }
+                    let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNode;
+                    ptr.read()
+                };
+                current_offset = node.failure_offset as usize;
+
+                // Continue loop to try transition from new state
+                // Don't break here - we need to retry the transition!
             }
 
-            // Collect matches
-            if current_offset + node_size <= ac_buffer.len() {
-                let final_node = unsafe { Self::load_ac_node_unchecked(ac_buffer, current_offset) };
+            // Collect pattern IDs at this state
+            // SAFETY: Fast path with aligned pointer reads
+            let node = unsafe {
+                if current_offset + mem::size_of::<ACNode>() > ac_buffer.len() {
+                    continue;
+                }
+                let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNode;
+                ptr.read()
+            };
 
-                if final_node.pattern_count > 0 {
-                    let patterns_offset = final_node.patterns_offset as usize;
-                    let pattern_count = final_node.pattern_count as usize;
+            if node.pattern_count > 0 {
+                let patterns_offset = node.patterns_offset as usize;
+                let pattern_count = node.pattern_count as usize;
 
+                // SAFETY: Read u32 array directly - HOT PATH (4-byte aligned)
+                unsafe {
                     if patterns_offset + pattern_count * 4 <= ac_buffer.len() {
-                        // SAFETY: Trusted database, bounds checked
-                        let ids = unsafe {
-                            Self::load_pattern_ids_unchecked(
-                                ac_buffer,
-                                patterns_offset,
-                                pattern_count,
-                            )
-                        };
-                        matches.extend(ids.iter().copied());
+                        let ids_ptr = ac_buffer.as_ptr().add(patterns_offset) as *const u32;
+                        for i in 0..pattern_count {
+                            let pattern_id = ids_ptr.add(i).read();
+                            matches.insert(pattern_id);
+                        }
                     }
                 }
             }
         }
     }
 
-    /// Safe path for untrusted databases
-    #[inline(never)] // Separate for better profiling
-    fn run_ac_matching_into_static_safe(
-        ac_buffer: &[u8],
-        text: &[u8],
-        mode: GlobMatchMode,
-        matches: &mut HashSet<u32>,
-    ) {
-        use crate::offset_format::ACNode;
-
-        let mut current_offset = 0usize;
-
-        // Pre-lowercase entire input once if case-insensitive
-        let normalized_text: Vec<u8>;
-        let search_text = match mode {
-            GlobMatchMode::CaseInsensitive => {
-                normalized_text = text.iter().map(|&b| b.to_ascii_lowercase()).collect();
-                &normalized_text[..]
-            }
-            GlobMatchMode::CaseSensitive => text,
-        };
-
-        for &search_ch in search_text.iter() {
-            // Traverse to next state
-            let mut current_node = {
-                let node_slice = match ac_buffer.get(current_offset..) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                match Ref::<_, ACNode>::from_prefix(node_slice) {
-                    Ok((r, _)) => *r,
-                    Err(_) => continue,
-                }
-            };
-
-            loop {
-                if let Some(next_offset) =
-                    Self::find_ac_transition_from_node(ac_buffer, &current_node, search_ch)
-                {
-                    current_offset = next_offset;
-                    break;
-                }
-
-                if current_offset == 0 {
-                    break;
-                }
-
-                current_offset = current_node.failure_offset as usize;
-
-                let node_slice = match ac_buffer.get(current_offset..) {
-                    Some(s) => s,
-                    None => break,
-                };
-                current_node = match Ref::<_, ACNode>::from_prefix(node_slice) {
-                    Ok((r, _)) => *r,
-                    Err(_) => break,
-                };
-            }
-
-            // Reload final node for pattern collection
-            let final_node = {
-                let node_slice = match ac_buffer.get(current_offset..) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                match Ref::<_, ACNode>::from_prefix(node_slice) {
-                    Ok((r, _)) => *r,
-                    Err(_) => continue,
-                }
-            };
-
-            if final_node.pattern_count > 0 {
-                let patterns_offset = final_node.patterns_offset as usize;
-                let pattern_count = final_node.pattern_count as usize;
-
-                if patterns_offset + pattern_count * 4 <= ac_buffer.len() {
-                    let pattern_slice = &ac_buffer[patterns_offset..];
-                    if let Ok((ids_ref, _)) =
-                        Ref::<_, [u32]>::from_prefix_with_elems(pattern_slice, pattern_count)
-                    {
-                        matches.extend(ids_ref.iter().copied());
-                    }
-                }
-            }
-        }
-    }
-
-    /// Find a transition from a node for a character in AC automaton (loads node from offset)
+    /// Find a transition from a node for a character in AC automaton
     /// Uses state-specific encoding for optimal performance
     #[inline(always)]
     fn find_ac_transition(ac_buffer: &[u8], node_offset: usize, ch: u8) -> Option<usize> {
-        let node_slice = ac_buffer.get(node_offset..)?;
-        let (node_ref, _) = Ref::<_, crate::offset_format::ACNode>::from_prefix(node_slice).ok()?;
-        let node = *node_ref;
-        Self::find_ac_transition_from_node(ac_buffer, &node, ch)
-    }
+        use crate::offset_format::{ACNode, StateKind};
 
-    /// Find a transition from an already-loaded node for a character
-    /// Uses state-specific encoding for optimal performance
-    #[inline(always)]
-    fn find_ac_transition_from_node(
-        ac_buffer: &[u8],
-        node: &crate::offset_format::ACNode,
-        ch: u8,
-    ) -> Option<usize> {
-        use crate::offset_format::StateKind;
+        // Fast path: aligned pointer read (no validation overhead)
+        // SAFETY: We validate the offset bounds before casting.
+        // ACNode is 32 bytes and always written at 32-byte intervals (offset 0, 32, 64, ...)
+        // so it's guaranteed to be 8-byte aligned (ACNode alignment requirement).
+        let node = unsafe {
+            if node_offset + mem::size_of::<ACNode>() > ac_buffer.len() {
+                return None;
+            }
+            let ptr = ac_buffer.as_ptr().add(node_offset) as *const ACNode;
+            ptr.read()
+        };
+
+        // Dispatch on state encoding
         let kind = StateKind::from_u8(node.state_kind)?;
-        Self::find_ac_transition_from_node_impl(ac_buffer, node, ch, kind)
-    }
 
-    /// Find a transition with trusted StateKind (for trusted databases)
-    #[inline(always)]
-    fn find_ac_transition_from_node_trusted(
-        ac_buffer: &[u8],
-        node: &crate::offset_format::ACNode,
-        ch: u8,
-    ) -> Option<usize> {
-        use crate::offset_format::StateKind;
-        // SAFETY: Trusted databases are validated at load time
-        let kind = unsafe { StateKind::from_u8_unchecked(node.state_kind) };
-        Self::find_ac_transition_from_node_impl_trusted(ac_buffer, node, ch, kind)
-    }
-
-    /// Internal implementation of transition lookup
-    #[inline(always)]
-    fn find_ac_transition_from_node_impl(
-        ac_buffer: &[u8],
-        node: &crate::offset_format::ACNode,
-        ch: u8,
-        kind: crate::offset_format::StateKind,
-    ) -> Option<usize> {
         match kind {
             StateKind::Empty => None,
 
             StateKind::One => {
-                // Single inline comparison (most common case - 75-80% of states)
+                // Single inline comparison
                 if node.one_char == ch {
                     Some(node.edges_offset as usize)
                 } else {
@@ -1857,26 +1504,28 @@ impl Paraglob {
 
             StateKind::Sparse => {
                 // Linear search through sparse edges
-                // Edges are sorted by character, so we can early-exit
                 let edges_offset = node.edges_offset as usize;
                 let edge_size = mem::size_of::<ACEdge>();
                 let count = node.edge_count as usize;
 
-                for i in 0..count {
-                    let edge_offset = edges_offset + i * edge_size;
-                    if edge_offset + edge_size > ac_buffer.len() {
+                // SAFETY: Validate bounds once, then use aligned pointer for entire loop
+                // ACEdge is 8 bytes, 4-byte aligned, and written sequentially with ptr.write()
+                // in serialize(), so all edges are properly aligned.
+                unsafe {
+                    if edges_offset + count * edge_size > ac_buffer.len() {
                         return None;
                     }
-
-                    let edge_slice = &ac_buffer[edge_offset..];
-                    let (edge_ref, _) = Ref::<_, ACEdge>::from_prefix(edge_slice).ok()?;
-                    let edge = *edge_ref;
-
-                    if edge.character == ch {
-                        return Some(edge.target_offset as usize);
-                    }
-                    if edge.character > ch {
-                        return None; // Early exit - edges are sorted
+                    let edge_ptr = ac_buffer.as_ptr().add(edges_offset) as *const ACEdge;
+                    
+                    for i in 0..count {
+                        let edge = edge_ptr.add(i).read();
+                        
+                        if edge.character == ch {
+                            return Some(edge.target_offset as usize);
+                        }
+                        if edge.character > ch {
+                            return None;
+                        }
                     }
                 }
                 None
@@ -1891,97 +1540,6 @@ impl Paraglob {
                     return None;
                 }
 
-                // Direct byte array access (faster than from_le_bytes in hot loop)
-                let target = u32::from_le_bytes([
-                    ac_buffer[target_offset_offset],
-                    ac_buffer[target_offset_offset + 1],
-                    ac_buffer[target_offset_offset + 2],
-                    ac_buffer[target_offset_offset + 3],
-                ]);
-
-                if target != 0 {
-                    Some(target as usize)
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    /// Trusted implementation of transition lookup - bypasses zerocopy validation
-    ///
-    /// # Safety
-    ///
-    /// Only use with trusted databases. Caller guarantees buffer integrity.
-    #[inline(always)]
-    fn find_ac_transition_from_node_impl_trusted(
-        ac_buffer: &[u8],
-        node: &crate::offset_format::ACNode,
-        ch: u8,
-        kind: crate::offset_format::StateKind,
-    ) -> Option<usize> {
-        use crate::offset_format::ACEdge;
-
-        match kind {
-            StateKind::Empty => None,
-
-            StateKind::One => {
-                // Single inline comparison (most common case - 75-80% of states)
-                if node.one_char == ch {
-                    Some(node.edges_offset as usize)
-                } else {
-                    None
-                }
-            }
-
-            StateKind::Sparse => {
-                // Optimized sparse edge search (2-8 edges)
-                // LLVM auto-vectorizes this pattern effectively for small fixed counts
-                let edges_offset = node.edges_offset as usize;
-                let edge_size = mem::size_of::<ACEdge>();
-                let count = node.edge_count as usize;
-
-                // Bounds check once upfront
-                if edges_offset + count * edge_size > ac_buffer.len() {
-                    return None;
-                }
-
-                // SAFETY: Trusted database, bounds checked above
-                // Load all edge characters into a stack array for cache-friendly access
-                // LLVM will auto-vectorize the character comparison loop
-                let mut chars = [0u8; 8];
-                for (i, char_slot) in chars.iter_mut().enumerate().take(count) {
-                    let edge_ptr = unsafe {
-                        ac_buffer.as_ptr().add(edges_offset + i * edge_size) as *const ACEdge
-                    };
-                    *char_slot = unsafe { (*edge_ptr).character };
-                }
-
-                // Find matching character (auto-vectorizes on modern CPUs)
-                for (i, &char_val) in chars.iter().enumerate().take(count) {
-                    if char_val == ch {
-                        let edge_ptr = unsafe {
-                            ac_buffer.as_ptr().add(edges_offset + i * edge_size) as *const ACEdge
-                        };
-                        return Some(unsafe { (*edge_ptr).target_offset as usize });
-                    }
-                    if char_val > ch {
-                        return None; // Early exit - edges are sorted
-                    }
-                }
-                None
-            }
-
-            StateKind::Dense => {
-                // O(1) lookup in dense table - already optimal, no zerocopy needed
-                let lookup_offset = node.edges_offset as usize;
-                let target_offset_offset = lookup_offset + (ch as usize * 4);
-
-                if target_offset_offset + 4 > ac_buffer.len() {
-                    return None;
-                }
-
-                // Direct byte array access (faster than from_le_bytes in hot loop)
                 let target = u32::from_le_bytes([
                     ac_buffer[target_offset_offset],
                     ac_buffer[target_offset_offset + 1],
@@ -2079,13 +1637,12 @@ impl Paraglob {
             buffer: BufferStorage::Owned(buffer),
             mode,
             trusted,
-            // Pre-allocate all caches to avoid allocations during queries
-            glob_cache: RefCell::new(HashMap::with_capacity(64)),
+            glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash,
             pattern_data_map,
-            candidate_buffer: RefCell::new(HashSet::with_capacity(128)),
-            ac_literal_buffer: RefCell::new(HashSet::with_capacity(128)),
-            result_buffer: RefCell::new(Vec::with_capacity(64)),
+            candidate_buffer: RefCell::new(HashSet::new()),
+            ac_literal_buffer: RefCell::new(HashSet::new()),
+            result_buffer: RefCell::new(Vec::new()),
         })
     }
 
@@ -2173,13 +1730,12 @@ impl Paraglob {
             buffer: BufferStorage::Borrowed(slice),
             mode,
             trusted,
-            // Pre-allocate all caches to avoid allocations during queries
-            glob_cache: RefCell::new(HashMap::with_capacity(64)),
+            glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash,
             pattern_data_map,
-            candidate_buffer: RefCell::new(HashSet::with_capacity(128)),
-            ac_literal_buffer: RefCell::new(HashSet::with_capacity(128)),
-            result_buffer: RefCell::new(Vec::with_capacity(64)),
+            candidate_buffer: RefCell::new(HashSet::new()),
+            ac_literal_buffer: RefCell::new(HashSet::new()),
+            result_buffer: RefCell::new(Vec::new()),
         })
     }
 

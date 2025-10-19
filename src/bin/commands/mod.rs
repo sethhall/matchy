@@ -3,7 +3,6 @@ pub mod build_cmd;
 pub mod inspect_cmd;
 pub mod match_cmd;
 pub mod query_cmd;
-pub mod utils;
 pub mod validate_cmd;
 
 pub use bench::cmd_bench;
