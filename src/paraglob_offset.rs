@@ -382,6 +382,7 @@ impl ParaglobBuilder {
             candidate_buffer: RefCell::new(HashSet::new()),
             ac_literal_buffer: RefCell::new(HashSet::new()),
             result_buffer: RefCell::new(Vec::new()),
+            normalized_text_buffer: RefCell::new(Vec::new()),
         })
     }
 
@@ -720,6 +721,8 @@ pub struct Paraglob {
     ac_literal_buffer: RefCell<HashSet<u32>>,
     /// Reusable buffer for final match results (avoids allocation on every query)
     result_buffer: RefCell<Vec<u32>>,
+    /// Reusable buffer for normalized text (case-insensitive matching)
+    normalized_text_buffer: RefCell<Vec<u8>>,
 }
 
 impl Paraglob {
@@ -740,6 +743,7 @@ impl Paraglob {
             candidate_buffer: RefCell::new(HashSet::new()),
             ac_literal_buffer: RefCell::new(HashSet::new()),
             result_buffer: RefCell::new(Vec::new()),
+            normalized_text_buffer: RefCell::new(Vec::new()),
         }
     }
 
@@ -878,7 +882,13 @@ impl Paraglob {
         }
 
         let ac_buffer = &buffer[ac_start..ac_start + ac_size];
-        Self::run_ac_matching_with_positions(ac_buffer, text, self.mode, output);
+        Self::run_ac_matching_with_positions_with_buffer(
+            ac_buffer,
+            text,
+            self.mode,
+            output,
+            &self.normalized_text_buffer,
+        );
     }
 
     /// Find all matching pattern IDs
@@ -1348,12 +1358,31 @@ impl Paraglob {
         output.extend_from_slice(results);
     }
 
-    /// Run AC automaton matching with position tracking
+    /// Run AC automaton matching with position tracking (allocates normalized buffer)
     fn run_ac_matching_with_positions(
         ac_buffer: &[u8],
         text: &[u8],
         mode: GlobMatchMode,
         matches: &mut Vec<(usize, u32)>,
+    ) {
+        // Stack-allocated buffer for one-off calls
+        let normalized_buf = RefCell::new(Vec::new());
+        Self::run_ac_matching_with_positions_with_buffer(
+            ac_buffer,
+            text,
+            mode,
+            matches,
+            &normalized_buf,
+        );
+    }
+
+    /// Run AC automaton matching with position tracking (reusable buffer)
+    fn run_ac_matching_with_positions_with_buffer(
+        ac_buffer: &[u8],
+        text: &[u8],
+        mode: GlobMatchMode,
+        matches: &mut Vec<(usize, u32)>,
+        normalized_text_buffer: &RefCell<Vec<u8>>,
     ) {
         use crate::offset_format::ACNode;
 
@@ -1362,11 +1391,16 @@ impl Paraglob {
         }
 
         // Pre-lowercase text once for case-insensitive mode using SIMD (4-8x faster)
-        let mut normalized_text_buf: Vec<u8> = Vec::new();
+        // Reuse buffer to avoid allocation
         let search_text = match mode {
             GlobMatchMode::CaseInsensitive => {
-                crate::simd_utils::ascii_lowercase(text, &mut normalized_text_buf);
-                normalized_text_buf.as_slice()
+                let mut buf = normalized_text_buffer.borrow_mut();
+                crate::simd_utils::ascii_lowercase(text, &mut *buf);
+                // SAFETY: We copy the data out immediately and don't hold the borrow
+                // This is safe because search_text lifetime doesn't escape this function
+                unsafe {
+                    std::slice::from_raw_parts(buf.as_ptr(), buf.len())
+                }
             }
             GlobMatchMode::CaseSensitive => text,
         };
@@ -1687,6 +1721,7 @@ impl Paraglob {
             candidate_buffer: RefCell::new(HashSet::new()),
             ac_literal_buffer: RefCell::new(HashSet::new()),
             result_buffer: RefCell::new(Vec::new()),
+            normalized_text_buffer: RefCell::new(Vec::new()),
         })
     }
 
@@ -1780,6 +1815,7 @@ impl Paraglob {
             candidate_buffer: RefCell::new(HashSet::new()),
             ac_literal_buffer: RefCell::new(HashSet::new()),
             result_buffer: RefCell::new(Vec::new()),
+            normalized_text_buffer: RefCell::new(Vec::new()),
         })
     }
 
