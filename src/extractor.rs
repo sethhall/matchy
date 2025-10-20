@@ -714,6 +714,13 @@ impl PatternExtractor {
                 continue;
             }
             
+            // FAST PRE-FILTER: Reject addresses starting or ending with ::
+            // These are often special-purpose (::1, ::ffff:, fe80::, etc.)
+            if candidate.starts_with(b"::") || candidate.ends_with(b"::") {
+                last_end = end;
+                continue;
+            }
+            
             // FAST PRE-FILTER: Reject loopback and link-local by prefix before parsing
             // This avoids expensive parse for common non-routable addresses
             if is_ipv6_loopback_or_linklocal(candidate) {
@@ -782,6 +789,12 @@ impl PatternExtractor {
             let candidate = &chunk[start..end];
             
             if candidate.len() < 8 {
+                last_end = end;
+                continue;
+            }
+            
+            // FAST PRE-FILTER: Reject addresses starting or ending with ::
+            if candidate.starts_with(b"::") || candidate.ends_with(b"::") {
                 last_end = end;
                 continue;
             }
