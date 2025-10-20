@@ -178,6 +178,31 @@ impl MmapFile {
         validate_paraglob_header(buffer)
             .map_err(|e| MmapError::InvalidParaglobHeader(e.to_string()))?;
 
+        // Lock AC automaton in RAM for optimal performance
+        // This significantly improves performance by eliminating cache misses
+        #[cfg(unix)]
+        unsafe {
+            use libc::{madvise, mlock, MADV_RANDOM, MADV_WILLNEED};
+            let ptr = mmap.as_ptr() as *mut libc::c_void;
+            let len = size;
+            
+            // Prefetch entire file into page cache first
+            // This populates the pages before we lock them
+            madvise(ptr, len, MADV_WILLNEED);
+            
+            // Lock pages in physical RAM (guarantees they stay resident)
+            // This prevents the kernel from evicting AC automaton pages
+            // Silently ignore failures (may require elevated permissions)
+            let lock_result = mlock(ptr, len);
+            
+            if lock_result != 0 {
+                // mlock failed (probably permissions), fall back to advisory hints
+                // Tell kernel we'll access this randomly (disable readahead)
+                madvise(ptr, len, MADV_RANDOM);
+            }
+            // If mlock succeeded, pages are pinned - no need for MADV_RANDOM
+        }
+
         Ok(MmapFile { mmap, size })
     }
 
