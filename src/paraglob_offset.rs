@@ -837,6 +837,50 @@ impl Paraglob {
         matches
     }
 
+    /// Find all matches with their end positions in raw bytes (zero-allocation variant)
+    ///
+    /// Writes (end_position, pattern_id) tuples into the provided buffer.
+    /// The buffer is cleared first. The end_position is the byte offset immediately after the match.
+    ///
+    /// This is a zero-allocation variant useful for hot paths where you process many lines
+    /// and want to reuse the same buffer.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut match_buffer = Vec::with_capacity(100);
+    /// for line in lines {
+    ///     tld_matcher.find_matches_with_positions_bytes_into(line, &mut match_buffer);
+    ///     // Process matches...
+    /// }
+    /// ```
+    pub fn find_matches_with_positions_bytes_into(&self, text: &[u8], output: &mut Vec<(usize, u32)>) {
+        output.clear();
+        
+        let buffer = self.buffer.as_slice();
+        if buffer.is_empty() {
+            return;
+        }
+
+        // SAFETY: Fast path - header is at offset 0, always aligned
+        let header = unsafe {
+            if buffer.len() < mem::size_of::<ParaglobHeader>() {
+                return;
+            }
+            let ptr = buffer.as_ptr() as *const ParaglobHeader;
+            ptr.read()
+        };
+
+        let ac_start = header.ac_nodes_offset as usize;
+        let ac_size = header.ac_edges_size as usize;
+
+        if ac_size == 0 {
+            return;
+        }
+
+        let ac_buffer = &buffer[ac_start..ac_start + ac_size];
+        Self::run_ac_matching_with_positions(ac_buffer, text, self.mode, output);
+    }
+
     /// Find all matching pattern IDs
     pub fn find_all(&self, text: &str) -> Vec<u32> {
         let buffer = self.buffer.as_slice();

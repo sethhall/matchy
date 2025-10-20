@@ -507,7 +507,7 @@ fn worker_thread_follow(
     show_stats: bool,
 ) -> super::parallel::WorkerStats {
     use super::parallel::{
-        create_extractor_for_db, init_worker_database, process_batch, WorkerMessage, WorkerStats,
+        create_extractor_for_db, init_worker_database, process_batch, MatchBuffers, WorkerMessage, WorkerStats,
     };
 
     // Initialize database
@@ -537,6 +537,9 @@ fn worker_thread_follow(
     let mut stats = WorkerStats::default();
     let mut last_progress_update = Instant::now();
     let progress_interval = Duration::from_millis(100);
+    
+    // Reusable buffers for match result construction
+    let mut match_buffers = MatchBuffers::new();
 
     // Process work batches
     loop {
@@ -547,7 +550,7 @@ fn worker_thread_follow(
 
         match batch_opt {
             Ok(Some(batch)) => {
-                process_batch(&batch, &db, &extractor, &result_tx, &mut stats, show_stats);
+                process_batch(&batch, &db, &extractor, &result_tx, &mut stats, show_stats, &mut match_buffers);
 
                 // Send periodic progress updates
                 let now = Instant::now();

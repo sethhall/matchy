@@ -26,7 +26,7 @@ fn set_thread_name(_name: &str) {
 }
 
 use super::stats::ProcessingStats;
-use crate::cli_utils::{data_value_to_json, format_cidr};
+use crate::cli_utils::{data_value_to_json, format_cidr_into};
 
 /// Timeout for flushing partial batches without newline (stdin streaming)
 /// Only applies to slow/streaming stdin - normal file processing doesn't need this
@@ -406,6 +406,25 @@ pub fn create_extractor_for_db(
     builder.build().context("Failed to create extractor")
 }
 
+/// Reusable buffers for match result construction (eliminates per-match allocations)
+pub struct MatchBuffers {
+    data_values: Vec<serde_json::Value>,
+    matched_text: String,
+    input_line: String,
+    cidr: String,
+}
+
+impl MatchBuffers {
+    pub fn new() -> Self {
+        Self {
+            data_values: Vec::with_capacity(8),
+            matched_text: String::with_capacity(256),
+            input_line: String::with_capacity(512),
+            cidr: String::with_capacity(64),
+        }
+    }
+}
+
 /// Worker thread: receives batches, processes them, sends results
 fn worker_thread(
     worker_id: usize,
@@ -443,6 +462,9 @@ fn worker_thread(
     let mut stats = WorkerStats::default();
     let mut last_progress_update = Instant::now();
     let progress_interval = Duration::from_millis(100);
+    
+    // Reusable buffers for match result construction
+    let mut match_buffers = MatchBuffers::new();
 
     // Process work batches
     loop {
@@ -453,7 +475,7 @@ fn worker_thread(
 
         match batch_opt {
             Ok(Some(batch)) => {
-                process_batch(&batch, &db, &extractor, &result_tx, &mut stats, show_stats);
+                process_batch(&batch, &db, &extractor, &result_tx, &mut stats, show_stats, &mut match_buffers);
 
                 // Send periodic progress updates
                 let now = Instant::now();
@@ -478,32 +500,33 @@ fn worker_thread(
 }
 
 /// Lookup a candidate in the database
-fn lookup_candidate(
-    item: matchy::extractor::ExtractedItem,
+/// Only allocates string if there's a match (optimization: avoid allocation for non-matches)
+fn lookup_candidate<'a>(
+    item: matchy::extractor::ExtractedItem<'a>,
     db: &matchy::Database,
 ) -> Option<(Option<matchy::QueryResult>, String)> {
-    let (result, candidate_str) = match item {
-        matchy::extractor::ExtractedItem::Ipv4(ip) => match db.lookup_ip(IpAddr::V4(ip)) {
-            Ok(r) => (r, ip.to_string()),
-            Err(_) => return None,
-        },
-        matchy::extractor::ExtractedItem::Ipv6(ip) => match db.lookup_ip(IpAddr::V6(ip)) {
-            Ok(r) => (r, ip.to_string()),
-            Err(_) => return None,
-        },
-        matchy::extractor::ExtractedItem::Domain(s) => match db.lookup(s) {
-            Ok(r) => (r, s.to_string()),
-            Err(_) => return None,
-        },
-        matchy::extractor::ExtractedItem::Email(s) => match db.lookup(s) {
-            Ok(r) => (r, s.to_string()),
-            Err(_) => return None,
-        },
-    };
-    Some((result, candidate_str))
+    match item {
+        matchy::extractor::ExtractedItem::Ipv4(ip) => {
+            let result = db.lookup_ip(IpAddr::V4(ip)).ok()?;
+            // Only allocate string representation if lookup succeeded
+            Some((result, ip.to_string()))
+        }
+        matchy::extractor::ExtractedItem::Ipv6(ip) => {
+            let result = db.lookup_ip(IpAddr::V6(ip)).ok()?;
+            Some((result, ip.to_string()))
+        }
+        matchy::extractor::ExtractedItem::Domain(s) => {
+            let result = db.lookup(s).ok()?;
+            Some((result, s.to_string()))
+        }
+        matchy::extractor::ExtractedItem::Email(s) => {
+            let result = db.lookup(s).ok()?;
+            Some((result, s.to_string()))
+        }
+    }
 }
 
-/// Build a match result from query result
+/// Build a match result from query result using reusable buffers
 /// Returns None if result is NotFound (shouldn't happen in practice)
 fn build_match_result(
     result: &matchy::QueryResult,
@@ -512,16 +535,19 @@ fn build_match_result(
     line_number: usize,
     source_file: &Path,
     timestamp: f64,
+    buffers: &mut MatchBuffers,
 ) -> Option<MatchResult> {
     match result {
         matchy::QueryResult::Pattern { pattern_ids, data } => {
             let data_json = if !data.is_empty() {
-                let data_values: Vec<_> = data
-                    .iter()
-                    .filter_map(|d| d.as_ref().map(data_value_to_json))
-                    .collect();
-                if !data_values.is_empty() {
-                    Some(json!(data_values))
+                buffers.data_values.clear();
+                for d in data.iter() {
+                    if let Some(val) = d.as_ref() {
+                        buffers.data_values.push(data_value_to_json(val));
+                    }
+                }
+                if !buffers.data_values.is_empty() {
+                    Some(json!(&buffers.data_values))
                 } else {
                     None
                 }
@@ -529,12 +555,17 @@ fn build_match_result(
                 None
             };
 
+            buffers.matched_text.clear();
+            buffers.matched_text.push_str(candidate_str);
+            buffers.input_line.clear();
+            buffers.input_line.push_str(&String::from_utf8_lossy(line));
+
             Some(MatchResult {
                 source_file: source_file.to_owned(),
                 line_number,
-                matched_text: candidate_str.to_string(),
+                matched_text: buffers.matched_text.clone(),
                 match_type: "pattern".to_string(),
-                input_line: String::from_utf8_lossy(line).to_string(),
+                input_line: buffers.input_line.clone(),
                 timestamp,
                 pattern_count: Some(pattern_ids.len()),
                 data: data_json,
@@ -542,18 +573,27 @@ fn build_match_result(
                 cidr: None,
             })
         }
-        matchy::QueryResult::Ip { data, prefix_len } => Some(MatchResult {
-            source_file: source_file.to_owned(),
-            line_number,
-            matched_text: candidate_str.to_string(),
-            match_type: "ip".to_string(),
-            input_line: String::from_utf8_lossy(line).to_string(),
-            timestamp,
-            pattern_count: None,
-            data: Some(data_value_to_json(data)),
-            prefix_len: Some(*prefix_len),
-            cidr: Some(format_cidr(candidate_str, *prefix_len)),
-        }),
+        matchy::QueryResult::Ip { data, prefix_len } => {
+            buffers.matched_text.clear();
+            buffers.matched_text.push_str(candidate_str);
+            buffers.input_line.clear();
+            buffers.input_line.push_str(&String::from_utf8_lossy(line));
+            buffers.cidr.clear();
+            format_cidr_into(candidate_str, *prefix_len, &mut buffers.cidr);
+
+            Some(MatchResult {
+                source_file: source_file.to_owned(),
+                line_number,
+                matched_text: buffers.matched_text.clone(),
+                match_type: "ip".to_string(),
+                input_line: buffers.input_line.clone(),
+                timestamp,
+                pattern_count: None,
+                data: Some(data_value_to_json(data)),
+                prefix_len: Some(*prefix_len),
+                cidr: Some(buffers.cidr.clone()),
+            })
+        }
         matchy::QueryResult::NotFound => None,
     }
 }
@@ -566,11 +606,10 @@ pub fn process_batch(
     result_tx: &SyncSender<Option<WorkerMessage>>,
     stats: &mut WorkerStats,
     _show_stats: bool,
+    buffers: &mut MatchBuffers,
 ) {
     let chunk: &[u8] = &batch.data;
-    let mut line_number = batch.starting_line_number;
     let timestamp = 0.0;
-    let mut line_had_match = false;
 
     // Pre-allocate buffer for lowercasing (case-insensitive mode only)
     let is_case_insensitive = db.mode() == matchy::MatchMode::CaseInsensitive;
@@ -646,6 +685,7 @@ pub fn process_batch(
                         line_number,
                         &batch.source_file,
                         timestamp,
+                        buffers,
                     ) {
                         let _ = result_tx.send(Some(WorkerMessage::Match(match_result)));
                     }
