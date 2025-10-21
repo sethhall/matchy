@@ -728,11 +728,14 @@ impl Database {
                 stats.cache_misses += 1;
             }
 
-            // Track match/no-match
-            if result.is_some() {
-                stats.queries_with_match += 1;
-            } else {
-                stats.queries_without_match += 1;
+            // Track match/no-match (NotFound is NOT a match)
+            match &result {
+                Some(QueryResult::NotFound) | None => {
+                    stats.queries_without_match += 1;
+                }
+                Some(_) => {
+                    stats.queries_with_match += 1;
+                }
             }
         }
 
