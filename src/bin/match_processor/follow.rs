@@ -430,9 +430,10 @@ fn reader_watcher_thread(
                     if let Ok(mut f) = File::open(input_path) {
                         if f.read_to_end(&mut content).is_ok() {
                             // Pre-compute line offsets for workers
-                            let line_offsets: Vec<usize> = memchr::memchr_iter(b'\n', &content).collect();
+                            let line_offsets: Vec<usize> =
+                                memchr::memchr_iter(b'\n', &content).collect();
                             let line_count = line_offsets.len();
-                            
+
                             let batch = super::parallel::WorkBatch {
                                 source_file: input_path.clone(),
                                 starting_line_number: 1,
@@ -507,7 +508,8 @@ fn worker_thread_follow(
     show_stats: bool,
 ) -> super::parallel::WorkerStats {
     use super::parallel::{
-        create_extractor_for_db, init_worker_database, process_batch, MatchBuffers, WorkerMessage, WorkerStats,
+        create_extractor_for_db, init_worker_database, process_batch, MatchBuffers, WorkerMessage,
+        WorkerStats,
     };
 
     // Initialize database
@@ -537,7 +539,7 @@ fn worker_thread_follow(
     let mut stats = WorkerStats::default();
     let mut last_progress_update = Instant::now();
     let progress_interval = Duration::from_millis(100);
-    
+
     // Reusable buffers for match result construction
     let mut match_buffers = MatchBuffers::new();
 
@@ -550,7 +552,15 @@ fn worker_thread_follow(
 
         match batch_opt {
             Ok(Some(batch)) => {
-                process_batch(&batch, &db, &extractor, &result_tx, &mut stats, show_stats, &mut match_buffers);
+                process_batch(
+                    &batch,
+                    &db,
+                    &extractor,
+                    &result_tx,
+                    &mut stats,
+                    show_stats,
+                    &mut match_buffers,
+                );
 
                 // Send periodic progress updates
                 let now = Instant::now();
@@ -722,7 +732,8 @@ fn handle_file_event_parallel(
                                             line_counters.get(path).copied().unwrap_or(1);
 
                                         // Pre-compute line offsets for workers
-                                        let line_offsets: Vec<usize> = memchr::memchr_iter(b'\n', &new_content).collect();
+                                        let line_offsets: Vec<usize> =
+                                            memchr::memchr_iter(b'\n', &new_content).collect();
                                         let new_lines = line_offsets.len();
 
                                         let batch = super::parallel::WorkBatch {

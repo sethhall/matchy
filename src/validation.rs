@@ -1361,7 +1361,8 @@ fn validate_ac_structure(
                 if target_offset != 0
                     && (target_offset < nodes_offset
                         || target_offset >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
-                        || !(target_offset - nodes_offset).is_multiple_of(mem::size_of::<ACNodeHot>()))
+                        || !(target_offset - nodes_offset)
+                            .is_multiple_of(mem::size_of::<ACNodeHot>()))
                 {
                     report.error(format!(
                         "AC node {} (One) has invalid target offset: {}",

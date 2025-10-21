@@ -52,44 +52,48 @@ pub fn cmd_extract(
     let output_format = OutputFormat::from_str(&format)?;
 
     // Parse extraction types
-    let (extract_ipv4, extract_ipv6, extract_domains, extract_emails) = if let Some(type_str) = types {
-        let types_lower = type_str.to_lowercase();
-        let parts: Vec<&str> = types_lower.split(',').map(|s| s.trim()).collect();
-        
-        let mut ipv4 = false;
-        let mut ipv6 = false;
-        let mut domains = false;
-        let mut emails = false;
-        
-        for part in parts {
-            match part {
-                "ipv4" | "ip4" => ipv4 = true,
-                "ipv6" | "ip6" => ipv6 = true,
-                "domain" | "domains" => domains = true,
-                "email" | "emails" => emails = true,
-                "ip" => {
-                    ipv4 = true;
-                    ipv6 = true;
+    let (extract_ipv4, extract_ipv6, extract_domains, extract_emails) =
+        if let Some(type_str) = types {
+            let types_lower = type_str.to_lowercase();
+            let parts: Vec<&str> = types_lower.split(',').map(|s| s.trim()).collect();
+
+            let mut ipv4 = false;
+            let mut ipv6 = false;
+            let mut domains = false;
+            let mut emails = false;
+
+            for part in parts {
+                match part {
+                    "ipv4" | "ip4" => ipv4 = true,
+                    "ipv6" | "ip6" => ipv6 = true,
+                    "domain" | "domains" => domains = true,
+                    "email" | "emails" => emails = true,
+                    "ip" => {
+                        ipv4 = true;
+                        ipv6 = true;
+                    }
+                    "all" => {
+                        ipv4 = true;
+                        ipv6 = true;
+                        domains = true;
+                        emails = true;
+                    }
+                    _ => anyhow::bail!(
+                    "Unknown extraction type '{}', expected: ipv4, ipv6, ip, domain, email, all",
+                    part
+                ),
                 }
-                "all" => {
-                    ipv4 = true;
-                    ipv6 = true;
-                    domains = true;
-                    emails = true;
-                }
-                _ => anyhow::bail!("Unknown extraction type '{}', expected: ipv4, ipv6, ip, domain, email, all", part),
             }
-        }
-        
-        if !ipv4 && !ipv6 && !domains && !emails {
-            anyhow::bail!("At least one extraction type must be enabled");
-        }
-        
-        (ipv4, ipv6, domains, emails)
-    } else {
-        // Default: extract everything
-        (true, true, true, true)
-    };
+
+            if !ipv4 && !ipv6 && !domains && !emails {
+                anyhow::bail!("At least one extraction type must be enabled");
+            }
+
+            (ipv4, ipv6, domains, emails)
+        } else {
+            // Default: extract everything
+            (true, true, true, true)
+        };
 
     // Build extractor
     let extractor = PatternExtractor::builder()
@@ -106,13 +110,17 @@ pub fn cmd_extract(
         let enabled: Vec<&str> = [
             if extract_ipv4 { Some("IPv4") } else { None },
             if extract_ipv6 { Some("IPv6") } else { None },
-            if extract_domains { Some("domains") } else { None },
+            if extract_domains {
+                Some("domains")
+            } else {
+                None
+            },
             if extract_emails { Some("emails") } else { None },
         ]
         .iter()
         .filter_map(|&x| x)
         .collect();
-        
+
         eprintln!("[INFO] Extracting: {}", enabled.join(", "));
         if extract_domains {
             eprintln!("[INFO] Min domain labels: {}", min_labels);
@@ -133,11 +141,7 @@ pub fn cmd_extract(
 
     let start_time = Instant::now();
     let mut stats = ExtractionStats::default();
-    let mut seen = if unique {
-        Some(HashSet::new())
-    } else {
-        None
-    };
+    let mut seen = if unique { Some(HashSet::new()) } else { None };
 
     let stdout = io::stdout();
     let mut writer = io::BufWriter::new(stdout.lock());
@@ -167,8 +171,14 @@ pub fn cmd_extract(
         let elapsed = start_time.elapsed();
         eprintln!();
         eprintln!("[INFO] === Extraction Complete ===");
-        eprintln!("[INFO] Lines processed: {}", format_number(stats.lines_processed));
-        eprintln!("[INFO] Patterns found: {}", format_number(stats.patterns_found));
+        eprintln!(
+            "[INFO] Lines processed: {}",
+            format_number(stats.lines_processed)
+        );
+        eprintln!(
+            "[INFO] Patterns found: {}",
+            format_number(stats.patterns_found)
+        );
         if extract_ipv4 && stats.ipv4_count > 0 {
             eprintln!("[INFO]   IPv4: {}", format_number(stats.ipv4_count));
         }
@@ -223,7 +233,7 @@ fn process_file<W: Write>(
         // Extract patterns
         for match_item in extractor.extract_from_line(&line_buf) {
             let matched_text = match_item.as_str(&line_buf);
-            
+
             // Debug: show candidates if requested
             if show_candidates {
                 let type_name = match match_item.item {
@@ -232,11 +242,9 @@ fn process_file<W: Write>(
                     ExtractedItem::Domain(_) => "Domain",
                     ExtractedItem::Email(_) => "Email",
                 };
-                eprintln!("[CANDIDATE] {} at {}-{}: {}", 
-                    type_name, 
-                    match_item.span.0, 
-                    match_item.span.1, 
-                    matched_text
+                eprintln!(
+                    "[CANDIDATE] {} at {}-{}: {}",
+                    type_name, match_item.span.0, match_item.span.1, matched_text
                 );
             }
 

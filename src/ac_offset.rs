@@ -54,26 +54,18 @@ struct ACBuilder {
 /// Temporary state structure used during construction
 #[derive(Debug, Clone)]
 struct BuilderState {
-    id: u32,
     transitions: HashMap<u8, u32>,
     failure: u32,
     outputs: Vec<u32>, // Pattern IDs
-    depth: u8,
 }
 
 impl BuilderState {
-    fn new(id: u32, depth: u8) -> Self {
+    fn new(_id: u32, _depth: u8) -> Self {
         Self {
-            id,
             transitions: HashMap::new(),
             failure: 0,
             outputs: Vec::new(),
-            depth,
         }
-    }
-
-    fn is_final(&self) -> bool {
-        !self.outputs.is_empty()
     }
 
     /// Classify state encoding based on transition count

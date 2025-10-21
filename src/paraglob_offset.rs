@@ -857,9 +857,13 @@ impl Paraglob {
     ///     // Process matches...
     /// }
     /// ```
-    pub fn find_matches_with_positions_bytes_into(&self, text: &[u8], output: &mut Vec<(usize, u32)>) {
+    pub fn find_matches_with_positions_bytes_into(
+        &self,
+        text: &[u8],
+        output: &mut Vec<(usize, u32)>,
+    ) {
         output.clear();
-        
+
         let buffer = self.buffer.as_slice();
         if buffer.is_empty() {
             return;
@@ -1395,12 +1399,10 @@ impl Paraglob {
         let search_text = match mode {
             GlobMatchMode::CaseInsensitive => {
                 let mut buf = normalized_text_buffer.borrow_mut();
-                crate::simd_utils::ascii_lowercase(text, &mut *buf);
+                crate::simd_utils::ascii_lowercase(text, &mut buf);
                 // SAFETY: We copy the data out immediately and don't hold the borrow
                 // This is safe because search_text lifetime doesn't escape this function
-                unsafe {
-                    std::slice::from_raw_parts(buf.as_ptr(), buf.len())
-                }
+                unsafe { std::slice::from_raw_parts(buf.as_ptr(), buf.len()) }
             }
             GlobMatchMode::CaseSensitive => text,
         };
@@ -1408,7 +1410,6 @@ impl Paraglob {
         let mut current_offset = 0usize;
 
         for (pos, &search_ch) in search_text.iter().enumerate() {
-
             // Traverse to next state
             loop {
                 if let Some(next_offset) =
@@ -1489,7 +1490,6 @@ impl Paraglob {
         let mut current_offset = 0usize; // Start at root node
 
         for &search_ch in search_text.iter() {
-
             // Traverse to next state
             loop {
                 // Try to find transition
@@ -1594,10 +1594,10 @@ impl Paraglob {
                         return None;
                     }
                     let edge_ptr = ac_buffer.as_ptr().add(edges_offset) as *const ACEdge;
-                    
+
                     for i in 0..count {
                         let edge = edge_ptr.add(i).read();
-                        
+
                         if edge.character == ch {
                             return Some(edge.target_offset as usize);
                         }

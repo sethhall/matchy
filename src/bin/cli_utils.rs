@@ -105,11 +105,11 @@ pub fn format_cidr(ip_str: &str, prefix_len: u8) -> String {
 
 /// Format IP and prefix length as CIDR into provided buffer (zero-allocation)
 pub fn format_cidr_into(ip_str: &str, prefix_len: u8, buf: &mut String) {
-    use std::net::IpAddr;
     use std::fmt::Write;
+    use std::net::IpAddr;
 
     buf.clear();
-    
+
     if let Ok(addr) = ip_str.parse::<IpAddr>() {
         match addr {
             IpAddr::V4(ipv4) => {

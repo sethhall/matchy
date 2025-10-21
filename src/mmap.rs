@@ -200,22 +200,22 @@ impl MmapFile {
     #[cfg(unix)]
     unsafe fn optimize_mmap(mmap: &Mmap, size: usize) {
         use libc::{madvise, mlock, MADV_RANDOM, MADV_WILLNEED};
-        
+
         let ptr = mmap.as_ptr() as *mut libc::c_void;
-        
+
         // Linux-specific: request transparent huge pages (2MB)
         #[cfg(target_os = "linux")]
         {
             const MADV_HUGEPAGE: libc::c_int = 14;
             madvise(ptr, size, MADV_HUGEPAGE);
         }
-        
+
         // macOS with Apple Silicon automatically uses 16K pages for file mappings
         // when the size and alignment are appropriate. No explicit hint needed.
-        
+
         // Prefetch entire file into page cache (all Unix platforms)
         madvise(ptr, size, MADV_WILLNEED);
-        
+
         // Try to lock pages in RAM (requires elevated permissions)
         // Falls back gracefully if permission denied
         if mlock(ptr, size) != 0 {

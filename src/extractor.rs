@@ -81,7 +81,7 @@ impl PatternExtractorBuilder {
         } else {
             None
         };
-        
+
         // Pre-build memchr finder for :: (IPv6)
         let double_colon_finder = memchr::memmem::Finder::new(b"::");
 
@@ -177,7 +177,7 @@ impl PatternExtractor {
     pub fn extract_from_line<'a>(&'a self, line: &'a [u8]) -> ExtractIter<'a> {
         ExtractIter::new(self, line)
     }
-    
+
     /// Extract patterns from a chunk (multiple lines) in one pass
     ///
     /// This is MUCH faster than processing line-by-line because:
@@ -194,22 +194,22 @@ impl PatternExtractor {
     /// ```
     pub fn extract_from_chunk<'a>(&'a self, chunk: &'a [u8]) -> Vec<Match<'a>> {
         let mut matches = Vec::new();
-        
+
         // Extract IPv6 (::) in one pass over entire chunk
         if self.extract_ipv6 {
             self.extract_ipv6_chunk(chunk, &mut matches);
         }
-        
+
         // Extract IPv4 (.) in one pass
         if self.extract_ipv4 {
             self.extract_ipv4_chunk(chunk, &mut matches);
         }
-        
+
         // Extract emails (@) in one pass
         if self.extract_emails {
             self.extract_emails_chunk(chunk, &mut matches);
         }
-        
+
         // Domains still use AC per-line for now (more complex)
         if self.extract_domains {
             // Fall back to line-by-line for domains
@@ -218,7 +218,7 @@ impl PatternExtractor {
                 self.extract_domains_internal(line, &mut matches);
             }
         }
-        
+
         matches
     }
 
@@ -289,7 +289,7 @@ impl PatternExtractor {
                     Ok(s) => s,
                     Err(_) => continue, // Invalid UTF-8 in domain - skip
                 };
-                
+
                 // Reject bare TLDs (e.g., ".app", ".com")
                 // A valid domain must have at least one label before the TLD
                 if domain_bytes[0] == b'.' {
@@ -446,33 +446,35 @@ impl PatternExtractor {
 
             // Find actual end (only digits and dots)
             let mut candidate_end = start;
-            while candidate_end < line.len() && (line[candidate_end].is_ascii_digit() || line[candidate_end] == b'.') {
+            while candidate_end < line.len()
+                && (line[candidate_end].is_ascii_digit() || line[candidate_end] == b'.')
+            {
                 candidate_end += 1;
             }
-            
+
             let candidate = &line[start..candidate_end];
-            
+
             // Early validation before expensive parsing:
-            
+
             // 1. Must have exactly 3 dots (4 octets)
             let dot_count = memchr::memchr_iter(b'.', candidate).count();
             if dot_count != 3 {
                 last_end = candidate_end;
                 continue;
             }
-            
+
             // 2. Can't have consecutive dots (e.g., "26.0..26.0")
             if candidate.windows(2).any(|w| w == b"..") {
                 last_end = candidate_end;
                 continue;
             }
-            
+
             // 3. Can't start or end with dot
             if candidate.starts_with(b".") || candidate.ends_with(b".") {
                 last_end = candidate_end;
                 continue;
             }
-            
+
             // 4. Each octet must be 1-3 digits
             // Walk through and count digits between dots
             // Filters: "2025.36.0.72591908" (4 and 8 digit octets), "460.1.1.2" (3 digits but >255)
@@ -622,34 +624,34 @@ impl PatternExtractor {
 
         let local_part = &line[start..at_pos];
         let domain_part = &line[at_pos + 1..end];
-        
+
         // Validate local part:
         // 1. No consecutive dots (e.g., "s...@")
         if local_part.windows(2).any(|w| w == b"..") {
             return None;
         }
-        
+
         // 2. Must have at least one letter (not just dots/numbers/symbols)
         //    Filters: ".@..", "34480FE2-5610-4973-AA09-3ABB60D38D55@" is OK
         let has_letter = local_part.iter().any(|&b| b.is_ascii_alphabetic());
         if !has_letter {
             return None;
         }
-        
+
         // Validate domain part:
         // 1. Must have at least one dot
         if !domain_part.contains(&b'.') {
             return None;
         }
-        
+
         // 2. Must have a valid TLD from the public suffix list
         //    This rejects IP addresses ("192.168.1.222") and fake TLDs ("Uv3.peer")
         if let Some(tld_matcher) = self.tld_matcher.as_ref() {
             let tld_matches = tld_matcher.find_matches_with_positions_bytes(domain_part);
             // Must have at least one TLD match that ends at the domain boundary
             let has_valid_tld = tld_matches.iter().any(|(end_pos, _)| {
-                *end_pos == domain_part.len() && 
-                (*end_pos >= domain_part.len() || !is_domain_char(domain_part[*end_pos]))
+                *end_pos == domain_part.len()
+                    && (*end_pos >= domain_part.len() || !is_domain_char(domain_part[*end_pos]))
             });
             if !has_valid_tld {
                 return None;
@@ -660,32 +662,34 @@ impl PatternExtractor {
     }
 
     /// Extract IPv6 addresses: only look for :: (double colon compression)
-    /// 
+    ///
     /// Strategy: >95% of real IPv6 uses :: compression. This is the sweet spot:
     /// - High signal (rarely appears in non-IPv6 text)
     /// - Blazing fast (memchr finds :: in microseconds)
     /// - Simple (no regex overhead, no false positives)
-    /// 
+    ///
     /// Filters out loopback (::1) and link-local (fe80::/10) addresses before parsing.
     fn extract_ipv6_internal<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
         // Only look for :: (double colon) - present in >95% of real IPv6
         // Use pre-built finder to avoid repeated initialization
         let mut last_end = 0;
-        
+
         for double_colon_pos in self.double_colon_finder.find_iter(line) {
             if double_colon_pos < last_end {
                 continue;
             }
-            
+
             // Quick validation: must have hex digit before OR after ::
-            let has_hex_before = double_colon_pos > 0 && line[double_colon_pos - 1].is_ascii_hexdigit();
-            let has_hex_after = double_colon_pos + 2 < line.len() && line[double_colon_pos + 2].is_ascii_hexdigit();
-            
+            let has_hex_before =
+                double_colon_pos > 0 && line[double_colon_pos - 1].is_ascii_hexdigit();
+            let has_hex_after =
+                double_colon_pos + 2 < line.len() && line[double_colon_pos + 2].is_ascii_hexdigit();
+
             if !has_hex_before && !has_hex_after {
                 last_end = double_colon_pos + 2;
                 continue;
             }
-            
+
             // Find start of candidate by scanning backwards
             let mut start = double_colon_pos;
             while start > 0 {
@@ -695,7 +699,7 @@ impl PatternExtractor {
                 }
                 start -= 1;
             }
-            
+
             // Find end by scanning forwards
             let mut end = double_colon_pos + 2;
             while end < line.len() {
@@ -705,29 +709,29 @@ impl PatternExtractor {
                 }
                 end += 1;
             }
-            
+
             let candidate = &line[start..end];
-            
+
             // Minimum length check - reject short addresses like ::1, a::b
             if candidate.len() < 8 {
                 last_end = end;
                 continue;
             }
-            
+
             // FAST PRE-FILTER: Reject addresses starting or ending with ::
             // These are often special-purpose (::1, ::ffff:, fe80::, etc.)
             if candidate.starts_with(b"::") || candidate.ends_with(b"::") {
                 last_end = end;
                 continue;
             }
-            
+
             // FAST PRE-FILTER: Reject loopback and link-local by prefix before parsing
             // This avoids expensive parse for common non-routable addresses
             if is_ipv6_loopback_or_linklocal(candidate) {
                 last_end = end;
                 continue;
             }
-            
+
             // Try to parse
             if let Ok(candidate_str) = std::str::from_utf8(candidate) {
                 if let Ok(ip) = candidate_str.parse::<Ipv6Addr>() {
@@ -739,34 +743,36 @@ impl PatternExtractor {
                     continue;
                 }
             }
-            
+
             // Skip past this :: to avoid rechecking
             last_end = double_colon_pos + 2;
         }
     }
-    
+
     // ===== CHUNK-BASED EXTRACTION METHODS =====
     // These process entire chunks (multiple lines) in one pass for better performance
-    
+
     /// Extract IPv6 addresses from entire chunk in one pass
     fn extract_ipv6_chunk<'a>(&'a self, chunk: &'a [u8], matches: &mut Vec<Match<'a>>) {
         let mut last_end = 0;
-        
+
         // Single scan for all :: in the chunk
         for double_colon_pos in self.double_colon_finder.find_iter(chunk) {
             if double_colon_pos < last_end {
                 continue;
             }
-            
+
             // Quick validation
-            let has_hex_before = double_colon_pos > 0 && chunk[double_colon_pos - 1].is_ascii_hexdigit();
-            let has_hex_after = double_colon_pos + 2 < chunk.len() && chunk[double_colon_pos + 2].is_ascii_hexdigit();
-            
+            let has_hex_before =
+                double_colon_pos > 0 && chunk[double_colon_pos - 1].is_ascii_hexdigit();
+            let has_hex_after = double_colon_pos + 2 < chunk.len()
+                && chunk[double_colon_pos + 2].is_ascii_hexdigit();
+
             if !has_hex_before && !has_hex_after {
                 last_end = double_colon_pos + 2;
                 continue;
             }
-            
+
             // Find boundaries
             let mut start = double_colon_pos;
             while start > 0 {
@@ -776,7 +782,7 @@ impl PatternExtractor {
                 }
                 start -= 1;
             }
-            
+
             let mut end = double_colon_pos + 2;
             while end < chunk.len() {
                 let c = chunk[end];
@@ -785,26 +791,26 @@ impl PatternExtractor {
                 }
                 end += 1;
             }
-            
+
             let candidate = &chunk[start..end];
-            
+
             if candidate.len() < 8 {
                 last_end = end;
                 continue;
             }
-            
+
             // FAST PRE-FILTER: Reject addresses starting or ending with ::
             if candidate.starts_with(b"::") || candidate.ends_with(b"::") {
                 last_end = end;
                 continue;
             }
-            
+
             // FAST PRE-FILTER: Reject loopback and link-local by prefix before parsing
             if is_ipv6_loopback_or_linklocal(candidate) {
                 last_end = end;
                 continue;
             }
-            
+
             // Try to parse
             if let Ok(candidate_str) = std::str::from_utf8(candidate) {
                 if let Ok(ip) = candidate_str.parse::<Ipv6Addr>() {
@@ -816,48 +822,48 @@ impl PatternExtractor {
                     continue;
                 }
             }
-            
+
             last_end = double_colon_pos + 2;
         }
     }
-    
+
     /// Extract IPv4 addresses from entire chunk in one pass
     fn extract_ipv4_chunk<'a>(&'a self, chunk: &'a [u8], matches: &mut Vec<Match<'a>>) {
         use memchr::memchr_iter;
-        
+
         let mut last_end = 0;
-        
+
         // Single scan for all dots in the chunk
         for dot_pos in memchr_iter(b'.', chunk) {
             if dot_pos == 0 || dot_pos + 6 > chunk.len() {
                 continue;
             }
-            
+
             // Quick check: digit.digit
             if !chunk[dot_pos - 1].is_ascii_digit() || !chunk[dot_pos + 1].is_ascii_digit() {
                 continue;
             }
-            
+
             // Count dots in window
             let window_start = dot_pos.saturating_sub(3);
             let window_end = (dot_pos + 12).min(chunk.len());
             let window = &chunk[window_start..window_end];
             let dot_count = memchr_iter(b'.', window).count();
-            
+
             if dot_count < 3 {
                 continue;
             }
-            
+
             // Find start
             let mut start = dot_pos;
             while start > 0 && (chunk[start - 1].is_ascii_digit() || chunk[start - 1] == b'.') {
                 start -= 1;
             }
-            
+
             if start < last_end {
                 continue;
             }
-            
+
             // Try parse using existing helper
             if let Some((ip, end)) = self.try_parse_ipv4(chunk, start) {
                 matches.push(Match {
@@ -868,11 +874,11 @@ impl PatternExtractor {
             }
         }
     }
-    
+
     /// Extract emails from entire chunk in one pass
     fn extract_emails_chunk<'a>(&'a self, chunk: &'a [u8], matches: &mut Vec<Match<'a>>) {
         use memchr::memchr_iter;
-        
+
         // Single scan for all @ in the chunk
         for at_pos in memchr_iter(b'@', chunk) {
             if let Some(email_span) = self.extract_email_at(chunk, at_pos) {
@@ -885,15 +891,14 @@ impl PatternExtractor {
             }
         }
     }
-
 }
 
 /// Fast pre-filter for IPv6 loopback and link-local addresses
-/// 
+///
 /// Checks byte prefixes to reject before expensive parsing:
 /// - Loopback: ::1 (appears as "::1" with length 3)
 /// - Link-local: fe80::/10 (starts with "fe8" or "fe9" or "fea" or "feb")
-/// 
+///
 /// This is much faster than parsing and then checking is_loopback()/is_link_local().
 #[inline]
 fn is_ipv6_loopback_or_linklocal(candidate: &[u8]) -> bool {
@@ -901,30 +906,31 @@ fn is_ipv6_loopback_or_linklocal(candidate: &[u8]) -> bool {
     if candidate.len() == 3 && candidate == b"::1" {
         return true;
     }
-    
+
     // Check for link-local fe80::/10
     // Link-local addresses start with: fe80, fe81, ..., febf
     // In practice, most use fe80, so check that first
     if candidate.len() >= 4 {
         let prefix = &candidate[0..4];
-        
+
         // Fast path: fe80 (most common link-local prefix)
         if prefix.eq_ignore_ascii_case(b"fe80") {
             return true;
         }
-        
+
         // Check fe8x, fe9x, feax, febx (full fe80::/10 range)
         if candidate.len() >= 3 {
             let first_three = &candidate[0..3];
-            if first_three.eq_ignore_ascii_case(b"fe8") ||
-               first_three.eq_ignore_ascii_case(b"fe9") ||
-               first_three.eq_ignore_ascii_case(b"fea") ||
-               first_three.eq_ignore_ascii_case(b"feb") {
+            if first_three.eq_ignore_ascii_case(b"fe8")
+                || first_three.eq_ignore_ascii_case(b"fe9")
+                || first_three.eq_ignore_ascii_case(b"fea")
+                || first_three.eq_ignore_ascii_case(b"feb")
+            {
                 return true;
             }
         }
     }
-    
+
     false
 }
 
@@ -1033,8 +1039,8 @@ static BOUNDARY_LOOKUP: [bool; 256] = {
     table[b'>' as usize] = true;
     table[b'"' as usize] = true;
     table[b'\'' as usize] = true;
-    table[b'@' as usize] = true;  // Stop domain extraction at @ (emails)
-    table[b'=' as usize] = true;  // Stop at = (key-value pairs: domain=example.com)
+    table[b'@' as usize] = true; // Stop domain extraction at @ (emails)
+    table[b'=' as usize] = true; // Stop at = (key-value pairs: domain=example.com)
     table
 };
 
@@ -1061,9 +1067,9 @@ static DOMAIN_CHAR_LOOKUP: [bool; 256] = {
         i += 1;
     }
     // Special chars
-    table[b'-' as usize] = true;  // Hyphen in labels
-    table[b'.' as usize] = true;  // Dot separator
-    
+    table[b'-' as usize] = true; // Hyphen in labels
+    table[b'.' as usize] = true; // Dot separator
+
     // High bytes (0x80-0xFF) for IDN domains (UTF-8 continuation bytes)
     i = 0x80;
     while i < 0xFF {
@@ -1758,7 +1764,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(emails.len(), 0, "Should reject email with consecutive dots in local part");
+        assert_eq!(
+            emails.len(),
+            0,
+            "Should reject email with consecutive dots in local part"
+        );
     }
 
     #[test]
@@ -1777,7 +1787,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(emails.len(), 0, "Should reject email without letter in local part");
+        assert_eq!(
+            emails.len(),
+            0,
+            "Should reject email without letter in local part"
+        );
     }
 
     #[test]
@@ -1796,8 +1810,15 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(emails.len(), 1, "Should accept email with UUID containing letters");
-        assert_eq!(emails[0], "34480FE2-5610-4973-AA09-3ABB60D38D55@example.com");
+        assert_eq!(
+            emails.len(),
+            1,
+            "Should accept email with UUID containing letters"
+        );
+        assert_eq!(
+            emails[0],
+            "34480FE2-5610-4973-AA09-3ABB60D38D55@example.com"
+        );
     }
 
     #[test]
@@ -1816,7 +1837,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(emails.len(), 0, "Should reject email with IP address as domain");
+        assert_eq!(
+            emails.len(),
+            0,
+            "Should reject email with IP address as domain"
+        );
     }
 
     #[test]
@@ -1860,7 +1885,11 @@ mod tests {
                 })
                 .collect();
 
-            assert_eq!(ips.len(), 0, "Should reject tiny IPv6 addresses (< 8 bytes)");
+            assert_eq!(
+                ips.len(),
+                0,
+                "Should reject tiny IPv6 addresses (< 8 bytes)"
+            );
         }
     }
 
@@ -1880,7 +1909,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(ips.len(), 0, "Should reject IPv6 with segment > 4 hex digits");
+        assert_eq!(
+            ips.len(),
+            0,
+            "Should reject IPv6 with segment > 4 hex digits"
+        );
     }
 
     #[test]
@@ -1899,7 +1932,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(ips.len(), 0, "Should reject IPv6 with segment > 4 hex digits");
+        assert_eq!(
+            ips.len(),
+            0,
+            "Should reject IPv6 with segment > 4 hex digits"
+        );
     }
 
     #[test]
@@ -1965,6 +2002,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(ips.len(), 0, "Should reject link-local IPv6 addresses (fe80::/10)");
+        assert_eq!(
+            ips.len(),
+            0,
+            "Should reject link-local IPv6 addresses (fe80::/10)"
+        );
     }
 }

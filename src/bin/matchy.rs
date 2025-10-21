@@ -6,7 +6,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use commands::{cmd_bench, cmd_build, cmd_extract, cmd_inspect, cmd_match, cmd_query, cmd_validate};
+use commands::{
+    cmd_bench, cmd_build, cmd_extract, cmd_inspect, cmd_match, cmd_query, cmd_validate,
+};
 
 #[derive(Parser)]
 #[command(name = "matchy")]

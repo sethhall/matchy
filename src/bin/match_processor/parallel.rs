@@ -346,11 +346,11 @@ fn process_stdin(
 
         // Send chunk
         let chunk = combined[..chunk_end].to_vec();
-        
+
         // Pre-compute newline offsets (avoid duplicate memchr in workers)
         let line_offsets: Vec<usize> = memchr::memchr_iter(b'\n', &chunk).collect();
         let line_count = line_offsets.len();
-        
+
         let batch = WorkBatch {
             source_file: input_path.to_owned(),
             starting_line_number: current_line_number,
@@ -462,7 +462,7 @@ fn worker_thread(
     let mut stats = WorkerStats::default();
     let mut last_progress_update = Instant::now();
     let progress_interval = Duration::from_millis(100);
-    
+
     // Reusable buffers for match result construction
     let mut match_buffers = MatchBuffers::new();
 
@@ -475,7 +475,15 @@ fn worker_thread(
 
         match batch_opt {
             Ok(Some(batch)) => {
-                process_batch(&batch, &db, &extractor, &result_tx, &mut stats, show_stats, &mut match_buffers);
+                process_batch(
+                    &batch,
+                    &db,
+                    &extractor,
+                    &result_tx,
+                    &mut stats,
+                    show_stats,
+                    &mut match_buffers,
+                );
 
                 // Send periodic progress updates
                 let now = Instant::now();
@@ -623,9 +631,14 @@ pub fn process_batch(
     let mut line_start = 0;
     let mut line_number = batch.starting_line_number;
     let mut line_had_match = false;
-    
+
     // Iterate over pre-computed newline positions, plus chunk end
-    for newline_pos in batch.line_offsets.iter().copied().chain(std::iter::once(chunk.len())) {
+    for newline_pos in batch
+        .line_offsets
+        .iter()
+        .copied()
+        .chain(std::iter::once(chunk.len()))
+    {
         let original_line = &chunk[line_start..newline_pos];
         line_start = newline_pos + 1;
         if original_line.is_empty() {
@@ -681,7 +694,7 @@ pub fn process_batch(
                     if let Some(match_result) = build_match_result(
                         &query_result,
                         &candidate_str,
-                        original_line,  // Use original for display
+                        original_line, // Use original for display
                         line_number,
                         &batch.source_file,
                         timestamp,
