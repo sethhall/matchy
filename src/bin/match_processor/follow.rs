@@ -12,24 +12,9 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Set thread name for debugging/profiling (macOS-specific)
-#[cfg(target_os = "macos")]
-fn set_thread_name(name: &str) {
-    use std::ffi::CString;
-    if let Ok(cname) = CString::new(name) {
-        unsafe {
-            libc::pthread_setname_np(cname.as_ptr());
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn set_thread_name(_name: &str) {
-    // No-op on non-macOS platforms
-}
-
 use super::sequential::process_line_matches;
 use super::stats::ProcessingStats;
+use super::thread_utils::set_thread_name;
 
 /// Watch files and process new lines as they appear
 #[allow(clippy::too_many_arguments)]
