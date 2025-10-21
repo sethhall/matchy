@@ -11,7 +11,7 @@ pub use ip::bench_ip_database;
 pub use literal::bench_literal_database;
 pub use pattern::bench_pattern_database;
 
-use crate::commands::utils::format_number;
+use crate::cli_utils::format_number;
 
 pub struct BenchConfig<'a> {
     pub count: usize,

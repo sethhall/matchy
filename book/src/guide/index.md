@@ -16,6 +16,8 @@ If you're looking for tool-specific instructions, see:
 * [Entry Types](entry-types.md)
 * [Pattern Matching](patterns.md)
 * [Data Types and Values](data-types.md)
+* [Query Result Caching](caching.md)
+* [Pattern Extraction](extraction.md)
 * [MMDB Compatibility](mmdb-compatibility.md)
 * [Migrating from libmaxminddb](migrating-libmaxminddb.md)
 * [Performance Considerations](performance.md)

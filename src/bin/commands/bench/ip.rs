@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::commands::utils::{format_bytes, format_number, format_qps};
+use crate::cli_utils::{format_bytes, format_number, format_qps};
 
 pub fn bench_ip_database(
     count: usize,

@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::commands::utils::{format_bytes, format_number, format_qps};
+use crate::cli_utils::{format_bytes, format_number, format_qps};
 
+#[allow(clippy::too_many_arguments)]
 pub fn bench_pattern_database(
     count: usize,
     temp_file: &PathBuf,

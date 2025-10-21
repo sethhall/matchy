@@ -2,8 +2,8 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::time::Instant;
 
+use crate::cli_utils::{format_bytes, format_number, format_qps};
 use crate::commands::bench::BenchConfig;
-use crate::commands::utils::{format_bytes, format_number, format_qps};
 
 pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
     let BenchConfig {

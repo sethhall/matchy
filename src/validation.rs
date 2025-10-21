@@ -37,8 +37,8 @@
 
 use crate::error::{ParaglobError, Result};
 use crate::offset_format::{
-    ACEdge, ACNode, MetaWordMapping, ParaglobHeader, PatternDataMapping, PatternEntry, StateKind,
-    MAGIC, VERSION, VERSION_V1, VERSION_V2,
+    ACEdge, ACNodeHot, MetaWordMapping, ParaglobHeader, PatternDataMapping, PatternEntry,
+    StateKind, MAGIC, VERSION, VERSION_V1, VERSION_V2,
 };
 use std::collections::HashSet;
 use std::fs::File;
@@ -94,8 +94,6 @@ pub struct DatabaseStats {
     pub has_data_section: bool,
     /// Has AC literal mapping (v3)
     pub has_ac_literal_mapping: bool,
-    /// Maximum depth in AC automaton
-    pub max_ac_depth: u8,
     /// Number of state encoding types used
     pub state_encoding_distribution: [u32; 4], // Empty, One, Sparse, Dense
     /// Locations where unsafe code is used (Audit mode only)
@@ -1107,7 +1105,7 @@ fn validate_paraglob_offsets(
     // Validate AC nodes section
     if header.ac_node_count > 0 {
         let offset = header.ac_nodes_offset as usize;
-        let size = (header.ac_node_count as usize) * mem::size_of::<ACNode>();
+        let size = (header.ac_node_count as usize) * mem::size_of::<ACNodeHot>();
 
         if !validate_range(offset, size, buffer_len) {
             report.error(format!(
@@ -1116,11 +1114,11 @@ fn validate_paraglob_offsets(
             ));
         } else {
             // Check alignment
-            if !offset.is_multiple_of(mem::align_of::<ACNode>()) {
+            if !offset.is_multiple_of(mem::align_of::<ACNodeHot>()) {
                 report.error(format!(
                     "AC nodes section misaligned: offset={}, required_alignment={}",
                     offset,
-                    mem::align_of::<ACNode>()
+                    mem::align_of::<ACNodeHot>()
                 ));
             }
         }
@@ -1292,24 +1290,22 @@ fn validate_ac_structure(
     let nodes_offset = header.ac_nodes_offset as usize;
     let node_count = header.ac_node_count as usize;
 
-    let mut visited = HashSet::new();
-    let mut max_depth = 0u8;
     let mut state_distribution = [0u32; 4];
 
     for i in 0..node_count {
-        let node_offset = nodes_offset + i * mem::size_of::<ACNode>();
+        let node_offset = nodes_offset + i * mem::size_of::<ACNodeHot>();
 
-        if node_offset + mem::size_of::<ACNode>() > buffer.len() {
+        if node_offset + mem::size_of::<ACNodeHot>() > buffer.len() {
             report.error(format!("AC node {} out of bounds", i));
             continue;
         }
 
-        let node = ACNode::read_from_prefix(&buffer[node_offset..])
+        let node = ACNodeHot::read_from_prefix(&buffer[node_offset..])
             .map(|(n, _)| n)
             .map_err(|_| ParaglobError::Format("Failed to read AC node".to_string()))?;
 
-        // Track max depth
-        max_depth = max_depth.max(node.depth);
+        // Note: ACNodeHot doesn't store depth (removed for cache optimization)
+        // max_depth tracking removed
 
         // Validate state kind
         let state_kind = StateKind::from_u8(node.state_kind);
@@ -1327,8 +1323,8 @@ fn validate_ac_structure(
         if node.failure_offset != 0 {
             let failure_node_offset = node.failure_offset as usize;
             if failure_node_offset < nodes_offset
-                || failure_node_offset >= nodes_offset + node_count * mem::size_of::<ACNode>()
-                || !(failure_node_offset - nodes_offset).is_multiple_of(mem::size_of::<ACNode>())
+                || failure_node_offset >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
+                || !(failure_node_offset - nodes_offset).is_multiple_of(mem::size_of::<ACNodeHot>())
             {
                 report.error(format!(
                     "AC node {} has invalid failure link offset: {}",
@@ -1336,8 +1332,8 @@ fn validate_ac_structure(
                 ));
             }
 
-            // Check for self-loop (except root)
-            if failure_node_offset == node_offset && node.node_id != 0 {
+            // Check for self-loop (root is at offset nodes_offset)
+            if failure_node_offset == node_offset && node_offset != nodes_offset {
                 report.error(format!("AC node {} has self-referencing failure link", i));
             }
         }
@@ -1364,8 +1360,9 @@ fn validate_ac_structure(
                 let target_offset = node.edges_offset as usize;
                 if target_offset != 0
                     && (target_offset < nodes_offset
-                        || target_offset >= nodes_offset + node_count * mem::size_of::<ACNode>()
-                        || !(target_offset - nodes_offset).is_multiple_of(mem::size_of::<ACNode>()))
+                        || target_offset >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
+                        || !(target_offset - nodes_offset)
+                            .is_multiple_of(mem::size_of::<ACNodeHot>()))
                 {
                     report.error(format!(
                         "AC node {} (One) has invalid target offset: {}",
@@ -1394,9 +1391,9 @@ fn validate_ac_structure(
                             let target_offset = edge.target_offset as usize;
                             if target_offset < nodes_offset
                                 || target_offset
-                                    >= nodes_offset + node_count * mem::size_of::<ACNode>()
+                                    >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
                                 || !(target_offset - nodes_offset)
-                                    .is_multiple_of(mem::size_of::<ACNode>())
+                                    .is_multiple_of(mem::size_of::<ACNodeHot>())
                             {
                                 report.error(format!(
                                     "AC node {} edge {} has invalid target: {}",
@@ -1439,9 +1436,9 @@ fn validate_ac_structure(
                             if target_offset != 0
                                 && (target_offset < nodes_offset
                                     || target_offset
-                                        >= nodes_offset + node_count * mem::size_of::<ACNode>()
+                                        >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
                                     || !(target_offset - nodes_offset)
-                                        .is_multiple_of(mem::size_of::<ACNode>()))
+                                        .is_multiple_of(mem::size_of::<ACNodeHot>()))
                             {
                                 report.error(format!(
                                     "AC node {} dense entry [{}] has invalid target: {}",
@@ -1487,33 +1484,23 @@ fn validate_ac_structure(
             }
         }
 
-        visited.insert(node.node_id);
+        // Note: visited tracking removed (ACNodeHot doesn't have node_id)
+        // All nodes are implicitly visited by linear iteration
     }
 
-    report.stats.max_ac_depth = max_depth;
     report.stats.state_encoding_distribution = state_distribution;
 
     report.info(format!(
-        "AC automaton: {} nodes, max depth {}, encodings: Empty={}, One={}, Sparse={}, Dense={}",
+        "AC automaton: {} nodes, encodings: Empty={}, One={}, Sparse={}, Dense={}",
         node_count,
-        max_depth,
         state_distribution[0],
         state_distribution[1],
         state_distribution[2],
         state_distribution[3]
     ));
 
-    // Check for unreachable nodes (strict/audit mode)
-    if (level == ValidationLevel::Strict || level == ValidationLevel::Audit)
-        && visited.len() != node_count
-    {
-        report.warning(format!(
-            "Found {} unreachable nodes (visited {} out of {})",
-            node_count - visited.len(),
-            visited.len(),
-            node_count
-        ));
-    }
+    // Note: Unreachable node detection removed for ACNodeHot (no node_id tracking)
+    // Use validate_ac_reachability() in consistency checks instead
 
     Ok(())
 }
@@ -1649,12 +1636,12 @@ fn validate_ac_reachability(
     while let Some(node_idx) = queue.pop() {
         _nodes_visited += 1;
 
-        let node_offset = nodes_offset + node_idx * mem::size_of::<ACNode>();
-        if node_offset + mem::size_of::<ACNode>() > buffer.len() {
+        let node_offset = nodes_offset + node_idx * mem::size_of::<ACNodeHot>();
+        if node_offset + mem::size_of::<ACNodeHot>() > buffer.len() {
             continue;
         }
 
-        let node = match ACNode::read_from_prefix(&buffer[node_offset..]) {
+        let node = match ACNodeHot::read_from_prefix(&buffer[node_offset..]) {
             Ok((n, _)) => n,
             Err(_) => continue,
         };
@@ -1671,9 +1658,9 @@ fn validate_ac_reachability(
                 // Single edge stored inline in edges_offset
                 let target_offset = node.edges_offset as usize;
                 if target_offset >= nodes_offset
-                    && target_offset < nodes_offset + node_count * mem::size_of::<ACNode>()
+                    && target_offset < nodes_offset + node_count * mem::size_of::<ACNodeHot>()
                 {
-                    let target_idx = (target_offset - nodes_offset) / mem::size_of::<ACNode>();
+                    let target_idx = (target_offset - nodes_offset) / mem::size_of::<ACNodeHot>();
                     if target_idx < node_count && !reachable[target_idx] {
                         reachable[target_idx] = true;
                         queue.push(target_idx);
@@ -1691,10 +1678,10 @@ fn validate_ac_reachability(
                             let target_offset = edge.target_offset as usize;
                             if target_offset >= nodes_offset
                                 && target_offset
-                                    < nodes_offset + node_count * mem::size_of::<ACNode>()
+                                    < nodes_offset + node_count * mem::size_of::<ACNodeHot>()
                             {
                                 let target_idx =
-                                    (target_offset - nodes_offset) / mem::size_of::<ACNode>();
+                                    (target_offset - nodes_offset) / mem::size_of::<ACNodeHot>();
                                 if target_idx < node_count && !reachable[target_idx] {
                                     reachable[target_idx] = true;
                                     queue.push(target_idx);
@@ -1722,10 +1709,10 @@ fn validate_ac_reachability(
                             if target_offset != 0
                                 && target_offset >= nodes_offset
                                 && target_offset
-                                    < nodes_offset + node_count * mem::size_of::<ACNode>()
+                                    < nodes_offset + node_count * mem::size_of::<ACNodeHot>()
                             {
                                 let target_idx =
-                                    (target_offset - nodes_offset) / mem::size_of::<ACNode>();
+                                    (target_offset - nodes_offset) / mem::size_of::<ACNodeHot>();
                                 if target_idx < node_count && !reachable[target_idx] {
                                     reachable[target_idx] = true;
                                     queue.push(target_idx);
@@ -1741,9 +1728,9 @@ fn validate_ac_reachability(
         if node.failure_offset != 0 {
             let failure_offset = node.failure_offset as usize;
             if failure_offset >= nodes_offset
-                && failure_offset < nodes_offset + node_count * mem::size_of::<ACNode>()
+                && failure_offset < nodes_offset + node_count * mem::size_of::<ACNodeHot>()
             {
-                let failure_idx = (failure_offset - nodes_offset) / mem::size_of::<ACNode>();
+                let failure_idx = (failure_offset - nodes_offset) / mem::size_of::<ACNodeHot>();
                 if failure_idx < node_count && !reachable[failure_idx] {
                     reachable[failure_idx] = true;
                     queue.push(failure_idx);
@@ -1805,12 +1792,12 @@ fn validate_pattern_ac_consistency(
     let mut patterns_referenced_by_nodes = HashSet::new();
 
     for i in 0..node_count {
-        let node_offset = nodes_offset + i * mem::size_of::<ACNode>();
-        if node_offset + mem::size_of::<ACNode>() > buffer.len() {
+        let node_offset = nodes_offset + i * mem::size_of::<ACNodeHot>();
+        if node_offset + mem::size_of::<ACNodeHot>() > buffer.len() {
             continue;
         }
 
-        let node = match ACNode::read_from_prefix(&buffer[node_offset..]) {
+        let node = match ACNodeHot::read_from_prefix(&buffer[node_offset..]) {
             Ok((n, _)) => n,
             Err(_) => continue,
         };
@@ -2123,7 +2110,7 @@ fn audit_paraglob_performance(
     report: &mut ValidationReport,
 ) -> Result<()> {
     // Memory usage estimates
-    let node_memory = (header.ac_node_count as usize) * mem::size_of::<ACNode>();
+    let node_memory = (header.ac_node_count as usize) * mem::size_of::<ACNodeHot>();
     let pattern_memory = (header.pattern_count as usize) * mem::size_of::<PatternEntry>();
     let string_memory = header.pattern_strings_size as usize;
     let data_memory = header.data_section_size as usize;

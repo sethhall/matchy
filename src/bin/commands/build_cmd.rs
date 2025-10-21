@@ -8,7 +8,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use crate::commands::utils::json_to_data_map;
+use crate::cli_utils::json_to_data_map;
 
 /// Set file permissions to read-only (0444 on Unix, read-only attribute on Windows)
 fn set_readonly(path: &PathBuf) -> Result<()> {

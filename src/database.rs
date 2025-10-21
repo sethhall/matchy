@@ -448,6 +448,35 @@ impl Database {
         *self.stats.borrow()
     }
 
+    /// Get the match mode of the database (case-sensitive or case-insensitive)
+    ///
+    /// Returns the MatchMode for this database, which determines how pattern
+    /// matching is performed. Used to optimize query processing.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use matchy::{Database, MatchMode};
+    ///
+    /// let db = Database::from("threats.mxy").open()?;
+    /// if db.mode() == MatchMode::CaseInsensitive {
+    ///     println!("Database uses case-insensitive matching");
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn mode(&self) -> crate::glob::MatchMode {
+        // If there's a pattern matcher, use its mode
+        if let Some(ref pm) = self.pattern_matcher {
+            return pm.borrow().mode;
+        }
+        // If there's a literal hash, use its mode
+        if let Some(ref lh) = self.literal_hash {
+            return lh.mode();
+        }
+        // Default to case-sensitive for IP-only databases
+        crate::glob::MatchMode::CaseSensitive
+    }
+
     /// Open database with custom options (lower-level API)
     ///
     /// Most users should use `Database::from()` builder instead.
@@ -699,11 +728,14 @@ impl Database {
                 stats.cache_misses += 1;
             }
 
-            // Track match/no-match
-            if result.is_some() {
-                stats.queries_with_match += 1;
-            } else {
-                stats.queries_without_match += 1;
+            // Track match/no-match (NotFound is NOT a match)
+            match &result {
+                Some(QueryResult::NotFound) | None => {
+                    stats.queries_without_match += 1;
+                }
+                Some(_) => {
+                    stats.queries_with_match += 1;
+                }
             }
         }
 

@@ -2,6 +2,18 @@
 
 This directory contains example programs demonstrating matchy usage and capabilities.
 
+## Development Tools
+
+### `update-psl.rs`
+**Development tool only** - Updates the pre-built Public Suffix List (PSL) Aho-Corasick automaton.
+- Downloads latest PSL from https://publicsuffix.org
+- Parses TLD patterns and wildcard rules
+- Handles Unicode TLDs with punycode conversion
+- Rebuilds `src/data/tld_automaton.ac`
+- **Not installed with `cargo install`** - only runs from source
+
+**Run:** `cargo run --example update-psl`
+
 ## Building Databases
 
 ### `build_ip_database.rs`

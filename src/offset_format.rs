@@ -173,20 +173,78 @@ pub enum StateKind {
 }
 
 impl StateKind {
-    /// Convert from u8 (for deserialization)
-    #[inline]
-    pub fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(StateKind::Empty),
-            1 => Some(StateKind::One),
-            2 => Some(StateKind::Sparse),
-            3 => Some(StateKind::Dense),
-            _ => None,
-        }
+    /// Lookup table for fast u8 -> StateKind conversion
+    const LOOKUP: [Option<StateKind>; 256] = {
+        let mut table = [None; 256];
+        table[0] = Some(StateKind::Empty);
+        table[1] = Some(StateKind::One);
+        table[2] = Some(StateKind::Sparse);
+        table[3] = Some(StateKind::Dense);
+        table
+    };
+
+    /// Convert from u8 (for deserialization) - O(1) lookup
+    #[inline(always)]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        Self::LOOKUP[value as usize]
     }
 }
 
-/// AC Automaton node (32 bytes, 8-byte aligned)
+/// AC Automaton hot node data (16 bytes, 4-byte aligned)
+///
+/// Cache-optimized node structure containing only data accessed during matching.
+/// This allows 4 nodes per 64-byte cache line instead of 2, effectively doubling
+/// cache capacity for AC traversal.
+///
+/// # State Encoding
+///
+/// The node uses different encodings based on transition count:
+/// - **Empty** (0 transitions): No additional data needed
+/// - **One** (1 transition): Character and target stored inline (no indirection!)
+/// - **Sparse** (2-8 transitions): Offset to edge array, linear search
+/// - **Dense** (9+ transitions): Offset to 256-entry lookup table, O(1) access
+///
+/// # Field Ordering
+///
+/// Fields are ordered by access frequency (hot first) to maximize CPU pipeline efficiency:
+/// 1. `state_kind`, `one_char` - checked first on every transition
+/// 2. `edge_count`, `pattern_count` - determines next steps
+/// 3. Offsets - loaded speculatively while above checks execute
+#[repr(C)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct ACNodeHot {
+    /// State encoding type (StateKind enum) - HOT: checked every transition
+    pub state_kind: u8,
+
+    /// ONE encoding: character for single transition - HOT: used by 75-80% of states
+    pub one_char: u8,
+
+    /// Number of edges (SPARSE/DENSE states) - max 255 edges
+    pub edge_count: u8,
+
+    /// Number of pattern IDs at this node - max 255 patterns per node
+    pub pattern_count: u8,
+
+    /// SPARSE/DENSE/ONE encoding: offset-based lookup
+    /// - SPARSE: offset to ACEdge array
+    /// - DENSE: offset to DenseLookup table
+    /// - ONE: target offset for single transition
+    pub edges_offset: u32,
+
+    /// Offset to failure link node (0 = root)
+    pub failure_offset: u32,
+
+    /// Offset to pattern ID array
+    pub patterns_offset: u32,
+}
+// Total: 16 bytes (4 per cache line!)
+// state_kind(1) + one_char(1) + edge_count(1) + pattern_count(1) +
+// edges_offset(4) + failure_offset(4) + patterns_offset(4) = 16 bytes
+
+/// AC Automaton node (32 bytes, 8-byte aligned) - DEPRECATED
+///
+/// Legacy 32-byte node structure. Kept for backward compatibility with old file formats.
+/// New code should use ACNodeHot (16 bytes) for better cache performance.
 ///
 /// Represents a single node in the Aho-Corasick trie with state-specific encoding.
 /// All child references are stored as offsets to allow zero-copy loading.
@@ -359,7 +417,8 @@ pub struct PatternDataMapping {
 
 // Compile-time size assertions to ensure struct layout
 const _: () = assert!(mem::size_of::<ParaglobHeader>() == 104); // v3: 8-byte magic + 24 * u32 fields
-const _: () = assert!(mem::size_of::<ACNode>() == 32);
+const _: () = assert!(mem::size_of::<ACNodeHot>() == 16); // Cache-optimized: 4 per cache line
+const _: () = assert!(mem::size_of::<ACNode>() == 32); // Legacy: 2 per cache line
 const _: () = assert!(mem::size_of::<ACEdge>() == 8);
 const _: () = assert!(mem::size_of::<DenseLookup>() == 1024); // 256 * 4 bytes
 const _: () = assert!(mem::align_of::<DenseLookup>() == 64); // Cache-line alignment for performance

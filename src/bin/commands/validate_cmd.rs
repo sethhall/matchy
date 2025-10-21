@@ -49,7 +49,6 @@ pub fn cmd_validate(
                 "glob_count": report.stats.glob_count,
                 "has_data_section": report.stats.has_data_section,
                 "has_ac_literal_mapping": report.stats.has_ac_literal_mapping,
-                "max_ac_depth": report.stats.max_ac_depth,
             }
         });
         println!("{}", serde_json::to_string_pretty(&output)?);

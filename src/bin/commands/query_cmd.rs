@@ -3,7 +3,7 @@ use matchy::{Database, QueryResult};
 use serde_json::json;
 use std::path::PathBuf;
 
-use crate::commands::utils::{data_value_to_json, format_cidr};
+use crate::cli_utils::{data_value_to_json, format_cidr};
 
 pub fn cmd_query(database: PathBuf, query: String, quiet: bool, trusted: bool) -> Result<()> {
     // Load database using fluent API

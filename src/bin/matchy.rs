@@ -1,10 +1,14 @@
+mod cli_utils;
 mod commands;
+mod match_processor;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use commands::{cmd_bench, cmd_build, cmd_inspect, cmd_match, cmd_query, cmd_validate};
+use commands::{
+    cmd_bench, cmd_build, cmd_extract, cmd_inspect, cmd_match, cmd_query, cmd_validate,
+};
 
 #[derive(Parser)]
 #[command(name = "matchy")]
@@ -35,6 +39,45 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Extract patterns (domains, IPs, emails) from log files or stdin
+    Extract {
+        /// Log files to process (one entry per line), or "-" for stdin
+        #[arg(value_name = "INPUT", required = true)]
+        inputs: Vec<PathBuf>,
+
+        /// Output format: json (default, NDJSON), csv, or text (one per line)
+        #[arg(long, default_value = "json")]
+        format: String,
+
+        /// Extraction types (comma-separated): ipv4, ipv6, ip, domain, email, all (default: all)
+        #[arg(long)]
+        types: Option<String>,
+
+        /// Minimum number of domain labels (default: 2 for example.com)
+        #[arg(long, default_value = "2")]
+        min_labels: usize,
+
+        /// Disable word boundary requirements (allow patterns in middle of text)
+        #[arg(long)]
+        no_boundaries: bool,
+
+        /// Output only unique patterns (deduplicate)
+        #[arg(short, long)]
+        unique: bool,
+
+        /// Number of worker threads (default: 1, use "auto" for all cores)
+        #[arg(short = 'j', long)]
+        threads: Option<String>,
+
+        /// Show extraction statistics to stderr
+        #[arg(short, long)]
+        stats: bool,
+
+        /// Show candidate extraction details for debugging (to stderr)
+        #[arg(long)]
+        show_candidates: bool,
+    },
+
     /// Match patterns against log files or stdin (operational testing)
     Match {
         /// Path to the matchy database (.mxy file)
@@ -42,14 +85,21 @@ enum Commands {
         database: PathBuf,
 
         /// Log files to process (one entry per line), or "-" for stdin
-        /// Multiple files are processed in sequence
         #[arg(value_name = "INPUT", required = true)]
         inputs: Vec<PathBuf>,
 
         /// Follow log file(s) for new data (like tail -f)
-        /// Continuously reads new lines as they are appended
         #[arg(short = 'f', long)]
         follow: bool,
+
+        /// Number of worker threads (default: auto-detect, use 1 for sequential)
+        /// "auto" or "0" uses all available CPU cores
+        #[arg(short = 'j', long)]
+        threads: Option<String>,
+
+        /// Batch size in bytes for parallel mode (default: 131072 = 128KB)
+        #[arg(long, default_value = "131072")]
+        batch_bytes: usize,
 
         /// Output format: json (default, NDJSON), or summary (statistics only)
         #[arg(long, default_value = "json")]
@@ -59,11 +109,15 @@ enum Commands {
         #[arg(short, long)]
         stats: bool,
 
+        /// Show live progress updates during processing (single-line updates if terminal)
+        #[arg(short, long)]
+        progress: bool,
+
         /// Trust database and skip UTF-8 validation (faster, only for trusted sources)
         #[arg(long)]
         trusted: bool,
 
-        /// LRU cache capacity (default: 10000, use 0 to disable)
+        /// LRU cache capacity per worker (default: 10000, use 0 to disable)
         #[arg(long, default_value = "10000")]
         cache_size: usize,
     },
@@ -213,15 +267,50 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Extract {
+            inputs,
+            format,
+            types,
+            min_labels,
+            no_boundaries,
+            unique,
+            threads,
+            stats,
+            show_candidates,
+        } => cmd_extract(
+            inputs,
+            format,
+            types,
+            min_labels,
+            no_boundaries,
+            unique,
+            threads,
+            stats,
+            show_candidates,
+        ),
         Commands::Match {
             database,
             inputs,
             follow,
+            threads,
+            batch_bytes,
             format,
             stats,
+            progress,
             trusted,
             cache_size,
-        } => cmd_match(database, inputs, follow, format, stats, trusted, cache_size),
+        } => cmd_match(
+            database,
+            inputs,
+            follow,
+            threads,
+            batch_bytes,
+            format,
+            stats,
+            progress,
+            trusted,
+            cache_size,
+        ),
         Commands::Query {
             database,
             query,

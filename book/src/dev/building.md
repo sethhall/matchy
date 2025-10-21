@@ -84,6 +84,31 @@ rustup target add x86_64-unknown-linux-gnu
 cargo build --release --target x86_64-unknown-linux-gnu
 ```
 
+## Development Tools
+
+Matchy includes development-only tools in the `examples/` directory that are not installed with `cargo install`.
+
+### Updating the Public Suffix List
+
+The TLD matching feature uses a pre-built Aho-Corasick automaton generated from the [Public Suffix List](https://publicsuffix.org). To refresh this data:
+
+```bash
+# Download latest PSL and rebuild the automaton
+cargo run --example update-psl
+
+# Commit the updated automaton
+git add src/data/tld_automaton.ac
+git commit -m "Update Public Suffix List"
+```
+
+This tool:
+- Downloads the latest PSL from publicsuffix.org
+- Parses TLD patterns including wildcards
+- Handles Unicode TLDs with punycode conversion
+- Rebuilds `src/data/tld_automaton.ac`
+
+**Note:** This is only needed when updating TLD patterns. End users never need to run this.
+
 ## See Also
 
 - [Development Guide](../development.md)

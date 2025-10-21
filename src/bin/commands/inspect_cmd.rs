@@ -3,7 +3,7 @@ use matchy::{DataValue, Database};
 use serde_json::json;
 use std::path::PathBuf;
 
-use crate::commands::utils::{
+use crate::cli_utils::{
     data_value_to_json, extract_uint_from_datavalue, format_data_value, format_unix_timestamp,
 };
 

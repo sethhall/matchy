@@ -496,7 +496,7 @@ matchy build --dry-run input.json
 
 ## See Also
 
-- [Input Formats Guide](../user-guide/input-formats.md) - User-friendly examples
+- [Input Formats Guide](input-formats.md) - User-friendly examples
 - [matchy build command](../commands/matchy-build.md) - Build command reference
 - [Database Builder API](database-builder.md) - Programmatic building
 - [Data Types Reference](data-types-ref.md) - Supported data types

@@ -98,7 +98,17 @@ impl<R: io::BufRead> LineScanner<R> {
 
 /// Helper function to format IP and prefix length as CIDR
 pub fn format_cidr(ip_str: &str, prefix_len: u8) -> String {
+    let mut buf = String::with_capacity(64);
+    format_cidr_into(ip_str, prefix_len, &mut buf);
+    buf
+}
+
+/// Format IP and prefix length as CIDR into provided buffer (zero-allocation)
+pub fn format_cidr_into(ip_str: &str, prefix_len: u8, buf: &mut String) {
+    use std::fmt::Write;
     use std::net::IpAddr;
+
+    buf.clear();
 
     if let Ok(addr) = ip_str.parse::<IpAddr>() {
         match addr {
@@ -111,7 +121,7 @@ pub fn format_cidr(ip_str: &str, prefix_len: u8) -> String {
                 };
                 let network_int = ip_int & mask;
                 let network = std::net::Ipv4Addr::from(network_int);
-                format!("{}/{}", network, prefix_len)
+                let _ = write!(buf, "{}/{}", network, prefix_len);
             }
             IpAddr::V6(ipv6) => {
                 let ip_int = u128::from(ipv6);
@@ -122,11 +132,11 @@ pub fn format_cidr(ip_str: &str, prefix_len: u8) -> String {
                 };
                 let network_int = ip_int & mask;
                 let network = std::net::Ipv6Addr::from(network_int);
-                format!("{}/{}", network, prefix_len)
+                let _ = write!(buf, "{}/{}", network, prefix_len);
             }
         }
     } else {
-        format!("{}/{}", ip_str, prefix_len)
+        let _ = write!(buf, "{}/{}", ip_str, prefix_len);
     }
 }
 

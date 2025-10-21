@@ -1,7 +1,7 @@
 <div style="text-align: center; margin: 2em 0;">
   <picture>
-    <source srcset="../theme/logo-dark.svg" media="(prefers-color-scheme: dark)">
-    <img src="../theme/logo-light.svg" alt="Matchy Logo" style="width: 180px;" />
+    <source srcset="images/logo-dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="images/logo-light.svg" alt="Matchy Logo" style="width: 180px;" />
   </picture>
 </div>
 

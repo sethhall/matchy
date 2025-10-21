@@ -458,6 +458,11 @@ impl<'a> LiteralHash<'a> {
         })
     }
 
+    /// Get the match mode of this literal hash table
+    pub fn mode(&self) -> MatchMode {
+        self.mode
+    }
+
     /// Lookup a literal string using sharded table
     ///
     /// Returns the pattern ID if found, None otherwise

@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`matchy extract` Command** for high-performance pattern extraction from logs
+  - Extract domains, IPv4/IPv6 addresses, and email addresses from unstructured text
+  - Multiple output formats: JSON (NDJSON), CSV, plain text
+  - Configurable extraction types with `--types` flag (ipv4, ipv6, domain, email, all)
+  - Deduplication mode with `--unique` flag
+  - Statistics reporting with `--stats` flag
+  - 200-500 MB/s typical throughput
+  - Example: `matchy extract access.log --types domain,ipv4 --unique > patterns.txt`
+
+- **Parallel Multi-File Processing** for `matchy match`
+  - `-j/--threads` flag for parallel processing (default: auto-detect cores)
+  - 2-8x faster throughput on multi-core systems
+  - Per-worker LRU caches for optimal performance
+  - `--batch-bytes` tuning option for large files
+  - Example: `matchy match threats.mxy *.log -j auto --stats`
+
+- **Follow Mode** for `matchy match`
+  - `-f/--follow` flag for log tailing (like `tail -f`)
+  - Monitors files for changes using file system notifications
+  - Processes new lines immediately as they are written
+  - Supports parallel processing with multiple files
+  - Graceful shutdown on Ctrl+C
+
+- **Live Progress Reporting**
+  - `-p/--progress` flag shows live 3-line progress indicator
+  - Displays lines processed, matches, hit rate, throughput, elapsed time
+  - Candidate breakdown (IPv4, IPv6, domains, emails)
+  - Query rate statistics
+  - Updates in-place on TTY, periodic snapshots on non-TTY
+
+- **Public Suffix List (PSL) Integration**
+  - Embedded PSL data (15,997 entries) for TLD validation
+  - Aho-Corasick automaton for fast TLD matching in domain extraction
+  - Automatic validation of domain TLDs during extraction
+  - Updated to 2025-10-13 PSL snapshot
+
 - **Query Result Caching** for high-throughput workloads
   - Configurable LRU cache with `Database::from().cache_capacity(size)` builder API
   - Disable caching with `Database::from().no_cache()` for memory-constrained environments
@@ -17,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Thread-safe with internal RefCell for zero-cost sharing
   - Example: `benches/cache_bench.rs` demonstrates performance characteristics
 
-- **Pattern Extractor** for log scanning and data extraction
+- **Pattern Extractor API** for log scanning and data extraction
   - SIMD-accelerated extraction of domains, IPv4/IPv6 addresses, and email addresses from unstructured text
   - Zero-copy line scanning with `memchr` for maximum throughput
   - Unicode/IDN domain support with automatic punycode conversion
@@ -25,25 +61,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Word boundary detection for accurate pattern identification
   - Binary log support (extracts ASCII patterns from non-UTF-8 data)
   - 23 comprehensive unit tests covering edge cases
-  - Example usage in `matchy match` command
-
-- **Match Command** for CLI-based log scanning
-  - `matchy match <database> <input-files>` scans logs and reports matches
-  - Automatic pattern extraction from input (domains, IPv4/IPv6 addresses, emails)
-  - JSON output (NDJSON format, one match per line to stdout)
-  - Statistics with `--stats` flag (output to stderr)
-  - Streaming input support for large files and stdin (`-`)
-  - Performance: 200-500 MB/sec on typical log files
+  - IPv6 support added to extraction
 
 ### Performance
+- **AC Automaton Optimizations**
+  - Eliminated allocation in case-insensitive matching path
+  - Memory-locked AC automaton with `mlock()` for 2.4% speedup
+  - Reduced `core::ptr::read` overhead from 12.67% to 9.24%
+  - Improved throughput from ~370 MB/s to ~379 MB/s
+
+- **Case-Insensitive Memory Optimization**
+  - Optimized memory usage for case-insensitive AC automaton
+  - Improved mmap performance
+
+- **Domain Extraction Optimization**
+  - Lookup table-based boundary detection (branch-free, O(1))
+  - SIMD-accelerated TLD scanning with embedded automaton
+  - Direct AC header loading for faster initialization
+  - Buffer reuse in extraction loops
+
+- **Pattern Extraction Performance**
+  - IPv6 filtering optimizations
+  - Pre-allocated buffers for trusted mode
+  - Hot path optimizations in AC matching
+  - SIMD enhancements for pattern matching
+
+- **Parallel Processing**
+  - Sequential mode: 200-500 MB/s throughput
+  - Parallel mode: 400-2000 MB/s depending on core count
+  - 2 cores: ~1.8x speedup
+  - 4 cores: ~3.2x speedup
+  - 8 cores: ~5.5x speedup
+
 - **Caching**: 2-10x query speedup with 80%+ hit rates, zero overhead when disabled
-- **Pattern Extraction**: 200-500 MB/sec log scanning throughput
 - **Unicode TLDs**: Zero-copy domain validation using embedded Aho-Corasick automaton
 
+### Changed
+- **CLI Command Restructuring**
+  - Modularized command implementation in `src/bin/commands/`
+  - Separate modules for each command: build, query, match, extract, inspect, validate, bench
+  - Match processor split into modes: sequential, parallel, batched, follow
+  - Comprehensive CLI integration tests
+
+- **Pattern Extractor API**
+  - Removed `require_valid_tld` field (TLD validation now automatic via PSL)
+  - Upgraded `idna` dependency to 1.0 for Unicode domain handling
+  - Removed URL extraction (focus on domains, IPs, emails)
+
+### Fixed
+- Various clippy warnings and code quality improvements
+- Build warnings from removed dependencies
+
 ### Dependencies
+- Upgraded `idna` to 1.0 for improved Unicode/IDN support
 - Added `memchr = "2.7"` for SIMD-accelerated byte searching
-- Added `idna = "0.5"` for Unicode domain (IDN) to punycode conversion
 - Added `lru = "0.12"` for LRU cache implementation
+- Added `notify = "6.1"` for file system watching (follow mode)
+- Added `ctrlc = "3.4"` for Ctrl+C handling
+- Added `atty = "0.2"` for TTY detection (progress display)
+
+### Internal
+- **AC Automaton Alignment Validation**
+  - Added alignment checks for Aho-Corasick automaton
+  - Ensures ACNode reads are naturally aligned (8-byte boundaries)
+  - Comprehensive testing for alignment correctness
+
+- Removed `literal_mph` module and related minimal perfect hash experiments
 
 ## [1.0.1] - 2025-10-14
 

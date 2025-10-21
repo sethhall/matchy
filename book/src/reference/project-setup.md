@@ -51,5 +51,5 @@ myapp: main.c
 ## See Also
 
 - [C Installation](c-installation.md)
-- [Rust API](../user-guide/rust-api.md)
-- [C API](../user-guide/c-api.md)
+- [Rust API](rust-api.md)
+- [C API](c-api.md)
