@@ -1384,7 +1384,7 @@ impl Paraglob {
         matches: &mut Vec<(usize, u32)>,
         normalized_text_buffer: &RefCell<Vec<u8>>,
     ) {
-        use crate::offset_format::ACNode;
+        use crate::offset_format::ACNodeHot;
 
         if ac_buffer.is_empty() || text.is_empty() {
             return;
@@ -1423,12 +1423,12 @@ impl Paraglob {
                 }
 
                 // Fast path: aligned pointer read for failure link
-                // SAFETY: ACNode is always 8-byte aligned (written at 32-byte intervals)
+                // SAFETY: ACNodeHot is 4-byte aligned (written at 16-byte intervals)
                 let node = unsafe {
-                    if current_offset + mem::size_of::<ACNode>() > ac_buffer.len() {
+                    if current_offset + mem::size_of::<ACNodeHot>() > ac_buffer.len() {
                         break;
                     }
-                    let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNode;
+                    let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNodeHot;
                     ptr.read()
                 };
                 current_offset = node.failure_offset as usize;
@@ -1437,10 +1437,10 @@ impl Paraglob {
             // Collect matches at this position (end of match is pos + 1)
             // SAFETY: Fast path with aligned pointer reads
             let node = unsafe {
-                if current_offset + mem::size_of::<ACNode>() > ac_buffer.len() {
+                if current_offset + mem::size_of::<ACNodeHot>() > ac_buffer.len() {
                     continue;
                 }
-                let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNode;
+                let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNodeHot;
                 ptr.read()
             };
 
@@ -1470,7 +1470,7 @@ impl Paraglob {
         mode: GlobMatchMode,
         matches: &mut HashSet<u32>,
     ) {
-        use crate::offset_format::ACNode;
+        use crate::offset_format::ACNodeHot;
 
         if ac_buffer.is_empty() || text.is_empty() {
             return;
@@ -1507,10 +1507,10 @@ impl Paraglob {
 
                 // SAFETY: Fast path with aligned pointer read
                 let node = unsafe {
-                    if current_offset + mem::size_of::<ACNode>() > ac_buffer.len() {
+                    if current_offset + mem::size_of::<ACNodeHot>() > ac_buffer.len() {
                         break;
                     }
-                    let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNode;
+                    let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNodeHot;
                     ptr.read()
                 };
                 current_offset = node.failure_offset as usize;
@@ -1522,10 +1522,10 @@ impl Paraglob {
             // Collect pattern IDs at this state
             // SAFETY: Fast path with aligned pointer reads
             let node = unsafe {
-                if current_offset + mem::size_of::<ACNode>() > ac_buffer.len() {
+                if current_offset + mem::size_of::<ACNodeHot>() > ac_buffer.len() {
                     continue;
                 }
-                let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNode;
+                let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNodeHot;
                 ptr.read()
             };
 
@@ -1551,17 +1551,17 @@ impl Paraglob {
     /// Uses state-specific encoding for optimal performance
     #[inline(always)]
     fn find_ac_transition(ac_buffer: &[u8], node_offset: usize, ch: u8) -> Option<usize> {
-        use crate::offset_format::{ACNode, StateKind};
+        use crate::offset_format::{ACNodeHot, StateKind};
 
         // Fast path: aligned pointer read (no validation overhead)
         // SAFETY: We validate the offset bounds before casting.
-        // ACNode is 32 bytes and always written at 32-byte intervals (offset 0, 32, 64, ...)
-        // so it's guaranteed to be 8-byte aligned (ACNode alignment requirement).
+        // ACNodeHot is 16 bytes and always written at 16-byte intervals (offset 0, 16, 32, ...)
+        // so it's guaranteed to be 4-byte aligned (ACNodeHot alignment requirement).
         let node = unsafe {
-            if node_offset + mem::size_of::<ACNode>() > ac_buffer.len() {
+            if node_offset + mem::size_of::<ACNodeHot>() > ac_buffer.len() {
                 return None;
             }
-            let ptr = ac_buffer.as_ptr().add(node_offset) as *const ACNode;
+            let ptr = ac_buffer.as_ptr().add(node_offset) as *const ACNodeHot;
             ptr.read()
         };
 

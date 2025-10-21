@@ -178,32 +178,50 @@ impl MmapFile {
         validate_paraglob_header(buffer)
             .map_err(|e| MmapError::InvalidParaglobHeader(e.to_string()))?;
 
-        // Lock AC automaton in RAM for optimal performance
-        // This significantly improves performance by eliminating cache misses
+        // Apply platform-specific memory optimizations
         #[cfg(unix)]
         unsafe {
-            use libc::{madvise, mlock, MADV_RANDOM, MADV_WILLNEED};
-            let ptr = mmap.as_ptr() as *mut libc::c_void;
-            let len = size;
-            
-            // Prefetch entire file into page cache first
-            // This populates the pages before we lock them
-            madvise(ptr, len, MADV_WILLNEED);
-            
-            // Lock pages in physical RAM (guarantees they stay resident)
-            // This prevents the kernel from evicting AC automaton pages
-            // Silently ignore failures (may require elevated permissions)
-            let lock_result = mlock(ptr, len);
-            
-            if lock_result != 0 {
-                // mlock failed (probably permissions), fall back to advisory hints
-                // Tell kernel we'll access this randomly (disable readahead)
-                madvise(ptr, len, MADV_RANDOM);
-            }
-            // If mlock succeeded, pages are pinned - no need for MADV_RANDOM
+            Self::optimize_mmap(&mmap, size);
         }
 
         Ok(MmapFile { mmap, size })
+    }
+
+    /// Apply platform-specific memory optimizations.
+    ///
+    /// Optimizations by platform:
+    /// - **macOS**: Uses 16K pages automatically on Apple Silicon
+    /// - **Linux**: Hints for 2MB transparent huge pages (THP)
+    /// - **All Unix**: Memory locking and prefetching
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the mmap pointer and size are valid.
+    #[cfg(unix)]
+    unsafe fn optimize_mmap(mmap: &Mmap, size: usize) {
+        use libc::{madvise, mlock, MADV_RANDOM, MADV_WILLNEED};
+        
+        let ptr = mmap.as_ptr() as *mut libc::c_void;
+        
+        // Linux-specific: request transparent huge pages (2MB)
+        #[cfg(target_os = "linux")]
+        {
+            const MADV_HUGEPAGE: libc::c_int = 14;
+            madvise(ptr, size, MADV_HUGEPAGE);
+        }
+        
+        // macOS with Apple Silicon automatically uses 16K pages for file mappings
+        // when the size and alignment are appropriate. No explicit hint needed.
+        
+        // Prefetch entire file into page cache (all Unix platforms)
+        madvise(ptr, size, MADV_WILLNEED);
+        
+        // Try to lock pages in RAM (requires elevated permissions)
+        // Falls back gracefully if permission denied
+        if mlock(ptr, size) != 0 {
+            // mlock failed - use random access hint to disable readahead
+            madvise(ptr, size, MADV_RANDOM);
+        }
     }
 
     /// Get a reference to the Paraglob header.
