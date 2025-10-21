@@ -198,7 +198,7 @@ Databases use `mmap()` for:
 
 ## Next Steps
 
-- [Installation Guide](./installation.md) - Detailed setup instructions
-- [Rust API Guide](./user-guide/rust-api.md) - Complete Rust API documentation
-- [C API Guide](./user-guide/c-api.md) - Complete C API documentation
-- [Architecture](./architecture/overview.md) - How Matchy works internally
+- [Installation Guide](getting-started/installation.md) - Detailed setup instructions
+- [Rust API Guide](reference/rust-api.md) - Complete Rust API documentation
+- [C API Guide](reference/c-api.md) - Complete C API documentation
+- [Architecture](architecture/overview.md) - How Matchy works internally

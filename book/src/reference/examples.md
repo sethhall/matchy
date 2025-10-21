@@ -82,6 +82,6 @@ matchy inspect threats.mxy
 
 ## See Also
 
-- [Rust API](../user-guide/rust-api.md)
-- [C API](../user-guide/c-api.md)
-- [CLI Tool](../user-guide/cli.md)
+- [Rust API](rust-api.md)
+- [C API](c-api.md)
+- [CLI Tool](../commands/index.md)

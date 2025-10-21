@@ -42,3 +42,7 @@ perf.data
 # mdbook cmdrun wrapper (generated on build)
 /book/.cmdrun-wrapper/
 # Note: /book/command-outputs/ IS committed to repo
+
+# mdbook build output
+/book/book/
+/book/html/

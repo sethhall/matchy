@@ -58,5 +58,5 @@ gcc myapp.c -o myapp $(pkg-config --cflags --libs matchy)
 
 ## See Also
 
-- [C API](../user-guide/c-api.md)
+- [C API](c-api.md)
 - [Project Setup](project-setup.md)

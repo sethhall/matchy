@@ -143,6 +143,6 @@ Matchy automatically detects entry types:
 
 ## Next Steps
 
-- [Rust API Reference](./user-guide/rust-api.md) - Complete API documentation
-- [Data Types](./user-guide/data-types.md) - All supported data types
-- [Performance Guide](./architecture/performance.md) - Optimization techniques
+- [Rust API Reference](reference/rust-api.md) - Complete API documentation
+- [Data Types](guide/data-types.md) - All supported data types
+- [Performance Guide](guide/performance.md) - Optimization techniques

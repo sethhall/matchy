@@ -7,7 +7,7 @@ title = "Matchy Documentation"
 description = "Documentation for Matchy - Fast database for IP address and string matching"
 
 [build]
-build-dir = "book"
+build-dir = "html"
 create-missing = false
 
 [output.html]

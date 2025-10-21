@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="book/theme/logo-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="book/theme/logo-light.svg">
-    <img alt="Matchy Logo" src="book/theme/logo-light.svg" width="200">
+    <source media="(prefers-color-scheme: dark)" srcset="book/src/images/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="book/src/images/logo-light.svg">
+    <img alt="Matchy Logo" src="book/src/images/logo-light.svg" width="200">
   </picture>
 </p>
 
