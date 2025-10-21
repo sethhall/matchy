@@ -68,10 +68,6 @@ dhat-heap = []
 name = "matchy"
 path = "src/bin/matchy.rs"
 
-[[bin]]
-name = "update-psl"
-path = "src/bin/update-psl.rs"
-
 [dependencies]
 # Keep minimal initially - add as needed
 libc = "0.2"

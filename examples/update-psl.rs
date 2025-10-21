@@ -1,6 +1,12 @@
 //! Update Public Suffix List AC automaton from upstream
 //!
-//! Run with: cargo update-psl
+//! **DEVELOPMENT TOOL ONLY** - This tool downloads and processes the Public Suffix List
+//! (PSL) to update the pre-built Aho-Corasick automaton used for TLD matching.
+//!
+//! This is NOT part of the matchy library API and is only used during development
+//! to refresh the TLD patterns in `src/data/tld_automaton.ac`.
+//!
+//! Run with: `cargo run --example update-psl`
 
 use matchy::glob::MatchMode;
 use matchy::paraglob_offset::Paraglob;
