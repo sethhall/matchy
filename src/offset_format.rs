@@ -39,8 +39,11 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 /// Magic bytes identifying Paraglob binary format
 pub const MAGIC: &[u8; 8] = b"PARAGLOB";
 
-/// Current format version (v3: adds AC literal mapping for zero-copy loading)
-pub const VERSION: u32 = 3;
+/// Current format version (v4: uses ACNodeHot for 50% memory reduction)
+pub const VERSION: u32 = 4;
+
+/// Previous format version (v3: adds AC literal mapping for zero-copy loading)
+pub const VERSION_V3: u32 = 3;
 
 /// Previous format version (v2: adds data section support)
 pub const VERSION_V2: u32 = 2;
@@ -57,13 +60,14 @@ pub const VERSION_V1: u32 = 1;
 /// - v1 (72 bytes): Original format, patterns only
 /// - v2 (96 bytes): Adds data section support for pattern-associated data
 /// - v3 (104 bytes): Adds AC literal mapping for O(1) zero-copy loading
+/// - v4 (104 bytes): Uses ACNodeHot (16-byte) instead of ACNode (32-byte) - BREAKING
 #[repr(C)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct ParaglobHeader {
     /// Magic bytes: "PARAGLOB"
     pub magic: [u8; 8],
 
-    /// Format version (currently 3)
+    /// Format version (currently 4)
     pub version: u32,
 
     /// Match mode: 0=CaseSensitive, 1=CaseInsensitive
@@ -487,7 +491,7 @@ impl ParaglobHeader {
             return Err("Invalid magic bytes");
         }
         if self.version != VERSION {
-            return Err("Unsupported version - only v3 format supported");
+            return Err("Unsupported version - only v4 format supported");
         }
         Ok(())
     }
@@ -799,11 +803,14 @@ mod tests {
         header.version = 999;
         assert!(header.validate().is_err());
 
-        // Only v3 is valid
+        // Only v4 is valid
         header.version = VERSION_V1;
         assert!(header.validate().is_err());
 
         header.version = VERSION_V2;
+        assert!(header.validate().is_err());
+
+        header.version = VERSION_V3;
         assert!(header.validate().is_err());
 
         header.version = VERSION;
@@ -847,7 +854,7 @@ mod tests {
         let read_header: ParaglobHeader = unsafe { read_struct(&buffer, 0) };
         assert_eq!(read_header.magic, *MAGIC);
         assert_eq!(read_header.version, VERSION);
-        assert_eq!(read_header.version, 3);
+        assert_eq!(read_header.version, 4);
     }
 
     #[test]

@@ -38,7 +38,7 @@
 use crate::error::{ParaglobError, Result};
 use crate::offset_format::{
     ACEdge, ACNodeHot, MetaWordMapping, ParaglobHeader, PatternDataMapping, PatternEntry,
-    StateKind, MAGIC, VERSION, VERSION_V1, VERSION_V2,
+    StateKind, MAGIC, VERSION, VERSION_V1, VERSION_V2, VERSION_V3,
 };
 use std::collections::HashSet;
 use std::fs::File;
@@ -1046,7 +1046,12 @@ fn validate_paraglob_header(buffer: &[u8], report: &mut ValidationReport) -> Res
     // Check version
     match header.version {
         VERSION => {
-            report.info("Format version: v3 (latest - with AC literal mapping)");
+            report.info("Format version: v4 (latest - ACNodeHot for 50% memory reduction)");
+        }
+        VERSION_V3 => {
+            report.warning(
+                "Format version: v3 (older - uses 32-byte ACNode, no longer supported)",
+            );
         }
         VERSION_V2 => {
             report.warning(
@@ -1057,7 +1062,7 @@ fn validate_paraglob_header(buffer: &[u8], report: &mut ValidationReport) -> Res
             report.warning("Format version: v1 (oldest - no data section, no AC literal mapping)");
         }
         v => {
-            report.error(format!("Unsupported version: {} (expected 1, 2, or 3)", v));
+            report.error(format!("Unsupported version: {} (expected 1, 2, 3, or 4)", v));
             return Ok(());
         }
     }

@@ -66,9 +66,14 @@ namespace matchy {
 #define LITERAL_HASH_VERSION 1
 
 /*
- Current format version (v3: adds AC literal mapping for zero-copy loading)
+ Current format version (v4: uses ACNodeHot for 50% memory reduction)
  */
-#define VERSION 3
+#define VERSION 4
+
+/*
+ Previous format version (v3: adds AC literal mapping for zero-copy loading)
+ */
+#define VERSION_V3 3
 
 /*
  Previous format version (v2: adds data section support)
