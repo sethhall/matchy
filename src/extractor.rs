@@ -123,6 +123,8 @@ pub enum HashType {
     Sha1,
     /// SHA256 hash (64 hex characters)
     Sha256,
+    /// SHA384 hash (96 hex characters)
+    Sha384,
 }
 
 impl HashType {
@@ -132,6 +134,7 @@ impl HashType {
             32 => Some(HashType::Md5),
             40 => Some(HashType::Sha1),
             64 => Some(HashType::Sha256),
+            96 => Some(HashType::Sha384),
             _ => None,
         }
     }
@@ -142,6 +145,7 @@ impl HashType {
             HashType::Md5 => 32,
             HashType::Sha1 => 40,
             HashType::Sha256 => 64,
+            HashType::Sha384 => 96,
         }
     }
 
@@ -2249,8 +2253,7 @@ mod tests {
     fn test_hash_extraction_sha256() {
         let extractor = Extractor::new().unwrap();
 
-        let line =
-            b"SHA256: 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae detected";
+        let line = b"SHA256: 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae detected";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
 
         let hashes: Vec<(&str, HashType)> = matches
@@ -2263,10 +2266,27 @@ mod tests {
 
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0].1, HashType::Sha256);
-        assert_eq!(
-            hashes[0].0,
-            "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
-        );
+        assert_eq!(hashes[0].0, "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae");
+    }
+
+    #[test]
+    fn test_hash_extraction_sha384() {
+        let extractor = Extractor::new().unwrap();
+
+        let line = b"SHA384: cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7 verified";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].1, HashType::Sha384);
+        assert_eq!(hashes[0].0, "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7");
     }
 
     #[test]

@@ -91,6 +91,8 @@ pub struct WorkerStats {
     pub sha1_count: usize,
     /// SHA256 hashes found
     pub sha256_count: usize,
+    /// SHA384 hashes found
+    pub sha384_count: usize,
 }
 
 /// Core match result without file/line context
@@ -341,6 +343,7 @@ impl Worker {
                     HashType::Md5 => self.stats.md5_count += 1,
                     HashType::Sha1 => self.stats.sha1_count += 1,
                     HashType::Sha256 => self.stats.sha256_count += 1,
+                    HashType::Sha384 => self.stats.sha384_count += 1,
                 },
             }
 
@@ -379,6 +382,7 @@ impl Worker {
                             HashType::Md5 => "MD5",
                             HashType::Sha1 => "SHA1",
                             HashType::Sha256 => "SHA256",
+                            HashType::Sha384 => "SHA384",
                         },
                     };
 

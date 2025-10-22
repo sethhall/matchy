@@ -1,6 +1,6 @@
 # Pattern Extraction
 
-Matchy includes a high-performance pattern extractor for finding domains, IP addresses (IPv4 and IPv6), email addresses, and file hashes (MD5, SHA1, SHA256) in unstructured text like log files.
+Matchy includes a high-performance pattern extractor for finding domains, IP addresses (IPv4 and IPv6), email addresses, and file hashes (MD5, SHA1, SHA256, SHA384) in unstructured text like log files.
 
 ## Overview
 
@@ -154,6 +154,7 @@ for match_item in extractor.extract_from_line(line) {
 - **MD5**: 32 hex characters (e.g., `5d41402abc4b2a76b9719d911017c592`)
 - **SHA1**: 40 hex characters (e.g., `2fd4e1c67a2d28fced849ee1bb76e7391b93eb12`)
 - **SHA256**: 64 hex characters (e.g., `2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae`)
+- **SHA384**: 96 hex characters (e.g., `cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7`)
 
 ## Configuration
 
@@ -180,7 +181,7 @@ let extractor = Extractor::builder()
 | `extract_ipv4` | `true` | Extract IPv4 addresses |
 | `extract_ipv6` | `true` | Extract IPv6 addresses |
 | `extract_emails` | `true` | Extract email addresses |
-| `extract_hashes` | `true` | Extract file hashes (MD5, SHA1, SHA256) |
+| `extract_hashes` | `true` | Extract file hashes (MD5, SHA1, SHA256, SHA384) |
 | `min_domain_labels` | `2` | Minimum labels (2 = example.com, 3 = api.example.com) |
 | `require_word_boundaries` | `true` | Ensure patterns have word boundaries |
 
