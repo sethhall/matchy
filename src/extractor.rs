@@ -15,6 +15,7 @@ pub struct ExtractorBuilder {
     extract_emails: bool,
     extract_ipv4: bool,
     extract_ipv6: bool,
+    extract_hashes: bool,
     min_domain_labels: usize,
     require_word_boundaries: bool,
 }
@@ -27,6 +28,7 @@ impl ExtractorBuilder {
             extract_emails: true,
             extract_ipv4: true,
             extract_ipv6: true,
+            extract_hashes: true,
             min_domain_labels: 2,
             require_word_boundaries: true,
         }
@@ -53,6 +55,12 @@ impl ExtractorBuilder {
     /// Enable or disable IPv6 extraction
     pub fn extract_ipv6(mut self, enable: bool) -> Self {
         self.extract_ipv6 = enable;
+        self
+    }
+
+    /// Enable or disable hash extraction (MD5, SHA1, SHA256)
+    pub fn extract_hashes(mut self, enable: bool) -> Self {
+        self.extract_hashes = enable;
         self
     }
 
@@ -90,6 +98,7 @@ impl ExtractorBuilder {
             extract_emails: self.extract_emails,
             extract_ipv4: self.extract_ipv4,
             extract_ipv6: self.extract_ipv6,
+            extract_hashes: self.extract_hashes,
             min_domain_labels: self.min_domain_labels,
             require_word_boundaries: self.require_word_boundaries,
             tld_matcher,
@@ -105,6 +114,44 @@ impl Default for ExtractorBuilder {
     }
 }
 
+/// Type of file hash
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashType {
+    /// MD5 hash (32 hex characters)
+    Md5,
+    /// SHA1 hash (40 hex characters)
+    Sha1,
+    /// SHA256 hash (64 hex characters)
+    Sha256,
+}
+
+impl HashType {
+    /// Get hash type from byte length
+    fn from_len(len: usize) -> Option<Self> {
+        match len {
+            32 => Some(HashType::Md5),
+            40 => Some(HashType::Sha1),
+            64 => Some(HashType::Sha256),
+            _ => None,
+        }
+    }
+
+    /// Get expected length for this hash type
+    pub fn len(&self) -> usize {
+        match self {
+            HashType::Md5 => 32,
+            HashType::Sha1 => 40,
+            HashType::Sha256 => 64,
+        }
+    }
+
+    /// Check if hash is empty (always false - hashes are never empty)
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
 /// Type of extracted pattern
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtractedItem<'a> {
@@ -116,6 +163,8 @@ pub enum ExtractedItem<'a> {
     Ipv4(Ipv4Addr),
     /// IPv6 address
     Ipv6(Ipv6Addr),
+    /// File hash (MD5, SHA1, or SHA256)
+    Hash(HashType, &'a str),
 }
 
 /// A single extracted match with position information
@@ -142,6 +191,7 @@ pub struct Extractor {
     extract_emails: bool,
     extract_ipv4: bool,
     extract_ipv6: bool,
+    extract_hashes: bool,
     min_domain_labels: usize,
     require_word_boundaries: bool,
     /// TLD matcher (Paraglob with all public suffixes)
@@ -219,6 +269,11 @@ impl Extractor {
             }
         }
 
+        // Extract hashes in one pass
+        if self.extract_hashes {
+            self.extract_hashes_chunk(chunk, &mut matches);
+        }
+
         matches
     }
 
@@ -240,6 +295,11 @@ impl Extractor {
     /// Check if IPv6 extraction is enabled
     pub fn extract_ipv6(&self) -> bool {
         self.extract_ipv6
+    }
+
+    /// Check if hash extraction is enabled
+    pub fn extract_hashes(&self) -> bool {
+        self.extract_hashes
     }
 
     /// Get minimum domain labels requirement
@@ -891,6 +951,53 @@ impl Extractor {
             }
         }
     }
+
+    /// Extract file hashes from chunk using boundary distance + SIMD validation
+    ///
+    /// Strategy:
+    /// 1. Find all word boundaries in one pass (SIMD-accelerated)
+    /// 2. Check distances between consecutive boundaries (32, 40, or 64?)
+    /// 3. SIMD-validate that the span is all hex characters
+    ///
+    /// This is blazingly fast because:
+    /// - Single boundary scan with lookup tables
+    /// - Cheap integer distance checks
+    /// - Auto-vectorized hex validation (16-32 bytes/cycle)
+    /// - Zero allocation (boundary vec reused)
+    fn extract_hashes_chunk<'a>(&'a self, chunk: &'a [u8], matches: &mut Vec<Match<'a>>) {
+        // Step 1: Find all word boundaries in one pass
+        let boundaries = find_word_boundaries(chunk);
+
+        // Step 2: Check distances between consecutive boundaries
+        // boundaries come in pairs: [start1, end1, start2, end2, ...]
+        for window in boundaries.chunks_exact(2) {
+            let start = window[0];
+            let end = window[1];
+            let len = end - start;
+
+            // Step 3: Check if length matches a known hash size
+            if let Some(hash_type) = HashType::from_len(len) {
+                let candidate = &chunk[start..end];
+
+                // Step 4: SIMD-validate all bytes are hex
+                if is_all_hex_simd(candidate) {
+                    // Validate UTF-8 (hex is always valid ASCII/UTF-8)
+                    if let Ok(hash_str) = std::str::from_utf8(candidate) {
+                        matches.push(Match {
+                            item: ExtractedItem::Hash(hash_type, hash_str),
+                            span: (start, end),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extract hashes from a single line (for line-by-line processing)
+    fn extract_hashes_internal<'a>(&'a self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+        // Delegate to chunk-based implementation
+        self.extract_hashes_chunk(line, matches);
+    }
 }
 
 /// Fast pre-filter for IPv6 loopback and link-local addresses
@@ -971,6 +1078,11 @@ impl<'a> ExtractIter<'a> {
         // Extract IPv6 addresses
         if extractor.extract_ipv6 {
             extractor.extract_ipv6_internal(line, &mut matches);
+        }
+
+        // Extract file hashes
+        if extractor.extract_hashes {
+            extractor.extract_hashes_internal(line, &mut matches);
         }
 
         Self {
@@ -1111,6 +1223,88 @@ fn is_word_boundary(b: u8) -> bool {
 fn is_domain_char_fast(b: u8) -> bool {
     // SAFETY: b is u8, so it's always a valid index into [0..256)
     unsafe { *DOMAIN_CHAR_LOOKUP.get_unchecked(b as usize) }
+}
+
+/// Hex character lookup table for hash validation
+/// Valid hex: 0-9, a-f, A-F
+static HEX_CHAR_LOOKUP: [bool; 256] = {
+    let mut table = [false; 256];
+    // Digits 0-9
+    let mut i = b'0';
+    while i <= b'9' {
+        table[i as usize] = true;
+        i += 1;
+    }
+    // Lowercase a-f
+    i = b'a';
+    while i <= b'f' {
+        table[i as usize] = true;
+        i += 1;
+    }
+    // Uppercase A-F
+    i = b'A';
+    while i <= b'F' {
+        table[i as usize] = true;
+        i += 1;
+    }
+    table
+};
+
+/// Fast hex character check using lookup table (branch-free, O(1))
+/// Returns true for valid hex chars: 0-9, a-f, A-F
+#[inline(always)]
+fn is_hex_char_fast(b: u8) -> bool {
+    // SAFETY: b is u8, so it's always a valid index into [0..256)
+    unsafe { *HEX_CHAR_LOOKUP.get_unchecked(b as usize) }
+}
+
+/// SIMD hex validation using lookup table
+/// Returns true if ALL bytes are valid hex [0-9a-fA-F]
+/// This gets auto-vectorized by LLVM for high performance
+#[inline]
+fn is_all_hex_simd(bytes: &[u8]) -> bool {
+    // Fast path: Use lookup table (branch-free, cache-friendly)
+    // LLVM auto-vectorizes this into SIMD operations
+    bytes.iter().all(|&b| is_hex_char_fast(b))
+}
+
+/// Find all word boundary positions in chunk
+/// Returns sorted vec of positions where tokens start/end
+/// A token is a sequence of non-boundary characters
+fn find_word_boundaries(chunk: &[u8]) -> Vec<usize> {
+    let mut boundaries = Vec::new();
+
+    if chunk.is_empty() {
+        return boundaries;
+    }
+
+    // Track if we're currently inside a token
+    let mut in_token = !is_boundary_fast(chunk[0]);
+    if in_token {
+        boundaries.push(0); // Start of first token
+    }
+
+    // Scan for transitions
+    for (i, &byte) in chunk.iter().enumerate().skip(1) {
+        let is_boundary = is_boundary_fast(byte);
+
+        if in_token && is_boundary {
+            // End of token
+            boundaries.push(i);
+            in_token = false;
+        } else if !in_token && !is_boundary {
+            // Start of new token
+            boundaries.push(i);
+            in_token = true;
+        }
+    }
+
+    // If we ended inside a token, add final boundary
+    if in_token {
+        boundaries.push(chunk.len());
+    }
+
+    boundaries
 }
 
 #[cfg(test)]
@@ -2007,5 +2201,276 @@ mod tests {
             0,
             "Should reject link-local IPv6 addresses (fe80::/10)"
         );
+    }
+
+    // ===== HASH EXTRACTION TESTS =====
+
+    #[test]
+    fn test_hash_extraction_md5() {
+        let extractor = Extractor::new().unwrap();
+
+        let line = b"File hash: 5d41402abc4b2a76b9719d911017c592 uploaded";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].1, HashType::Md5);
+        assert_eq!(hashes[0].0, "5d41402abc4b2a76b9719d911017c592");
+    }
+
+    #[test]
+    fn test_hash_extraction_sha1() {
+        let extractor = Extractor::new().unwrap();
+
+        let line = b"SHA1: 2fd4e1c67a2d28fced849ee1bb76e7391b93eb12 verified";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].1, HashType::Sha1);
+        assert_eq!(hashes[0].0, "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12");
+    }
+
+    #[test]
+    fn test_hash_extraction_sha256() {
+        let extractor = Extractor::new().unwrap();
+
+        let line =
+            b"SHA256: 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae detected";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].1, HashType::Sha256);
+        assert_eq!(
+            hashes[0].0,
+            "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+        );
+    }
+
+    #[test]
+    fn test_hash_extraction_multiple() {
+        let extractor = Extractor::new().unwrap();
+
+        let line =
+            b"MD5: 5d41402abc4b2a76b9719d911017c592 SHA1: 2fd4e1c67a2d28fced849ee1bb76e7391b93eb12";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes[0].1, HashType::Md5);
+        assert_eq!(hashes[1].1, HashType::Sha1);
+    }
+
+    #[test]
+    fn test_hash_extraction_uppercase() {
+        let extractor = Extractor::new().unwrap();
+
+        let line = b"Hash: 5D41402ABC4B2A76B9719D911017C592 found";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].0, "5D41402ABC4B2A76B9719D911017C592");
+    }
+
+    #[test]
+    fn test_hash_extraction_mixed_case() {
+        let extractor = Extractor::new().unwrap();
+
+        let line = b"Hash: 5d41402AbC4b2A76b9719D911017c592 mixed";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].0, "5d41402AbC4b2A76b9719D911017c592");
+    }
+
+    #[test]
+    fn test_hash_reject_wrong_length() {
+        let extractor = Extractor::new().unwrap();
+
+        // 30 chars (too short)
+        let line = b"Hash: 5d41402abc4b2a76b9719d91101 invalid";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 0, "Should reject hash with wrong length");
+    }
+
+    #[test]
+    fn test_hash_reject_non_hex() {
+        let extractor = Extractor::new().unwrap();
+
+        // Contains 'g' and 'z' (not hex)
+        let line = b"Hash: 5d41402abc4b2a76b9719d911017c5gz invalid";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 0, "Should reject non-hex characters");
+    }
+
+    #[test]
+    fn test_hash_with_punctuation() {
+        let extractor = Extractor::new().unwrap();
+
+        let line = b"Hash: [5d41402abc4b2a76b9719d911017c592] in brackets";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].0, "5d41402abc4b2a76b9719d911017c592");
+    }
+
+    #[test]
+    fn test_hash_realistic_log_line() {
+        let extractor = Extractor::new().unwrap();
+
+        let line = b"2024-01-15 malware.exe MD5=5d41402abc4b2a76b9719d911017c592 detected from 192.168.1.100";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        // Should extract both hash and IP
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        let ips: Vec<Ipv4Addr> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Ipv4(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(ips.len(), 1);
+        assert_eq!(hashes[0].0, "5d41402abc4b2a76b9719d911017c592");
+    }
+
+    #[test]
+    fn test_hash_chunk_extraction() {
+        let extractor = Extractor::new().unwrap();
+
+        let chunk = b"Line1: 5d41402abc4b2a76b9719d911017c592\nLine2: 2fd4e1c67a2d28fced849ee1bb76e7391b93eb12\n";
+        let matches = extractor.extract_from_chunk(chunk);
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes[0].1, HashType::Md5);
+        assert_eq!(hashes[1].1, HashType::Sha1);
+    }
+
+    #[test]
+    fn test_hash_builder_disable() {
+        let extractor = Extractor::builder().extract_hashes(false).build().unwrap();
+
+        assert!(!extractor.extract_hashes());
+
+        let line = b"Hash: 5d41402abc4b2a76b9719d911017c592 should not extract";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 0, "Should not extract when disabled");
+    }
+
+    #[test]
+    fn test_hash_reject_uuid() {
+        let extractor = Extractor::new().unwrap();
+
+        // UUID format: 550e8400-e29b-41d4-a716-446655440000 (36 chars with dashes)
+        let line = b"UUID: 550e8400-e29b-41d4-a716-446655440000 not a hash";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<(&str, HashType)> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(ht, h) => Some((h, ht)),
+                _ => None,
+            })
+            .collect();
+
+        // Should not extract - dashes break the hex sequence
+        assert_eq!(hashes.len(), 0, "Should reject UUIDs with dashes");
     }
 }

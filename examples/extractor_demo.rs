@@ -120,6 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             matchy::extractor::ExtractedItem::Ipv4(_) => "IPv4",
             matchy::extractor::ExtractedItem::Ipv6(_) => "IPv6",
             matchy::extractor::ExtractedItem::Email(_) => "Email",
+            matchy::extractor::ExtractedItem::Hash(_, _) => "Hash",
         };
         println!("     - {} ({})", match_item.as_str(log), type_name);
     }

@@ -41,7 +41,7 @@
 //!
 //! Build your own parallel pipeline using channels and thread pools with these primitives.
 
-use crate::extractor::{ExtractedItem, Extractor};
+use crate::extractor::{ExtractedItem, Extractor, HashType};
 use crate::{Database, QueryResult};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -85,6 +85,12 @@ pub struct WorkerStats {
     pub domain_count: usize,
     /// Email addresses found
     pub email_count: usize,
+    /// MD5 hashes found
+    pub md5_count: usize,
+    /// SHA1 hashes found
+    pub sha1_count: usize,
+    /// SHA256 hashes found
+    pub sha256_count: usize,
 }
 
 /// Core match result without file/line context
@@ -331,6 +337,11 @@ impl Worker {
                 ExtractedItem::Ipv6(_) => self.stats.ipv6_count += 1,
                 ExtractedItem::Domain(_) => self.stats.domain_count += 1,
                 ExtractedItem::Email(_) => self.stats.email_count += 1,
+                ExtractedItem::Hash(hash_type, _) => match hash_type {
+                    HashType::Md5 => self.stats.md5_count += 1,
+                    HashType::Sha1 => self.stats.sha1_count += 1,
+                    HashType::Sha256 => self.stats.sha256_count += 1,
+                },
             }
 
             // Lookup in all databases
@@ -348,7 +359,9 @@ impl Worker {
                             .map_err(|e| e.to_string())?;
                         (result, ip.to_string())
                     }
-                    ExtractedItem::Domain(s) | ExtractedItem::Email(s) => {
+                    ExtractedItem::Domain(s)
+                    | ExtractedItem::Email(s)
+                    | ExtractedItem::Hash(_, s) => {
                         let result = database.lookup(s).map_err(|e| e.to_string())?;
                         (result, s.to_string())
                     }
@@ -362,6 +375,11 @@ impl Worker {
                         ExtractedItem::Ipv6(_) => "IPv6",
                         ExtractedItem::Domain(_) => "Domain",
                         ExtractedItem::Email(_) => "Email",
+                        ExtractedItem::Hash(hash_type, _) => match hash_type {
+                            HashType::Md5 => "MD5",
+                            HashType::Sha1 => "SHA1",
+                            HashType::Sha256 => "SHA256",
+                        },
                     };
 
                     results.push(MatchResult {

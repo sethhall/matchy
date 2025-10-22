@@ -107,6 +107,7 @@ pub fn process_file(
                     matchy::extractor::ExtractedItem::Ipv6(_) => stats.ipv6_count += 1,
                     matchy::extractor::ExtractedItem::Domain(_) => stats.domain_count += 1,
                     matchy::extractor::ExtractedItem::Email(_) => stats.email_count += 1,
+                    matchy::extractor::ExtractedItem::Hash(_, _) => {}
                 }
             }
 
@@ -124,8 +125,9 @@ pub fn process_file(
                 matchy::extractor::ExtractedItem::Ipv6(ip) => {
                     (db.lookup_ip(IpAddr::V6(ip))?, ip.to_string())
                 }
-                matchy::extractor::ExtractedItem::Domain(s) => (db.lookup(s)?, s.to_string()),
-                matchy::extractor::ExtractedItem::Email(s) => (db.lookup(s)?, s.to_string()),
+                matchy::extractor::ExtractedItem::Domain(s)
+                | matchy::extractor::ExtractedItem::Email(s)
+                | matchy::extractor::ExtractedItem::Hash(_, s) => (db.lookup(s)?, s.to_string()),
             };
             if let Some(start) = lookup_start {
                 stats.lookup_time += start.elapsed();
@@ -287,6 +289,7 @@ pub fn process_file_with_aggregate(
                 matchy::extractor::ExtractedItem::Ipv6(_) => aggregate_stats.ipv6_count += 1,
                 matchy::extractor::ExtractedItem::Domain(_) => aggregate_stats.domain_count += 1,
                 matchy::extractor::ExtractedItem::Email(_) => aggregate_stats.email_count += 1,
+                matchy::extractor::ExtractedItem::Hash(_, _) => {}
             }
 
             // Lookup candidate
@@ -306,8 +309,9 @@ pub fn process_file_with_aggregate(
                 matchy::extractor::ExtractedItem::Ipv6(ip) => {
                     (db.lookup_ip(IpAddr::V6(ip))?, ip.to_string())
                 }
-                matchy::extractor::ExtractedItem::Domain(s) => (db.lookup(s)?, s.to_string()),
-                matchy::extractor::ExtractedItem::Email(s) => (db.lookup(s)?, s.to_string()),
+                matchy::extractor::ExtractedItem::Domain(s)
+                | matchy::extractor::ExtractedItem::Email(s)
+                | matchy::extractor::ExtractedItem::Hash(_, s) => (db.lookup(s)?, s.to_string()),
             };
             if let Some(start) = lookup_start {
                 aggregate_stats.lookup_time += start.elapsed();
@@ -411,8 +415,9 @@ pub fn process_line_matches(
             matchy::extractor::ExtractedItem::Ipv6(ip) => {
                 (db.lookup_ip(IpAddr::V6(ip))?, ip.to_string())
             }
-            matchy::extractor::ExtractedItem::Domain(s) => (db.lookup(s)?, s.to_string()),
-            matchy::extractor::ExtractedItem::Email(s) => (db.lookup(s)?, s.to_string()),
+            matchy::extractor::ExtractedItem::Domain(s)
+            | matchy::extractor::ExtractedItem::Email(s)
+            | matchy::extractor::ExtractedItem::Hash(_, s) => (db.lookup(s)?, s.to_string()),
         };
 
         let is_match = match &result {

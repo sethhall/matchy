@@ -241,6 +241,7 @@ fn process_file<W: Write>(
                     ExtractedItem::Ipv6(_) => "IPv6",
                     ExtractedItem::Domain(_) => "Domain",
                     ExtractedItem::Email(_) => "Email",
+                    ExtractedItem::Hash(_, _) => "Hash",
                 };
                 eprintln!(
                     "[CANDIDATE] {} at {}-{}: {}",
@@ -263,6 +264,7 @@ fn process_file<W: Write>(
                         ExtractedItem::Ipv6(_) => "ipv6",
                         ExtractedItem::Domain(_) => "domain",
                         ExtractedItem::Email(_) => "email",
+                        ExtractedItem::Hash(_, _) => "hash",
                     };
                     writeln!(
                         writer,
@@ -277,6 +279,7 @@ fn process_file<W: Write>(
                         ExtractedItem::Ipv6(_) => "ipv6",
                         ExtractedItem::Domain(_) => "domain",
                         ExtractedItem::Email(_) => "email",
+                        ExtractedItem::Hash(_, _) => "hash",
                     };
                     writeln!(
                         writer,
@@ -297,6 +300,7 @@ fn process_file<W: Write>(
                 ExtractedItem::Ipv6(_) => stats.ipv6_count += 1,
                 ExtractedItem::Domain(_) => stats.domain_count += 1,
                 ExtractedItem::Email(_) => stats.email_count += 1,
+                ExtractedItem::Hash(_, _) => {} // Hashes don't have separate stats yet
             }
         }
     }
