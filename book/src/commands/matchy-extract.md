@@ -1,6 +1,6 @@
 # matchy extract
 
-Extract patterns (domains, IPs, emails) from log files or unstructured text.
+Extract patterns (domains, IPs, emails, hashes, cryptocurrency addresses) from log files or unstructured text.
 
 ## Synopsis
 
@@ -10,7 +10,7 @@ matchy extract [OPTIONS] <INPUT>...
 
 ## Description
 
-The `matchy extract` command scans log files or streams to automatically extract IP addresses, domain names, and email addresses from unstructured text. This is useful for:
+The `matchy extract` command scans log files or streams to automatically extract IP addresses, domain names, email addresses, file hashes, and cryptocurrency addresses from unstructured text. This is useful for:
 
 - Generating threat intelligence feeds from logs
 - Building input lists for `matchy build`
@@ -69,6 +69,11 @@ Comma-separated extraction types (default: `all`):
 - `ip` - Both IPv4 and IPv6
 - `domain` or `domains` - Domain names
 - `email` or `emails` - Email addresses
+- `hash` or `hashes` - File hashes (MD5, SHA1, SHA256, SHA384)
+- `bitcoin` or `btc` - Bitcoin addresses (all formats)
+- `ethereum` or `eth` - Ethereum addresses
+- `monero` or `xmr` - Monero addresses
+- `crypto` - All cryptocurrency addresses
 - `all` - Extract everything (default)
 
 ```console
@@ -288,6 +293,41 @@ Extracts email addresses with format validation:
 - `user@example.com`
 - `first.last@subdomain.example.org`
 - `admin+tag@example.net`
+
+### File Hashes
+
+Extracts common cryptographic hashes:
+- **MD5**: 32 hex characters (e.g., `5d41402abc4b2a76b9719d911017c592`)
+- **SHA1**: 40 hex characters (e.g., `2fd4e1c67a2d28fced849ee1bb76e7391b93eb12`)
+- **SHA256**: 64 hex characters
+- **SHA384**: 96 hex characters
+
+Useful for malware analysis and threat intelligence feeds.
+
+### Cryptocurrency Addresses
+
+Extracts blockchain addresses with checksum validation:
+
+**Bitcoin (all formats):**
+- Legacy (P2PKH): `1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa`
+- P2SH: `3Cbq7aT1tY8kMxWLbitaG7yT6bPbKChq64`
+- Bech32 (SegWit): `bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq`
+
+**Ethereum:**
+- Format: `0x5aeda56215b167893e80b4fe645ba6d5bab767de` (42 chars)
+- Validates EIP-55 checksum for mixed-case addresses
+- Accepts all-lowercase addresses without checksum
+
+**Monero:**
+- Standard addresses starting with `4` or `8` (~95 characters)
+- Integrated addresses (~106 characters)
+
+**Validation:** All addresses are validated with cryptographic checksums:
+- Bitcoin: Base58Check (double SHA256) or Bech32
+- Ethereum: Keccak256-based EIP-55 checksum
+- Monero: Keccak256 checksum
+
+Useful for ransomware analysis, fraud investigation, and darknet marketplace intelligence.
 
 ## Performance
 

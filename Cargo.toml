@@ -89,6 +89,10 @@ notify = "6.1"  # File system watching for log tailing
 ctrlc = "3.4"  # Cross-platform Ctrl+C handling
 atty = "0.2"  # TTY detection for progress display
 flate2 = "1.0"  # Gzip compression/decompression support
+bs58 = "0.5"  # Base58 encoding/decoding for Bitcoin/Monero addresses
+sha2 = "0.10"  # SHA256 for Bitcoin checksum validation
+tiny-keccak = { version = "2.0", features = ["keccak"] }  # Keccak256 for Ethereum checksum validation
+bech32 = "0.11"  # Bech32 encoding for Bitcoin SegWit addresses
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef"] }
 

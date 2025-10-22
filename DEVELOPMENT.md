@@ -256,6 +256,88 @@ Offset-based with mmap:
 
 This approach provides a stable C API that can be consumed from any language.
 
+## Pattern Extraction (`src/extractor.rs`)
+
+Matchy includes a high-performance pattern extraction module for scanning logs and text data. The extractor uses SIMD-accelerated algorithms to identify structured patterns in unstructured text.
+
+### Supported Pattern Types
+
+| Pattern Type | Example | Detection Method | Validation |
+|--------------|---------|------------------|------------|
+| **IPv4** | `192.168.1.1` | memchr for dots + range check | Octet validation (0-255) |
+| **IPv6** | `2001:db8::1` | memchr for `::` + hex validation | Standard library parser |
+| **Domain** | `example.com` | AC match against PSL + boundary scan | TLD validation via Public Suffix List |
+| **Email** | `user@example.com` | memchr for `@` + TLD validation | RFC-like checks + PSL TLD |
+| **Hashes** | `5d41402abc...` | Word boundaries + hex validation | Length check (MD5/SHA1/SHA256/SHA384) |
+| **Bitcoin** | `1A1zP1eP...`, `3Cbq7a...`, `bc1q...` | Word boundaries + prefix check | Base58Check, Bech32 checksum |
+| **Ethereum** | `0x5aeda562...` | memchr for `0x` + hex validation | EIP-55 checksum (mixed-case) |
+| **Monero** | `44AFFq5k...` | Word boundaries + prefix check | Keccak256 checksum |
+
+### Performance Characteristics
+
+**Extraction Speed:**
+- Single-threaded: ~450 MB/s on typical log data
+- Chunk-based processing: Can process entire file in one pass
+- Zero allocation for most operations (except result storage)
+
+**Algorithm Details:**
+
+1. **Anchor-based extraction**: Find anchor patterns (`:`, `@`, `.`) using SIMD-accelerated `memchr`
+2. **Boundary expansion**: Scan backwards/forwards to find pattern boundaries
+3. **Fast validation**: Use lookup tables and SIMD where possible
+4. **Checksum verification**: Cryptographic validation for crypto addresses
+
+**Cryptocurrency Address Validation:**
+
+- **Bitcoin**: Double SHA256 checksum for base58 addresses, native Bech32 validation for SegWit
+- **Ethereum**: Keccak256-based EIP-55 mixed-case checksum (optional, accepts all-lowercase)
+- **Monero**: Keccak256 checksum (4 bytes)
+
+### Builder Pattern
+
+```rust
+let extractor = Extractor::builder()
+    .extract_domains(true)
+    .extract_emails(true)
+    .extract_ipv4(true)
+    .extract_ipv6(true)
+    .extract_hashes(true)
+    .extract_bitcoin(true)
+    .extract_ethereum(true)
+    .extract_monero(true)
+    .min_domain_labels(2)
+    .require_word_boundaries(true)
+    .build()?;
+```
+
+### Integration with Processing Module
+
+The `processing` module provides batch-oriented infrastructure for file processing:
+
+```rust
+use matchy::{Database, processing, extractor::Extractor};
+
+let db = Database::open("threats.mxy")?;
+let extractor = Extractor::new()?;
+
+let mut worker = processing::Worker::builder()
+    .extractor(extractor)
+    .add_database("threats", db)
+    .build();
+
+let reader = processing::LineFileReader::new("access.log.gz", 128 * 1024)?;
+for batch in reader.batches() {
+    let matches = worker.process_lines(&batch?)?;
+    // Process matches...
+}
+```
+
+**Key Features:**
+- Automatic gzip decompression
+- Pre-chunked batches with computed line offsets
+- Support for multiple databases (cross-reference threat feeds)
+- Accumulating statistics (lines processed, candidates tested, matches found)
+
 ## Database Validation
 
 Matchy provides comprehensive validation for `.mxy` database files to ensure safety before loading, especially important for untrusted sources.

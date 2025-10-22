@@ -108,6 +108,9 @@ pub fn process_file(
                     matchy::extractor::ExtractedItem::Domain(_) => stats.domain_count += 1,
                     matchy::extractor::ExtractedItem::Email(_) => stats.email_count += 1,
                     matchy::extractor::ExtractedItem::Hash(_, _) => {}
+                    matchy::extractor::ExtractedItem::Bitcoin(_) => {}
+                    matchy::extractor::ExtractedItem::Ethereum(_) => {}
+                    matchy::extractor::ExtractedItem::Monero(_) => {}
                 }
             }
 
@@ -127,7 +130,10 @@ pub fn process_file(
                 }
                 matchy::extractor::ExtractedItem::Domain(s)
                 | matchy::extractor::ExtractedItem::Email(s)
-                | matchy::extractor::ExtractedItem::Hash(_, s) => (db.lookup(s)?, s.to_string()),
+                | matchy::extractor::ExtractedItem::Hash(_, s)
+                | matchy::extractor::ExtractedItem::Bitcoin(s)
+                | matchy::extractor::ExtractedItem::Ethereum(s)
+                | matchy::extractor::ExtractedItem::Monero(s) => (db.lookup(s)?, s.to_string()),
             };
             if let Some(start) = lookup_start {
                 stats.lookup_time += start.elapsed();
@@ -290,6 +296,9 @@ pub fn process_file_with_aggregate(
                 matchy::extractor::ExtractedItem::Domain(_) => aggregate_stats.domain_count += 1,
                 matchy::extractor::ExtractedItem::Email(_) => aggregate_stats.email_count += 1,
                 matchy::extractor::ExtractedItem::Hash(_, _) => {}
+                matchy::extractor::ExtractedItem::Bitcoin(_) => {}
+                matchy::extractor::ExtractedItem::Ethereum(_) => {}
+                matchy::extractor::ExtractedItem::Monero(_) => {}
             }
 
             // Lookup candidate
@@ -311,7 +320,10 @@ pub fn process_file_with_aggregate(
                 }
                 matchy::extractor::ExtractedItem::Domain(s)
                 | matchy::extractor::ExtractedItem::Email(s)
-                | matchy::extractor::ExtractedItem::Hash(_, s) => (db.lookup(s)?, s.to_string()),
+                | matchy::extractor::ExtractedItem::Hash(_, s)
+                | matchy::extractor::ExtractedItem::Bitcoin(s)
+                | matchy::extractor::ExtractedItem::Ethereum(s)
+                | matchy::extractor::ExtractedItem::Monero(s) => (db.lookup(s)?, s.to_string()),
             };
             if let Some(start) = lookup_start {
                 aggregate_stats.lookup_time += start.elapsed();
@@ -417,7 +429,10 @@ pub fn process_line_matches(
             }
             matchy::extractor::ExtractedItem::Domain(s)
             | matchy::extractor::ExtractedItem::Email(s)
-            | matchy::extractor::ExtractedItem::Hash(_, s) => (db.lookup(s)?, s.to_string()),
+            | matchy::extractor::ExtractedItem::Hash(_, s)
+            | matchy::extractor::ExtractedItem::Bitcoin(s)
+            | matchy::extractor::ExtractedItem::Ethereum(s)
+            | matchy::extractor::ExtractedItem::Monero(s) => (db.lookup(s)?, s.to_string()),
         };
 
         let is_match = match &result {

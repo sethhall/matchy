@@ -242,6 +242,9 @@ fn process_file<W: Write>(
                     ExtractedItem::Domain(_) => "Domain",
                     ExtractedItem::Email(_) => "Email",
                     ExtractedItem::Hash(_, _) => "Hash",
+                    ExtractedItem::Bitcoin(_) => "Bitcoin",
+                    ExtractedItem::Ethereum(_) => "Ethereum",
+                    ExtractedItem::Monero(_) => "Monero",
                 };
                 eprintln!(
                     "[CANDIDATE] {} at {}-{}: {}",
@@ -265,6 +268,9 @@ fn process_file<W: Write>(
                         ExtractedItem::Domain(_) => "domain",
                         ExtractedItem::Email(_) => "email",
                         ExtractedItem::Hash(_, _) => "hash",
+                        ExtractedItem::Bitcoin(_) => "bitcoin",
+                        ExtractedItem::Ethereum(_) => "ethereum",
+                        ExtractedItem::Monero(_) => "monero",
                     };
                     writeln!(
                         writer,
@@ -280,6 +286,9 @@ fn process_file<W: Write>(
                         ExtractedItem::Domain(_) => "domain",
                         ExtractedItem::Email(_) => "email",
                         ExtractedItem::Hash(_, _) => "hash",
+                        ExtractedItem::Bitcoin(_) => "bitcoin",
+                        ExtractedItem::Ethereum(_) => "ethereum",
+                        ExtractedItem::Monero(_) => "monero",
                     };
                     writeln!(
                         writer,
@@ -301,6 +310,9 @@ fn process_file<W: Write>(
                 ExtractedItem::Domain(_) => stats.domain_count += 1,
                 ExtractedItem::Email(_) => stats.email_count += 1,
                 ExtractedItem::Hash(_, _) => {} // Hashes don't have separate stats yet
+                ExtractedItem::Bitcoin(_) => {}
+                ExtractedItem::Ethereum(_) => {}
+                ExtractedItem::Monero(_) => {}
             }
         }
     }

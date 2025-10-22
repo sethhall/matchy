@@ -121,6 +121,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             matchy::extractor::ExtractedItem::Ipv6(_) => "IPv6",
             matchy::extractor::ExtractedItem::Email(_) => "Email",
             matchy::extractor::ExtractedItem::Hash(_, _) => "Hash",
+            matchy::extractor::ExtractedItem::Bitcoin(_) => "Bitcoin",
+            matchy::extractor::ExtractedItem::Ethereum(_) => "Ethereum",
+            matchy::extractor::ExtractedItem::Monero(_) => "Monero",
         };
         println!("     - {} ({})", match_item.as_str(log), type_name);
     }

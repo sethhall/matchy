@@ -264,6 +264,10 @@ pub fn process_file_batched(
                         matchy::extractor::ExtractedItem::Ipv4(_) => stats.ipv4_count += 1,
                         matchy::extractor::ExtractedItem::Ipv6(_) => stats.ipv6_count += 1,
                         matchy::extractor::ExtractedItem::Email(_) => stats.email_count += 1,
+                        matchy::extractor::ExtractedItem::Hash(_, _) => {},
+                        matchy::extractor::ExtractedItem::Bitcoin(_) => {},
+                        matchy::extractor::ExtractedItem::Ethereum(_) => {},
+                        matchy::extractor::ExtractedItem::Monero(_) => {},
                         _ => {}
                     }
                 }
@@ -273,7 +277,11 @@ pub fn process_file_batched(
                 let result = match &item.item {
                     matchy::extractor::ExtractedItem::Ipv4(ip) => db.lookup_ip(IpAddr::V4(*ip))?,
                     matchy::extractor::ExtractedItem::Ipv6(ip) => db.lookup_ip(IpAddr::V6(*ip))?,
-                    matchy::extractor::ExtractedItem::Email(s) => db.lookup(s)?,
+                    matchy::extractor::ExtractedItem::Email(s)
+                    | matchy::extractor::ExtractedItem::Hash(_, s)
+                    | matchy::extractor::ExtractedItem::Bitcoin(s)
+                    | matchy::extractor::ExtractedItem::Ethereum(s)
+                    | matchy::extractor::ExtractedItem::Monero(s) => db.lookup(s)?,
                     _ => continue,
                 };
 
@@ -295,7 +303,11 @@ pub fn process_file_batched(
                         let candidate_str = match &item.item {
                             matchy::extractor::ExtractedItem::Ipv4(ip) => ip.to_string(),
                             matchy::extractor::ExtractedItem::Ipv6(ip) => ip.to_string(),
-                            matchy::extractor::ExtractedItem::Email(s) => s.to_string(),
+                            matchy::extractor::ExtractedItem::Email(s)
+                            | matchy::extractor::ExtractedItem::Hash(_, s)
+                            | matchy::extractor::ExtractedItem::Bitcoin(s)
+                            | matchy::extractor::ExtractedItem::Ethereum(s)
+                            | matchy::extractor::ExtractedItem::Monero(s) => s.to_string(),
                             _ => unreachable!(),
                         };
                         

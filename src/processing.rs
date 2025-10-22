@@ -93,6 +93,12 @@ pub struct WorkerStats {
     pub sha256_count: usize,
     /// SHA384 hashes found
     pub sha384_count: usize,
+    /// Bitcoin addresses found
+    pub bitcoin_count: usize,
+    /// Ethereum addresses found
+    pub ethereum_count: usize,
+    /// Monero addresses found
+    pub monero_count: usize,
 }
 
 /// Core match result without file/line context
@@ -345,6 +351,9 @@ impl Worker {
                     HashType::Sha256 => self.stats.sha256_count += 1,
                     HashType::Sha384 => self.stats.sha384_count += 1,
                 },
+                ExtractedItem::Bitcoin(_) => self.stats.bitcoin_count += 1,
+                ExtractedItem::Ethereum(_) => self.stats.ethereum_count += 1,
+                ExtractedItem::Monero(_) => self.stats.monero_count += 1,
             }
 
             // Lookup in all databases
@@ -364,7 +373,10 @@ impl Worker {
                     }
                     ExtractedItem::Domain(s)
                     | ExtractedItem::Email(s)
-                    | ExtractedItem::Hash(_, s) => {
+                    | ExtractedItem::Hash(_, s)
+                    | ExtractedItem::Bitcoin(s)
+                    | ExtractedItem::Ethereum(s)
+                    | ExtractedItem::Monero(s) => {
                         let result = database.lookup(s).map_err(|e| e.to_string())?;
                         (result, s.to_string())
                     }
@@ -384,6 +396,9 @@ impl Worker {
                             HashType::Sha256 => "SHA256",
                             HashType::Sha384 => "SHA384",
                         },
+                        ExtractedItem::Bitcoin(_) => "Bitcoin",
+                        ExtractedItem::Ethereum(_) => "Ethereum",
+                        ExtractedItem::Monero(_) => "Monero",
                     };
 
                     results.push(MatchResult {
