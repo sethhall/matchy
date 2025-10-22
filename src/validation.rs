@@ -1049,9 +1049,7 @@ fn validate_paraglob_header(buffer: &[u8], report: &mut ValidationReport) -> Res
             report.info("Format version: v4 (latest - ACNodeHot for 50% memory reduction)");
         }
         VERSION_V3 => {
-            report.warning(
-                "Format version: v3 (older - uses 32-byte ACNode, no longer supported)",
-            );
+            report.warning("Format version: v3 (older - uses 32-byte ACNode, no longer supported)");
         }
         VERSION_V2 => {
             report.warning(
@@ -1062,7 +1060,10 @@ fn validate_paraglob_header(buffer: &[u8], report: &mut ValidationReport) -> Res
             report.warning("Format version: v1 (oldest - no data section, no AC literal mapping)");
         }
         v => {
-            report.error(format!("Unsupported version: {} (expected 1, 2, 3, or 4)", v));
+            report.error(format!(
+                "Unsupported version: {} (expected 1, 2, 3, or 4)",
+                v
+            ));
             return Ok(());
         }
     }
