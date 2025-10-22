@@ -4,7 +4,7 @@ Matchy includes a high-performance pattern extractor for finding domains, IP add
 
 ## Overview
 
-The `PatternExtractor` uses SIMD-accelerated algorithms to scan text and extract patterns at 200-500 MB/sec. This is useful for:
+The `Extractor` uses SIMD-accelerated algorithms to scan text and extract patterns at 200-500 MB/sec. This is useful for:
 
 - **Log scanning**: Find domains/IPs in access logs, firewall logs, etc.
 - **Threat detection**: Extract indicators from security logs
@@ -15,9 +15,9 @@ The `PatternExtractor` uses SIMD-accelerated algorithms to scan text and extract
 ## Quick Start
 
 ```rust
-use matchy::extractor::PatternExtractor;
+use matchy::extractor::Extractor;
 
-let extractor = PatternExtractor::new()?;
+let extractor = Extractor::new()?;
 
 let log_line = b"2024-01-15 GET /api evil.example.com 192.168.1.1";
 
@@ -125,9 +125,9 @@ for match_item in extractor.extract_from_line(line) {
 Customize extraction behavior using the builder pattern:
 
 ```rust
-use matchy::extractor::PatternExtractor;
+use matchy::extractor::Extractor;
 
-let extractor = PatternExtractor::builder()
+let extractor = Extractor::builder()
     .extract_domains(true)        // Enable domain extraction
     .extract_ipv4(true)            // Enable IPv4 extraction
     .extract_ipv6(true)            // Enable IPv6 extraction
@@ -205,7 +205,7 @@ The extractor is highly optimized:
 
 1. **Disable unused extractors** to reduce overhead:
    ```rust
-   let extractor = PatternExtractor::builder()
+   let extractor = Extractor::builder()
        .extract_ipv4(true)     // Only extract IPv4
        .extract_ipv6(true)     // Only extract IPv6
        .extract_domains(false)

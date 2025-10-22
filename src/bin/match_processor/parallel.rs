@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
 use serde_json::json;
-use std::fs;
-use std::io::{self, Read, Seek, SeekFrom};
-use std::net::IpAddr;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -21,16 +19,8 @@ const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 /// Below this, we wait for more data (avoids flushing trivial amounts)
 const MIN_FLUSH_BYTES: usize = 1024; // 1KB
 
-/// Work batch sent from reader to workers
-#[derive(Clone)]
-pub struct WorkBatch {
-    pub source_file: PathBuf,
-    pub starting_line_number: usize,
-    pub data: Arc<Vec<u8>>,
-    /// Pre-computed newline offsets (positions of '\n' bytes in data)
-    /// Workers use these to avoid re-scanning with memchr
-    pub line_offsets: Arc<Vec<usize>>,
-}
+// Use library's LineBatch directly instead of maintaining duplicate WorkBatch
+pub use matchy::processing::LineBatch;
 
 /// Match result sent from workers to output thread
 pub struct MatchResult {
@@ -47,19 +37,8 @@ pub struct MatchResult {
     pub cidr: Option<String>,
 }
 
-/// Statistics from a single worker thread
-#[derive(Default, Clone)]
-pub struct WorkerStats {
-    pub lines_processed: usize,
-    pub candidates_tested: usize,
-    pub total_matches: usize,
-    pub lines_with_matches: usize,
-    pub total_bytes: usize,
-    pub ipv4_count: usize,
-    pub ipv6_count: usize,
-    pub domain_count: usize,
-    pub email_count: usize,
-}
+// Use library's WorkerStats directly instead of maintaining a duplicate type
+pub use matchy::processing::WorkerStats;
 /// Process multiple files in parallel using worker pool
 #[allow(clippy::too_many_arguments)]
 pub fn process_parallel(
@@ -80,7 +59,7 @@ pub fn process_parallel(
     let work_queue_capacity = num_threads * 4;
     let result_queue_capacity = 1000;
 
-    let (work_tx, work_rx) = mpsc::sync_channel::<Option<WorkBatch>>(work_queue_capacity);
+    let (work_tx, work_rx) = mpsc::sync_channel::<Option<LineBatch>>(work_queue_capacity);
     let (result_tx, result_rx) = mpsc::sync_channel::<Option<WorkerMessage>>(result_queue_capacity);
 
     // Spawn output thread
@@ -149,7 +128,7 @@ pub fn process_parallel(
     for stats in worker_stats {
         aggregate.lines_processed += stats.lines_processed;
         aggregate.candidates_tested += stats.candidates_tested;
-        aggregate.total_matches += stats.total_matches;
+        aggregate.total_matches += stats.matches_found; // Library uses matches_found
         aggregate.lines_with_matches += stats.lines_with_matches;
         aggregate.total_bytes += stats.total_bytes;
         aggregate.ipv4_count += stats.ipv4_count;
@@ -175,11 +154,10 @@ pub enum WorkerMessage {
 /// Reader thread: reads files, chunks them, sends to workers
 fn reader_thread(
     inputs: Vec<PathBuf>,
-    work_tx: SyncSender<Option<WorkBatch>>,
+    work_tx: SyncSender<Option<LineBatch>>,
     batch_bytes: usize,
     _overall_start: Instant,
 ) -> Result<()> {
-    let mut read_buffer = vec![0u8; batch_bytes];
     let mut stdin_already_processed = false;
 
     for input_path in inputs {
@@ -191,10 +169,10 @@ fn reader_thread(
             stdin_already_processed = true;
 
             // Process stdin (cannot seek, so read in chunks)
-            process_stdin(&work_tx, &input_path, &mut read_buffer, batch_bytes)?;
+            process_stdin(&work_tx, &input_path, batch_bytes)?;
         } else {
-            // Process regular file
-            match process_file(&work_tx, &input_path, &mut read_buffer, batch_bytes) {
+            // Process regular file using library's LineFileReader
+            match process_file(&work_tx, &input_path, batch_bytes) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("[ERROR] Failed to read {}: {}", input_path.display(), e);
@@ -209,56 +187,25 @@ fn reader_thread(
     Ok(())
 }
 
-/// Process a regular file (seekable)
+/// Process a regular file using library's LineFileReader
 fn process_file(
-    work_tx: &SyncSender<Option<WorkBatch>>,
+    work_tx: &SyncSender<Option<LineBatch>>,
     input_path: &Path,
-    read_buffer: &mut [u8],
-    _batch_bytes: usize,
+    batch_bytes: usize,
 ) -> Result<()> {
-    let mut file = fs::File::open(input_path)
+    use matchy::processing::LineFileReader;
+
+    // Use library's LineFileReader which handles gzip, chunking, and line offsets
+    let reader = LineFileReader::new(input_path, batch_bytes)
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
 
-    let mut current_line_number = 1usize;
-
-    loop {
-        let bytes_read = file.read(read_buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-
-        // Find last newline using memchr (SIMD-accelerated)
-        let chunk_end = if let Some(pos) = memchr::memrchr(b'\n', &read_buffer[..bytes_read]) {
-            pos + 1 // Include the newline
-        } else {
-            bytes_read // No newline found, send entire chunk
-        };
-
-        // Copy chunk data (necessary for buffer reuse)
-        let chunk = read_buffer[..chunk_end].to_vec();
-
-        // Pre-compute newline offsets (avoid duplicate memchr in workers)
-        let line_offsets: Vec<usize> = memchr::memchr_iter(b'\n', &chunk).collect();
-        let line_count = line_offsets.len();
-
-        // Send to workers
-        let batch = WorkBatch {
-            source_file: input_path.to_owned(),
-            starting_line_number: current_line_number,
-            data: Arc::new(chunk),
-            line_offsets: Arc::new(line_offsets),
-        };
-
+    // Stream batches to workers
+    for batch in reader.batches() {
+        let batch =
+            batch.with_context(|| format!("Failed to read from {}", input_path.display()))?;
         work_tx
             .send(Some(batch))
             .context("Failed to send work batch")?;
-
-        // Seek back to position right after the newline
-        if chunk_end < bytes_read {
-            file.seek(SeekFrom::Current((chunk_end as i64) - (bytes_read as i64)))?;
-        }
-
-        current_line_number += line_count;
     }
 
     Ok(())
@@ -266,24 +213,24 @@ fn process_file(
 
 /// Process stdin (non-seekable) with timeout-based flushing
 fn process_stdin(
-    work_tx: &SyncSender<Option<WorkBatch>>,
+    work_tx: &SyncSender<Option<LineBatch>>,
     input_path: &Path,
-    read_buffer: &mut [u8],
-    _batch_bytes: usize,
+    batch_bytes: usize,
 ) -> Result<()> {
+    let mut read_buffer = vec![0u8; batch_bytes];
     let mut stdin = io::stdin();
     let mut current_line_number = 1usize;
     let mut leftover = Vec::new();
     let mut last_data_time = Instant::now();
 
     loop {
-        let bytes_read = stdin.read(read_buffer)?;
+        let bytes_read = stdin.read(&mut read_buffer)?;
         if bytes_read == 0 {
             // EOF - send any leftover data
             if !leftover.is_empty() {
                 let line_offsets: Vec<usize> = memchr::memchr_iter(b'\n', &leftover).collect();
-                let batch = WorkBatch {
-                    source_file: input_path.to_owned(),
+                let batch = LineBatch {
+                    source: input_path.to_owned(),
                     starting_line_number: current_line_number,
                     data: Arc::new(leftover.clone()),
                     line_offsets: Arc::new(line_offsets),
@@ -308,8 +255,8 @@ fn process_stdin(
             if combined.len() >= MIN_FLUSH_BYTES && elapsed >= FLUSH_TIMEOUT {
                 // Force flush even without newline
                 let line_offsets: Vec<usize> = memchr::memchr_iter(b'\n', &combined).collect();
-                let batch = WorkBatch {
-                    source_file: input_path.to_owned(),
+                let batch = LineBatch {
+                    source: input_path.to_owned(),
                     starting_line_number: current_line_number,
                     data: Arc::new(combined.clone()),
                     line_offsets: Arc::new(line_offsets),
@@ -336,8 +283,8 @@ fn process_stdin(
         let line_offsets: Vec<usize> = memchr::memchr_iter(b'\n', &chunk).collect();
         let line_count = line_offsets.len();
 
-        let batch = WorkBatch {
-            source_file: input_path.to_owned(),
+        let batch = LineBatch {
+            source: input_path.to_owned(),
             starting_line_number: current_line_number,
             data: Arc::new(chunk),
             line_offsets: Arc::new(line_offsets),
@@ -373,15 +320,13 @@ pub fn init_worker_database(
 }
 
 /// Create extractor configured for database capabilities
-pub fn create_extractor_for_db(
-    db: &matchy::Database,
-) -> Result<matchy::extractor::PatternExtractor> {
-    use matchy::extractor::PatternExtractor;
+pub fn create_extractor_for_db(db: &matchy::Database) -> Result<matchy::extractor::Extractor> {
+    use matchy::extractor::Extractor;
 
     let has_ip = db.has_ip_data();
     let has_strings = db.has_literal_data() || db.has_glob_data();
 
-    let mut builder = PatternExtractor::builder();
+    let mut builder = Extractor::builder();
     if !has_ip {
         builder = builder.extract_ipv4(false).extract_ipv6(false);
     }
@@ -395,7 +340,6 @@ pub fn create_extractor_for_db(
 pub struct MatchBuffers {
     data_values: Vec<serde_json::Value>,
     matched_text: String,
-    input_line: String,
     cidr: String,
 }
 
@@ -404,21 +348,21 @@ impl MatchBuffers {
         Self {
             data_values: Vec::with_capacity(8),
             matched_text: String::with_capacity(256),
-            input_line: String::with_capacity(512),
             cidr: String::with_capacity(64),
         }
     }
 }
 
 /// Worker thread: receives batches, processes them, sends results
+/// Now uses library's matchy::parallel::Worker infrastructure
 fn worker_thread(
     worker_id: usize,
-    work_rx: Arc<Mutex<Receiver<Option<WorkBatch>>>>,
+    work_rx: Arc<Mutex<Receiver<Option<LineBatch>>>>,
     result_tx: SyncSender<Option<WorkerMessage>>,
     database_path: PathBuf,
     trusted: bool,
     cache_size: usize,
-    show_stats: bool,
+    _show_stats: bool,
 ) -> WorkerStats {
     // Initialize database
     let db = match init_worker_database(&database_path, trusted, cache_size) {
@@ -444,7 +388,11 @@ fn worker_thread(
         }
     };
 
-    let mut stats = WorkerStats::default();
+    // Use library's Worker infrastructure
+    let mut worker = matchy::processing::Worker::builder()
+        .extractor(extractor)
+        .add_database("default", db)
+        .build();
     let mut last_progress_update = Instant::now();
     let progress_interval = Duration::from_millis(100);
 
@@ -460,22 +408,30 @@ fn worker_thread(
 
         match batch_opt {
             Ok(Some(batch)) => {
-                process_batch(
-                    &batch,
-                    &db,
-                    &extractor,
-                    &result_tx,
-                    &mut stats,
-                    show_stats,
-                    &mut match_buffers,
-                );
+                // Process batch using library worker (batch is already LineBatch)
+                match worker.process_lines(&batch) {
+                    Ok(matches) => {
+                        // Convert library matches to CLI format and send
+                        for m in matches {
+                            if let Some(match_result) = build_match_result(&m, &mut match_buffers) {
+                                let _ = result_tx.send(Some(WorkerMessage::Match(match_result)));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[ERROR] Worker {} batch processing failed: {}",
+                            worker_id, e
+                        );
+                    }
+                }
 
                 // Send periodic progress updates
                 let now = Instant::now();
                 if now.duration_since(last_progress_update) >= progress_interval {
                     let _ = result_tx.send(Some(WorkerMessage::Stats {
                         worker_id,
-                        stats: stats.clone(),
+                        stats: worker.stats().clone(),
                     }));
                     last_progress_update = now;
                 }
@@ -485,214 +441,71 @@ fn worker_thread(
     }
 
     // Send final stats
+    let final_stats = worker.stats().clone();
     let _ = result_tx.send(Some(WorkerMessage::Stats {
         worker_id,
-        stats: stats.clone(),
+        stats: final_stats.clone(),
     }));
-    stats
+    final_stats
 }
 
-/// Lookup a candidate in the database
-/// Only allocates string if there's a match (optimization: avoid allocation for non-matches)
-fn lookup_candidate<'a>(
-    item: matchy::extractor::ExtractedItem<'a>,
-    db: &matchy::Database,
-) -> Option<(Option<matchy::QueryResult>, String)> {
-    match item {
-        matchy::extractor::ExtractedItem::Ipv4(ip) => {
-            let result = db.lookup_ip(IpAddr::V4(ip)).ok()?;
-            // Only allocate string representation if lookup succeeded
-            Some((result, ip.to_string()))
-        }
-        matchy::extractor::ExtractedItem::Ipv6(ip) => {
-            let result = db.lookup_ip(IpAddr::V6(ip)).ok()?;
-            Some((result, ip.to_string()))
-        }
-        matchy::extractor::ExtractedItem::Domain(s) => {
-            let result = db.lookup(s).ok()?;
-            Some((result, s.to_string()))
-        }
-        matchy::extractor::ExtractedItem::Email(s) => {
-            let result = db.lookup(s).ok()?;
-            Some((result, s.to_string()))
-        }
-    }
-}
-
-/// Build a match result from query result using reusable buffers
-/// Returns None if result is NotFound (shouldn't happen in practice)
-fn build_match_result(
-    result: &matchy::QueryResult,
-    candidate_str: &str,
-    line: &[u8],
-    line_number: usize,
-    source_file: &Path,
-    timestamp: f64,
-    buffers: &mut MatchBuffers,
+/// Build CLI match result from library match
+pub fn build_match_result(
+    lib_match: &matchy::processing::LineMatch,
+    match_buffers: &mut MatchBuffers,
 ) -> Option<MatchResult> {
-    match result {
-        matchy::QueryResult::Pattern { pattern_ids, data } => {
-            let data_json = if !data.is_empty() {
-                buffers.data_values.clear();
-                for d in data.iter() {
-                    if let Some(val) = d.as_ref() {
-                        buffers.data_values.push(data_value_to_json(val));
-                    }
-                }
-                if !buffers.data_values.is_empty() {
-                    Some(json!(&buffers.data_values))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+    use matchy::QueryResult;
 
-            buffers.matched_text.clear();
-            buffers.matched_text.push_str(candidate_str);
-            buffers.input_line.clear();
-            buffers.input_line.push_str(&String::from_utf8_lossy(line));
+    // Reset buffers
+    match_buffers.data_values.clear();
+    match_buffers.matched_text.clear();
+    match_buffers.cidr.clear();
+
+    // Access the nested match_result
+    let mr = &lib_match.match_result;
+
+    // Build match result based on query result type
+    match &mr.result {
+        QueryResult::Ip { data, prefix_len } => {
+            format_cidr_into(&mr.matched_text, *prefix_len, &mut match_buffers.cidr);
 
             Some(MatchResult {
-                source_file: source_file.to_owned(),
-                line_number,
-                matched_text: buffers.matched_text.clone(),
+                source_file: lib_match.source.clone(),
+                line_number: lib_match.line_number,
+                matched_text: mr.matched_text.clone(),
+                match_type: "ip".to_string(),
+                input_line: String::new(), // Will be filled by caller if needed
+                timestamp: 0.0,            // Will be filled by caller
+                pattern_count: None,
+                data: Some(data_value_to_json(data)),
+                prefix_len: Some(*prefix_len),
+                cidr: Some(match_buffers.cidr.clone()),
+            })
+        }
+        QueryResult::Pattern { pattern_ids, data } => {
+            let data_values: Vec<_> = data
+                .iter()
+                .filter_map(|opt_dv| opt_dv.as_ref().map(data_value_to_json))
+                .collect();
+
+            Some(MatchResult {
+                source_file: lib_match.source.clone(),
+                line_number: lib_match.line_number,
+                matched_text: mr.matched_text.clone(),
                 match_type: "pattern".to_string(),
-                input_line: buffers.input_line.clone(),
-                timestamp,
+                input_line: String::new(),
+                timestamp: 0.0,
                 pattern_count: Some(pattern_ids.len()),
-                data: data_json,
+                data: if data_values.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::Array(data_values))
+                },
                 prefix_len: None,
                 cidr: None,
             })
         }
-        matchy::QueryResult::Ip { data, prefix_len } => {
-            buffers.matched_text.clear();
-            buffers.matched_text.push_str(candidate_str);
-            buffers.input_line.clear();
-            buffers.input_line.push_str(&String::from_utf8_lossy(line));
-            buffers.cidr.clear();
-            format_cidr_into(candidate_str, *prefix_len, &mut buffers.cidr);
-
-            Some(MatchResult {
-                source_file: source_file.to_owned(),
-                line_number,
-                matched_text: buffers.matched_text.clone(),
-                match_type: "ip".to_string(),
-                input_line: buffers.input_line.clone(),
-                timestamp,
-                pattern_count: None,
-                data: Some(data_value_to_json(data)),
-                prefix_len: Some(*prefix_len),
-                cidr: Some(buffers.cidr.clone()),
-            })
-        }
-        matchy::QueryResult::NotFound => None,
-    }
-}
-
-/// Process a single work batch
-pub fn process_batch(
-    batch: &WorkBatch,
-    db: &matchy::Database,
-    extractor: &matchy::extractor::PatternExtractor,
-    result_tx: &SyncSender<Option<WorkerMessage>>,
-    stats: &mut WorkerStats,
-    _show_stats: bool,
-    buffers: &mut MatchBuffers,
-) {
-    let chunk: &[u8] = &batch.data;
-    let timestamp = 0.0;
-
-    // Pre-allocate buffer for lowercasing (case-insensitive mode only)
-    let is_case_insensitive = db.mode() == matchy::MatchMode::CaseInsensitive;
-    let mut lowercase_buf = if is_case_insensitive {
-        Vec::with_capacity(8192) // Typical log line size
-    } else {
-        Vec::new()
-    };
-
-    // Use pre-computed line offsets from reader (avoids duplicate memchr scan)
-    let mut line_start = 0;
-    let mut line_number = batch.starting_line_number;
-    let mut line_had_match = false;
-
-    // Iterate over pre-computed newline positions, plus chunk end
-    for newline_pos in batch
-        .line_offsets
-        .iter()
-        .copied()
-        .chain(std::iter::once(chunk.len()))
-    {
-        let original_line = &chunk[line_start..newline_pos];
-        line_start = newline_pos + 1;
-        if original_line.is_empty() {
-            continue;
-        }
-
-        stats.lines_processed += 1;
-        stats.total_bytes += original_line.len();
-
-        // CRITICAL OPTIMIZATION: For case-insensitive matching, lowercase the ENTIRE line
-        // once with SIMD before extraction and matching. This is 4-8x faster than lowercasing
-        // per field and eliminates all case-handling branches in hot paths.
-        let line = if is_case_insensitive {
-            matchy::simd_utils::ascii_lowercase(original_line, &mut lowercase_buf);
-            lowercase_buf.as_slice()
-        } else {
-            original_line
-        };
-
-        let extracted = extractor.extract_from_line(line);
-
-        for item in extracted {
-            stats.candidates_tested += 1;
-
-            // Track candidate types (for stats or progress display)
-            match &item.item {
-                matchy::extractor::ExtractedItem::Ipv4(_) => stats.ipv4_count += 1,
-                matchy::extractor::ExtractedItem::Ipv6(_) => stats.ipv6_count += 1,
-                matchy::extractor::ExtractedItem::Domain(_) => stats.domain_count += 1,
-                matchy::extractor::ExtractedItem::Email(_) => stats.email_count += 1,
-            }
-
-            // Lookup candidate
-            let (result, candidate_str) = match lookup_candidate(item.item, db) {
-                Some(lookup) => lookup,
-                None => continue,
-            };
-
-            let is_match = match &result {
-                Some(matchy::QueryResult::Pattern { pattern_ids, .. }) => !pattern_ids.is_empty(),
-                Some(matchy::QueryResult::Ip { .. }) => true,
-                _ => false,
-            };
-
-            if is_match {
-                if !line_had_match {
-                    stats.lines_with_matches += 1;
-                    line_had_match = true;
-                }
-                stats.total_matches += 1;
-
-                if let Some(query_result) = result {
-                    if let Some(match_result) = build_match_result(
-                        &query_result,
-                        &candidate_str,
-                        original_line, // Use original for display
-                        line_number,
-                        &batch.source_file,
-                        timestamp,
-                        buffers,
-                    ) {
-                        let _ = result_tx.send(Some(WorkerMessage::Match(match_result)));
-                    }
-                }
-            }
-        }
-
-        line_number += 1;
-        line_had_match = false;
+        QueryResult::NotFound => None,
     }
 }
 
@@ -762,7 +575,7 @@ fn output_thread(
                 for stats in worker_stats_map.values() {
                     aggregate.lines_processed += stats.lines_processed;
                     aggregate.candidates_tested += stats.candidates_tested;
-                    aggregate.total_matches += stats.total_matches;
+                    aggregate.total_matches += stats.matches_found; // Library uses matches_found
                     aggregate.lines_with_matches += stats.lines_with_matches;
                     aggregate.total_bytes += stats.total_bytes;
                     aggregate.ipv4_count += stats.ipv4_count;

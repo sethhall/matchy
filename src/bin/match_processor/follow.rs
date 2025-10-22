@@ -21,7 +21,7 @@ use super::thread_utils::set_thread_name;
 pub fn follow_files(
     inputs: Vec<PathBuf>,
     db: &matchy::Database,
-    extractor: &matchy::extractor::PatternExtractor,
+    extractor: &matchy::extractor::Extractor,
     output_format: &str,
     show_stats: bool,
     show_progress: bool,
@@ -141,7 +141,7 @@ pub fn follow_files(
 fn process_existing_content(
     input_path: &Path,
     db: &matchy::Database,
-    extractor: &matchy::extractor::PatternExtractor,
+    extractor: &matchy::extractor::Extractor,
     output_format: &str,
     show_stats: bool,
     show_progress: bool,
@@ -164,7 +164,7 @@ fn handle_file_event(
     event: Event,
     file_positions: &mut [(PathBuf, u64)],
     db: &matchy::Database,
-    extractor: &matchy::extractor::PatternExtractor,
+    extractor: &matchy::extractor::Extractor,
     output_format: &str,
     show_stats: bool,
     overall_start: Instant,
@@ -209,7 +209,7 @@ fn process_new_content(
     input_path: &Path,
     last_pos: &mut u64,
     db: &matchy::Database,
-    extractor: &matchy::extractor::PatternExtractor,
+    extractor: &matchy::extractor::Extractor,
     output_format: &str,
     _show_stats: bool,
     _overall_start: Instant,
@@ -297,7 +297,7 @@ pub fn follow_files_parallel(
     let result_queue_capacity = 1000;
 
     let (work_tx, work_rx) =
-        mpsc::sync_channel::<Option<super::parallel::WorkBatch>>(work_queue_capacity);
+        mpsc::sync_channel::<Option<super::parallel::LineBatch>>(work_queue_capacity);
     let (result_tx, result_rx) =
         mpsc::sync_channel::<Option<super::parallel::WorkerMessage>>(result_queue_capacity);
 
@@ -374,7 +374,7 @@ pub fn follow_files_parallel(
     for stats in worker_stats {
         aggregate.lines_processed += stats.lines_processed;
         aggregate.candidates_tested += stats.candidates_tested;
-        aggregate.total_matches += stats.total_matches;
+        aggregate.total_matches += stats.matches_found; // Library uses matches_found
         aggregate.lines_with_matches += stats.lines_with_matches;
         aggregate.total_bytes += stats.total_bytes;
         aggregate.ipv4_count += stats.ipv4_count;
@@ -391,7 +391,7 @@ pub fn follow_files_parallel(
 /// Reader/watcher thread: watches files, reads new content, batches and sends to workers
 fn reader_watcher_thread(
     inputs: Vec<PathBuf>,
-    work_tx: SyncSender<Option<super::parallel::WorkBatch>>,
+    work_tx: SyncSender<Option<super::parallel::LineBatch>>,
     _overall_start: Instant,
     shutdown: Arc<AtomicBool>,
     show_stats: bool,
@@ -419,8 +419,8 @@ fn reader_watcher_thread(
                                 memchr::memchr_iter(b'\n', &content).collect();
                             let line_count = line_offsets.len();
 
-                            let batch = super::parallel::WorkBatch {
-                                source_file: input_path.clone(),
+                            let batch = super::parallel::LineBatch {
+                                source: input_path.clone(),
                                 starting_line_number: 1,
                                 data: Arc::new(content.clone()),
                                 line_offsets: Arc::new(line_offsets),
@@ -485,16 +485,16 @@ fn reader_watcher_thread(
 /// Worker thread for follow mode - same as parallel but can be interrupted
 fn worker_thread_follow(
     worker_id: usize,
-    work_rx: Arc<Mutex<Receiver<Option<super::parallel::WorkBatch>>>>,
+    work_rx: Arc<Mutex<Receiver<Option<super::parallel::LineBatch>>>>,
     result_tx: SyncSender<Option<super::parallel::WorkerMessage>>,
     database_path: PathBuf,
     trusted: bool,
     cache_size: usize,
-    show_stats: bool,
+    _show_stats: bool,
 ) -> super::parallel::WorkerStats {
     use super::parallel::{
-        create_extractor_for_db, init_worker_database, process_batch, MatchBuffers, WorkerMessage,
-        WorkerStats,
+        build_match_result, create_extractor_for_db, init_worker_database, MatchBuffers,
+        WorkerMessage, WorkerStats,
     };
 
     // Initialize database
@@ -521,7 +521,11 @@ fn worker_thread_follow(
         }
     };
 
-    let mut stats = WorkerStats::default();
+    // Use library's Worker infrastructure
+    let mut worker = matchy::processing::Worker::builder()
+        .extractor(extractor)
+        .add_database("default", db)
+        .build();
     let mut last_progress_update = Instant::now();
     let progress_interval = Duration::from_millis(100);
 
@@ -537,22 +541,30 @@ fn worker_thread_follow(
 
         match batch_opt {
             Ok(Some(batch)) => {
-                process_batch(
-                    &batch,
-                    &db,
-                    &extractor,
-                    &result_tx,
-                    &mut stats,
-                    show_stats,
-                    &mut match_buffers,
-                );
+                // Process batch using library worker (batch is already LineBatch)
+                match worker.process_lines(&batch) {
+                    Ok(matches) => {
+                        // Convert library matches to CLI format and send
+                        for m in matches {
+                            if let Some(match_result) = build_match_result(&m, &mut match_buffers) {
+                                let _ = result_tx.send(Some(WorkerMessage::Match(match_result)));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[ERROR] Worker {} batch processing failed: {}",
+                            worker_id, e
+                        );
+                    }
+                }
 
                 // Send periodic progress updates
                 let now = Instant::now();
                 if now.duration_since(last_progress_update) >= progress_interval {
                     let _ = result_tx.send(Some(WorkerMessage::Stats {
                         worker_id,
-                        stats: stats.clone(),
+                        stats: worker.stats().clone(),
                     }));
                     last_progress_update = now;
                 }
@@ -562,11 +574,12 @@ fn worker_thread_follow(
     }
 
     // Send final stats
+    let final_stats = worker.stats().clone();
     let _ = result_tx.send(Some(WorkerMessage::Stats {
         worker_id,
-        stats: stats.clone(),
+        stats: final_stats.clone(),
     }));
-    stats
+    final_stats
 }
 
 /// Output thread for follow mode - includes shutdown signal awareness
@@ -645,7 +658,7 @@ fn output_thread_follow(
                         for stats in worker_stats_map.values() {
                             aggregate.lines_processed += stats.lines_processed;
                             aggregate.candidates_tested += stats.candidates_tested;
-                            aggregate.total_matches += stats.total_matches;
+                            aggregate.total_matches += stats.matches_found; // Library uses matches_found
                             aggregate.lines_with_matches += stats.lines_with_matches;
                             aggregate.total_bytes += stats.total_bytes;
                             aggregate.ipv4_count += stats.ipv4_count;
@@ -691,7 +704,7 @@ fn handle_file_event_parallel(
     event: Event,
     file_positions: &mut HashMap<PathBuf, u64>,
     line_counters: &mut HashMap<PathBuf, usize>,
-    work_tx: &SyncSender<Option<super::parallel::WorkBatch>>,
+    work_tx: &SyncSender<Option<super::parallel::LineBatch>>,
 ) -> Result<()> {
     match event.kind {
         EventKind::Modify(_) | EventKind::Create(_) => {
@@ -721,8 +734,8 @@ fn handle_file_event_parallel(
                                             memchr::memchr_iter(b'\n', &new_content).collect();
                                         let new_lines = line_offsets.len();
 
-                                        let batch = super::parallel::WorkBatch {
-                                            source_file: path.clone(),
+                                        let batch = super::parallel::LineBatch {
+                                            source: path.clone(),
                                             starting_line_number: starting_line,
                                             data: Arc::new(new_content.clone()),
                                             line_offsets: Arc::new(line_offsets),

@@ -83,7 +83,7 @@ cargo add matchy
 ```
 
 ```rust
-use matchy::{Database, DatabaseBuilder, PatternExtractor};
+use matchy::{Database, DatabaseBuilder, Extractor};
 
 // Build
 let mut builder = DatabaseBuilder::new();
@@ -101,7 +101,7 @@ if let Some(result) = db.lookup("sub.evil.com")? {
 }
 
 // Extract patterns from logs
-let extractor = PatternExtractor::new()?;
+let extractor = Extractor::new()?;
 for line in log_file.lines() {
     for match_item in extractor.extract_from_line(line.as_bytes()) {
         println!("Found: {:?}", match_item);

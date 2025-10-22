@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use matchy::extractor::{ExtractedItem, PatternExtractor};
+use matchy::extractor::{ExtractedItem, Extractor};
 use std::collections::HashSet;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -96,7 +96,7 @@ pub fn cmd_extract(
         };
 
     // Build extractor
-    let extractor = PatternExtractor::builder()
+    let extractor = Extractor::builder()
         .extract_ipv4(extract_ipv4)
         .extract_ipv6(extract_ipv6)
         .extract_domains(extract_domains)
@@ -207,7 +207,7 @@ pub fn cmd_extract(
 
 fn process_file<W: Write>(
     input_path: &PathBuf,
-    extractor: &PatternExtractor,
+    extractor: &Extractor,
     output_format: OutputFormat,
     stats: &mut ExtractionStats,
     seen: &mut Option<HashSet<String>>,

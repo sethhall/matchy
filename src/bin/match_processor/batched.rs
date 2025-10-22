@@ -108,7 +108,7 @@ impl<R: io::BufRead> BatchedLineProcessor<R> {
 pub fn process_file_batched(
     input_path: &Path,
     db: &matchy::Database,
-    extractor: &matchy::extractor::PatternExtractor,
+    extractor: &matchy::extractor::Extractor,
     output_format: &str,
     show_stats: bool,
     show_progress: bool,

@@ -9,8 +9,8 @@ use crate::glob::MatchMode;
 use crate::paraglob_offset::Paraglob;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-/// Builder for PatternExtractor
-pub struct PatternExtractorBuilder {
+/// Builder for Extractor
+pub struct ExtractorBuilder {
     extract_domains: bool,
     extract_emails: bool,
     extract_ipv4: bool,
@@ -19,7 +19,7 @@ pub struct PatternExtractorBuilder {
     require_word_boundaries: bool,
 }
 
-impl PatternExtractorBuilder {
+impl ExtractorBuilder {
     /// Create a new builder with default configuration
     pub fn new() -> Self {
         Self {
@@ -68,8 +68,8 @@ impl PatternExtractorBuilder {
         self
     }
 
-    /// Build the PatternExtractor
-    pub fn build(self) -> Result<PatternExtractor, ParaglobError> {
+    /// Build the Extractor
+    pub fn build(self) -> Result<Extractor, ParaglobError> {
         // Load embedded TLD automaton if domain extraction enabled
         // Use trusted mode since TLD_AUTOMATON is compiled into the binary
         let tld_matcher = if self.extract_domains {
@@ -85,7 +85,7 @@ impl PatternExtractorBuilder {
         // Pre-build memchr finder for :: (IPv6)
         let double_colon_finder = memchr::memmem::Finder::new(b"::");
 
-        Ok(PatternExtractor {
+        Ok(Extractor {
             extract_domains: self.extract_domains,
             extract_emails: self.extract_emails,
             extract_ipv4: self.extract_ipv4,
@@ -99,7 +99,7 @@ impl PatternExtractorBuilder {
     }
 }
 
-impl Default for PatternExtractorBuilder {
+impl Default for ExtractorBuilder {
     fn default() -> Self {
         Self::new()
     }
@@ -136,7 +136,7 @@ impl<'a> Match<'a> {
 }
 
 /// Fast pattern extractor using Aho-Corasick anchor matching
-pub struct PatternExtractor {
+pub struct Extractor {
     // Configuration fields
     extract_domains: bool,
     extract_emails: bool,
@@ -152,15 +152,15 @@ pub struct PatternExtractor {
     tld_match_buffer: std::cell::RefCell<Vec<(usize, u32)>>,
 }
 
-impl PatternExtractor {
+impl Extractor {
     /// Create a new extractor with default configuration
     pub fn new() -> Result<Self, ParaglobError> {
         Self::builder().build()
     }
 
     /// Create a builder for custom configuration
-    pub fn builder() -> PatternExtractorBuilder {
-        PatternExtractorBuilder::new()
+    pub fn builder() -> ExtractorBuilder {
+        ExtractorBuilder::new()
     }
 
     /// Extract patterns from a line using an iterator (zero-allocation)
@@ -940,7 +940,7 @@ fn is_ipv6_loopback_or_linklocal(candidate: &[u8]) -> bool {
 /// when not all matches are needed.
 pub struct ExtractIter<'a> {
     #[allow(dead_code)]
-    extractor: &'a PatternExtractor,
+    extractor: &'a Extractor,
     #[allow(dead_code)]
     line: &'a [u8],
     matches: Vec<Match<'a>>,
@@ -948,7 +948,7 @@ pub struct ExtractIter<'a> {
 }
 
 impl<'a> ExtractIter<'a> {
-    fn new(extractor: &'a PatternExtractor, line: &'a [u8]) -> Self {
+    fn new(extractor: &'a Extractor, line: &'a [u8]) -> Self {
         // Extract all matches upfront into a Vec
         // We can optimize this later to be truly lazy if needed
         let mut matches = Vec::new();
@@ -1119,13 +1119,13 @@ mod tests {
 
     #[test]
     fn test_extractor_creation() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
         assert!(extractor.extract_domains());
     }
 
     #[test]
     fn test_builder() {
-        let extractor = PatternExtractor::builder()
+        let extractor = Extractor::builder()
             .extract_domains(true)
             .extract_emails(false)
             .min_domain_labels(3)
@@ -1157,7 +1157,7 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_basic() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"Visit example.com for more info";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1172,7 +1172,7 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_multiple() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"Check google.com and github.com";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1184,7 +1184,7 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_subdomain() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"Visit api.example.com today";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1195,7 +1195,7 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_with_protocol() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"Go to https://www.example.com/path";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1207,7 +1207,7 @@ mod tests {
 
     #[test]
     fn test_domain_min_labels() {
-        let extractor = PatternExtractor::builder()
+        let extractor = Extractor::builder()
             .extract_domains(true)
             .min_domain_labels(3) // Require at least 3 labels
             .build()
@@ -1223,7 +1223,7 @@ mod tests {
 
     #[test]
     fn test_domain_extraction_log_line() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Realistic log line
         let line =
@@ -1246,7 +1246,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_extraction_basic() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"Server at 192.168.1.1 responded";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1266,7 +1266,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_extraction_multiple() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"Traffic from 10.0.0.5 to 172.16.0.10";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1286,7 +1286,7 @@ mod tests {
 
     #[test]
     fn test_unicode_domain_extraction() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // German domain with umlaut (münchen.de in UTF-8)
         let line = "Visit münchen.de for info".as_bytes();
@@ -1305,7 +1305,7 @@ mod tests {
 
     #[test]
     fn test_mixed_unicode_ascii_domains() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line with both ASCII and Unicode domains
         let line = "Check café.fr and example.com".as_bytes();
@@ -1332,7 +1332,7 @@ mod tests {
 
     #[test]
     fn test_binary_log_with_ascii_domain() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Binary log line with non-UTF-8 bytes but ASCII domain
         let mut line = Vec::new();
@@ -1361,7 +1361,7 @@ mod tests {
 
     #[test]
     fn test_invalid_utf8_in_domain_rejected() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line with invalid UTF-8 sequence where domain would be
         let mut line = Vec::new();
@@ -1386,7 +1386,7 @@ mod tests {
 
     #[test]
     fn test_false_positive_rejection() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // "blah.community" contains ".com" but shouldn't match as domain
         let line = b"This is blah.community stuff";
@@ -1409,7 +1409,7 @@ mod tests {
 
     #[test]
     fn test_key_value_pair_extraction() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Common log format with key=value pairs
         let line = b"Request: host=api.example.com method=GET path=/test";
@@ -1432,7 +1432,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_invalid() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Invalid IPs should not match
         let line = b"Not IPs: 256.1.1.1 1.2.3.999 1.2.3";
@@ -1451,7 +1451,7 @@ mod tests {
 
     #[test]
     fn test_mixed_extraction() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Mix of domains and IPs
         let line = b"Request from 10.1.2.3 to api.example.com at 192.168.1.100";
@@ -1480,7 +1480,7 @@ mod tests {
 
     #[test]
     fn test_email_extraction_basic() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"Contact user@example.com for info";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1499,7 +1499,7 @@ mod tests {
 
     #[test]
     fn test_email_extraction_multiple() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"Email alice@test.com or bob@company.org";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1519,7 +1519,7 @@ mod tests {
 
     #[test]
     fn test_email_with_plus() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"Send to user+tag@example.com";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1538,7 +1538,7 @@ mod tests {
 
     #[test]
     fn test_full_extraction() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Realistic log line with everything
         let line = b"2024-01-15 user@example.com from 10.1.2.3 accessed api.test.com";
@@ -1581,7 +1581,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_extraction_basic() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Use compressed notation (::) which is present in >95% of real IPv6 addresses
         let line = b"Server at 2001:db8:85a3::8a2e:370:7334 responded";
@@ -1601,7 +1601,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_extraction_compressed() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"Connecting to 2001:db8::1";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1620,7 +1620,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_extraction_realistic() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Use realistic global unicast addresses with :: compression (not loopback/link-local)
         let line = b"Address 2001:0db8::1 connects to 2606:2800:220:1::248";
@@ -1642,7 +1642,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_extraction_multiple() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"Traffic from 2001:db8::1 to 2001:db8::2";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1662,7 +1662,7 @@ mod tests {
 
     #[test]
     fn test_mixed_ipv4_ipv6_extraction() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         let line = b"IPv4: 192.168.1.1 IPv6: 2001:db8::1";
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -1693,7 +1693,7 @@ mod tests {
 
     #[test]
     fn test_reject_ipv4_with_4_and_8_digit_octets() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 423 filter: "2025.36.0.72591908" (4 and 8 digit octets)
         let line = b"Invalid IP: 2025.36.0.72591908";
@@ -1712,7 +1712,7 @@ mod tests {
 
     #[test]
     fn test_reject_ipv4_with_octet_over_255() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 423 filter: "460.1.1.2" (3 digits but >255)
         let line = b"Invalid IP: 460.1.1.2";
@@ -1731,7 +1731,7 @@ mod tests {
 
     #[test]
     fn test_reject_ipv4_with_consecutive_dots() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 410 filter: "26.0..26.0" (consecutive dots)
         let line = b"Invalid IP: 26.0..26.0";
@@ -1750,7 +1750,7 @@ mod tests {
 
     #[test]
     fn test_reject_email_with_consecutive_dots_in_local() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 578 filter: "s...@" (consecutive dots in local part)
         let line = b"Invalid email: s...@example.com";
@@ -1773,7 +1773,7 @@ mod tests {
 
     #[test]
     fn test_reject_email_without_letter_in_local() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 578 filter: ".@.." (no letter in local part)
         let line = b"Invalid email: .@example.com";
@@ -1796,7 +1796,7 @@ mod tests {
 
     #[test]
     fn test_accept_email_with_uuid_in_local() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 578 comment: "34480FE2-5610-4973-AA09-3ABB60D38D55@" is OK
         let line = b"Valid email: 34480FE2-5610-4973-AA09-3ABB60D38D55@example.com";
@@ -1823,7 +1823,7 @@ mod tests {
 
     #[test]
     fn test_reject_email_with_ip_address_domain() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 591 filter: "192.168.1.222" (IP address as domain)
         let line = b"Invalid email: user@192.168.1.222";
@@ -1846,7 +1846,7 @@ mod tests {
 
     #[test]
     fn test_reject_email_with_fake_tld() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 591 filter: "Uv3.peer" (fake TLD)
         let line = b"Invalid email: test@Uv3.peer";
@@ -1865,7 +1865,7 @@ mod tests {
 
     #[test]
     fn test_reject_tiny_ipv6_addresses() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 654 filters: "e::f" (4 bytes), "ce::A" (5 bytes), "e::add" (6 bytes)
         let test_cases = [
@@ -1895,7 +1895,7 @@ mod tests {
 
     #[test]
     fn test_reject_ipv6_with_12_digit_segment() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 689 filter: "FEC0050519FB::c" (12-digit segment)
         let line = b"Invalid IPv6: FEC0050519FB::c";
@@ -1918,7 +1918,7 @@ mod tests {
 
     #[test]
     fn test_reject_ipv6_with_8_digit_segment() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 689 filter: "7::31BD71E4" (8-digit segment)
         let line = b"Invalid IPv6: 7::31BD71E4";
@@ -1941,7 +1941,7 @@ mod tests {
 
     #[test]
     fn test_reject_domain_with_percent_encoding() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 274 comment: "Kagi%20Assistant.app" (% is invalid in domain chars)
         let line = b"Invalid domain: Kagi%20Assistant.app";
@@ -1964,7 +1964,7 @@ mod tests {
 
     #[test]
     fn test_reject_bare_tld() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 240 filter: bare TLDs like ".app", ".com"
         let line = b"Visit .app or .com for info";
@@ -1988,7 +1988,7 @@ mod tests {
 
     #[test]
     fn test_reject_link_local_ipv6() {
-        let extractor = PatternExtractor::new().unwrap();
+        let extractor = Extractor::new().unwrap();
 
         // Line 713 filter: fe80::/10 link-local addresses
         let line = b"Link-local address: fe80::1 and fe80::dead:beef";

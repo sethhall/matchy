@@ -1,9 +1,9 @@
 //! Example demonstrating pattern extraction from logs
 //!
-//! This example shows how to use PatternExtractor to find domains,
+//! This example shows how to use Extractor to find domains,
 //! IP addresses (IPv4 and IPv6), and email addresses in unstructured log data.
 
-use matchy::extractor::PatternExtractor;
+use matchy::extractor::Extractor;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Matchy Pattern Extractor Demo ===\n");
@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "   Input: \"2024-01-15 10:32:45 GET /api evil.example.com 192.168.1.1 - user@test.com\""
     );
 
-    let extractor = PatternExtractor::new()?;
+    let extractor = Extractor::new()?;
     let log_line = b"2024-01-15 10:32:45 GET /api evil.example.com 192.168.1.1 - user@test.com";
 
     println!("   Extracted:");
@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("7. Custom Configuration (3+ label domains only):");
     println!("   Input: \"Check example.com and api.test.example.com\"");
 
-    let custom_extractor = PatternExtractor::builder()
+    let custom_extractor = Extractor::builder()
         .extract_domains(true)
         .min_domain_labels(3) // Require at least 3 labels (e.g., api.test.example.com)
         .extract_ipv4(false) // Disable IPv4 extraction

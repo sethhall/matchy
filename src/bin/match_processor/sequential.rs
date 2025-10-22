@@ -18,7 +18,7 @@ const RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 pub fn process_file(
     input_path: &Path,
     db: &matchy::Database,
-    extractor: &matchy::extractor::PatternExtractor,
+    extractor: &matchy::extractor::Extractor,
     output_format: &str,
     show_stats: bool,
     show_progress: bool,
@@ -202,7 +202,7 @@ pub fn process_file(
 pub fn process_file_with_aggregate(
     input_path: &Path,
     db: &matchy::Database,
-    extractor: &matchy::extractor::PatternExtractor,
+    extractor: &matchy::extractor::Extractor,
     output_format: &str,
     show_stats: bool,
     aggregate_stats: &mut ProcessingStats,
@@ -391,7 +391,7 @@ pub fn process_line_matches(
     input_path: &Path,
     timestamp: f64,
     db: &matchy::Database,
-    extractor: &matchy::extractor::PatternExtractor,
+    extractor: &matchy::extractor::Extractor,
     output_json: bool,
     stats: &mut ProcessingStats,
 ) -> Result<()> {

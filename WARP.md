@@ -177,8 +177,10 @@ matchy/
 | **ac_offset.rs** | Aho-Corasick automaton with offset-based pointers for mmap |
 | **paraglob_offset.rs** | Main Paraglob struct, pattern matching orchestration |
 | **glob.rs** | Glob syntax parsing and matching (*, ?, [], [!]) |
-|| **offset_format.rs** | Binary format definitions with stable layout |
+| **offset_format.rs** | Binary format definitions with stable layout |
 | **serialization.rs** | High-level save/load/mmap API |
+| **processing.rs** | Batch processing infrastructure (LineFileReader, Worker, etc.) |
+| **file_reader.rs** | Streaming file I/O with automatic gzip decompression |
 | **binary/** | Low-level binary format reading/writing/validation |
 | **mmap.rs** | Safe wrapper around memory-mapped files |
 | **c_api/** | C FFI with opaque handles, error codes |
@@ -432,3 +434,188 @@ inherits = "release"
 ```
 
 **Note**: `panic = "abort"` is critical - panics must never cross FFI boundaries!
+
+## Processing Module API
+
+The `processing` module provides infrastructure for efficient batch-oriented file analysis. These are general-purpose building blocks that work sequentially or can be used to build parallel pipelines.
+
+### Core Types
+
+```rust
+// Minimal match result - no file/line context
+pub struct MatchResult {
+    pub matched_text: String,     // "192.168.1.1"
+    pub match_type: String,        // "IPv4", "IPv6", "Domain", "Email"
+    pub result: QueryResult,       // Database result with data
+    pub database_id: String,       // Which DB matched: "threats.mxy"
+    pub byte_offset: usize,        // Offset in input data (0-indexed)
+}
+
+// Match with line context (for line-oriented processing)
+pub struct LineMatch {
+    pub match_result: MatchResult, // Core match info
+    pub source: PathBuf,           // File path, "-" for stdin, or any label
+    pub line_number: usize,        // Line number (1-indexed)
+}
+
+// Pre-chunked batch of line-oriented data
+pub struct LineBatch {
+    pub source: PathBuf,              // Source label (file, "-", etc.)
+    pub starting_line_number: usize,  // First line number (1-indexed)
+    pub data: Arc<Vec<u8>>,           // Raw byte data
+    pub line_offsets: Arc<Vec<usize>>, // Pre-computed newline positions
+}
+
+// Accumulated processing statistics
+pub struct WorkerStats {
+    pub lines_processed: usize,
+    pub candidates_tested: usize,
+    pub matches_found: usize,
+    pub lines_with_matches: usize,
+    pub total_bytes: usize,
+    pub ipv4_count: usize,
+    pub ipv6_count: usize,
+    pub domain_count: usize,
+    pub email_count: usize,
+}
+```
+
+### LineFileReader - File Chunking
+
+Reads files in line-oriented chunks with automatic gzip decompression.
+
+```rust
+pub struct LineFileReader { /* ... */ }
+
+impl LineFileReader {
+    // Create new reader
+    // Supports .gz files via extension detection
+    pub fn new<P: AsRef<Path>>(path: P, chunk_size: usize) -> io::Result<Self>
+    
+    // Read next batch (returns None at EOF)
+    pub fn next_batch(&mut self) -> io::Result<Option<LineBatch>>
+    
+    // Iterator interface
+    pub fn batches(self) -> LineBatchIter
+}
+```
+
+**Example:**
+```rust
+use matchy::processing::LineFileReader;
+
+let reader = LineFileReader::new("access.log.gz", 128 * 1024)?;
+for batch in reader.batches() {
+    let batch = batch?;
+    println!("Batch: {} lines", batch.line_offsets.len());
+}
+```
+
+### Worker - Batch Processing
+
+Processes batches with extraction + database matching. Supports multiple databases.
+
+```rust
+pub struct Worker { /* ... */ }
+
+impl Worker {
+    // Builder pattern for multi-database support
+    pub fn builder() -> WorkerBuilder
+    
+    // Process raw bytes without line tracking
+    pub fn process_bytes(&mut self, data: &[u8]) -> Result<Vec<MatchResult>, String>
+    
+    // Process LineBatch with automatic line number calculation
+    pub fn process_lines(&mut self, batch: &LineBatch) -> Result<Vec<LineMatch>, String>
+    
+    // Get accumulated statistics
+    pub fn stats(&self) -> &WorkerStats
+    
+    // Reset statistics to zero
+    pub fn reset_stats(&mut self)
+}
+
+pub struct WorkerBuilder { /* ... */ }
+
+impl WorkerBuilder {
+    pub fn extractor(self, extractor: Extractor) -> Self
+    pub fn add_database(self, id: impl Into<String>, db: Database) -> Self
+    pub fn build(self) -> Worker
+}
+```
+
+**Example (single database):**
+```rust
+use matchy::{Database, processing};
+use matchy::extractor::Extractor;
+
+let db = Database::from("threats.mxy").open()?;
+let extractor = Extractor::new()?;
+
+let mut worker = processing::Worker::builder()
+    .extractor(extractor)
+    .add_database("threats", db)
+    .build();
+
+let reader = processing::LineFileReader::new("access.log", 128 * 1024)?;
+for batch in reader.batches() {
+    let batch = batch?;
+    let matches = worker.process_lines(&batch)?;
+    
+    for m in matches {
+        println!("{}:{} - {} found in {}", 
+            m.source.display(), m.line_number,
+            m.match_result.matched_text, m.match_result.database_id);
+    }
+}
+```
+
+**Example (multiple databases):**
+```rust
+let threats_db = Database::from("threats.mxy").open()?;
+let allowlist_db = Database::from("allowlist.mxy").open()?;
+
+let mut worker = processing::Worker::builder()
+    .extractor(extractor)
+    .add_database("threats", threats_db)
+    .add_database("allowlist", allowlist_db)
+    .build();
+
+// Each match includes database_id to show which DB matched
+let matches = worker.process_bytes(b"Check 192.168.1.1")?;
+for m in matches {
+    println!("{} found in {}", m.matched_text, m.database_id);
+}
+```
+
+**Example (non-file processing):**
+```rust
+// For matchy-app or other non-file use cases
+let text = "Check this IP: 192.168.1.1";
+let matches: Vec<MatchResult> = worker.process_bytes(text.as_bytes())?;
+
+for m in matches {
+    println!("{} ({}): {:?}", m.matched_text, m.match_type, m.result);
+    // No file/line context - just the match
+}
+```
+
+### Design Rationale
+
+**Why two match types?**
+- `MatchResult`: Core match info, useful everywhere (desktop app, web service, etc.)
+- `LineMatch`: Adds file/line context, only for line-oriented processing
+
+**Why multiple databases?**
+- Check multiple threat feeds
+- Cross-reference allowlists and blocklists  
+- Tag matches by source ("found in threat-db-1, not in allowlist-db-2")
+- Extract once, query N databases (more efficient than N separate passes)
+
+**Why process_bytes() and process_lines()?**
+- `process_bytes()`: General-purpose, no line assumptions (matchy-app, streaming)
+- `process_lines()`: Convenience for file processing, computes line numbers automatically
+
+**Why PathBuf for source?**
+- Flexible labeling: real file paths, "-" for stdin, "tcp://..." for network streams
+- Common convention, works with Display for output

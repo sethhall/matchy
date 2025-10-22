@@ -98,6 +98,8 @@ pub mod endian;
 pub mod error;
 /// Fast extraction of structured patterns (domains, IPs, emails) from text
 pub mod extractor;
+/// File reading utilities with automatic gzip decompression
+pub mod file_reader;
 pub mod glob;
 /// IP tree builder for MMDB format
 pub mod ip_tree_builder;
@@ -112,6 +114,13 @@ mod mmdb;
 pub mod mmdb_builder;
 pub mod offset_format;
 pub mod paraglob_offset;
+/// Batch processing infrastructure for efficient file analysis
+///
+/// General-purpose building blocks for sequential or parallel line-oriented processing:
+/// - `LineFileReader` - Chunks files with gzip support
+/// - `Worker` - Processes batches with extraction + matching  
+/// - `LineBatch`, `MatchResult`, `LineMatch` - Data structures
+pub mod processing;
 pub mod serialization;
 /// SIMD-accelerated utilities for pattern matching
 ///

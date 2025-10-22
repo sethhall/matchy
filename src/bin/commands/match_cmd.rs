@@ -25,7 +25,7 @@ pub fn cmd_match(
     trusted: bool,
     cache_size: usize,
 ) -> Result<()> {
-    use matchy::extractor::PatternExtractor;
+    use matchy::extractor::Extractor;
     use matchy::Database;
 
     // Parse thread count: None = auto, "auto" = auto, "0" = auto, "N" = N
@@ -82,7 +82,7 @@ pub fn cmd_match(
     let has_strings = db.has_literal_data() || db.has_glob_data();
 
     // Build extractor optimized for what the database contains
-    let mut builder = PatternExtractor::builder();
+    let mut builder = Extractor::builder();
 
     if !has_ip {
         // No IP data - skip IP extraction entirely
