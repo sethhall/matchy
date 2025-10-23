@@ -300,16 +300,7 @@ pub fn process_file_batched(
 
                     if output_json {
                         // Only allocate string for matches that need output
-                        let candidate_str = match &item.item {
-                            matchy::extractor::ExtractedItem::Ipv4(ip) => ip.to_string(),
-                            matchy::extractor::ExtractedItem::Ipv6(ip) => ip.to_string(),
-                            matchy::extractor::ExtractedItem::Email(s)
-                            | matchy::extractor::ExtractedItem::Hash(_, s)
-                            | matchy::extractor::ExtractedItem::Bitcoin(s)
-                            | matchy::extractor::ExtractedItem::Ethereum(s)
-                            | matchy::extractor::ExtractedItem::Monero(s) => s.to_string(),
-                            _ => unreachable!(),
-                        };
+                        let candidate_str = item.item.as_value();
                         
                         output_match_json(
                             &result,

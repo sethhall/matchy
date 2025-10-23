@@ -385,25 +385,9 @@ impl Worker {
                 if let Some(query_result) = result_opt {
                     self.stats.matches_found += 1;
 
-                    let match_type = match item.item {
-                        ExtractedItem::Ipv4(_) => "IPv4",
-                        ExtractedItem::Ipv6(_) => "IPv6",
-                        ExtractedItem::Domain(_) => "Domain",
-                        ExtractedItem::Email(_) => "Email",
-                        ExtractedItem::Hash(hash_type, _) => match hash_type {
-                            HashType::Md5 => "MD5",
-                            HashType::Sha1 => "SHA1",
-                            HashType::Sha256 => "SHA256",
-                            HashType::Sha384 => "SHA384",
-                        },
-                        ExtractedItem::Bitcoin(_) => "Bitcoin",
-                        ExtractedItem::Ethereum(_) => "Ethereum",
-                        ExtractedItem::Monero(_) => "Monero",
-                    };
-
                     results.push(MatchResult {
                         matched_text: matched_text.clone(),
-                        match_type: match_type.to_string(),
+                        match_type: item.item.type_name().to_string(),
                         result: query_result,
                         database_id: database_id.clone(),
                         byte_offset: item.span.0,

@@ -185,6 +185,29 @@ impl HashType {
     pub fn is_empty(&self) -> bool {
         false
     }
+
+    /// Get the human-readable type name for this hash type
+    ///
+    /// Returns a consistent string representation:
+    /// - `"MD5"` for 32-character MD5 hashes
+    /// - `"SHA1"` for 40-character SHA1 hashes
+    /// - `"SHA256"` for 64-character SHA256 hashes
+    /// - `"SHA384"` for 96-character SHA384 hashes
+    ///
+    /// # Example
+    /// ```
+    /// # use matchy::extractor::HashType;
+    /// assert_eq!(HashType::Md5.type_name(), "MD5");
+    /// assert_eq!(HashType::Sha256.type_name(), "SHA256");
+    /// ```
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            HashType::Md5 => "MD5",
+            HashType::Sha1 => "SHA1",
+            HashType::Sha256 => "SHA256",
+            HashType::Sha384 => "SHA384",
+        }
+    }
 }
 
 /// Type of extracted pattern
@@ -206,6 +229,85 @@ pub enum ExtractedItem<'a> {
     Ethereum(&'a str),
     /// Monero address
     Monero(&'a str),
+}
+
+impl<'a> ExtractedItem<'a> {
+    /// Get the human-readable type name for this extracted item
+    ///
+    /// Returns a consistent string representation of the item type:
+    /// - `"Domain"`, `"Email"`, `"IPv4"`, `"IPv6"`
+    /// - `"MD5"`, `"SHA1"`, `"SHA256"`, `"SHA384"` for hashes
+    /// - `"Bitcoin"`, `"Ethereum"`, `"Monero"` for cryptocurrency addresses
+    ///
+    /// This is useful for logging, output formatting, and avoiding repetitive
+    /// pattern matching across your codebase.
+    ///
+    /// # Example
+    /// ```
+    /// # use matchy::extractor::Extractor;
+    /// # let extractor = Extractor::new().unwrap();
+    /// let line = b"Check example.com and 192.168.1.1";
+    /// for match_item in extractor.extract_from_line(line) {
+    ///     println!("{}: {}", match_item.item.type_name(), match_item.as_str(line));
+    /// }
+    /// // Output:
+    /// // Domain: example.com
+    /// // IPv4: 192.168.1.1
+    /// ```
+    ///
+    /// # See Also
+    /// - [`as_value()`](Self::as_value) - Get the extracted value as a string
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            ExtractedItem::Domain(_) => "Domain",
+            ExtractedItem::Email(_) => "Email",
+            ExtractedItem::Ipv4(_) => "IPv4",
+            ExtractedItem::Ipv6(_) => "IPv6",
+            ExtractedItem::Hash(hash_type, _) => hash_type.type_name(),
+            ExtractedItem::Bitcoin(_) => "Bitcoin",
+            ExtractedItem::Ethereum(_) => "Ethereum",
+            ExtractedItem::Monero(_) => "Monero",
+        }
+    }
+
+    /// Get the extracted value as a string
+    ///
+    /// Returns the string representation of the extracted item.
+    /// For IP addresses, this converts them to their canonical string form.
+    ///
+    /// This allocates a new `String` and is useful when you need an owned value
+    /// (e.g., for storage, returning from functions, or when the original input
+    /// goes out of scope). If you only need a string slice referencing the
+    /// original input, use [`Match::as_str()`] instead.
+    ///
+    /// # Example
+    /// ```
+    /// # use matchy::extractor::Extractor;
+    /// # let extractor = Extractor::new().unwrap();
+    /// let line = b"Check 192.168.1.1 and example.com";
+    /// let values: Vec<String> = extractor
+    ///     .extract_from_line(line)
+    ///     .map(|m| m.item.as_value())
+    ///     .collect();
+    /// // Note: extraction order is IPv4, then Domain
+    /// assert_eq!(values, vec!["example.com", "192.168.1.1"]);
+    /// ```
+    ///
+    /// # See Also
+    /// - [`type_name()`](Self::type_name) - Get the type name of this item
+    /// - [`Match::as_str()`] - Get a zero-copy string slice
+    pub fn as_value(&self) -> String {
+        match self {
+            ExtractedItem::Domain(s) => s.to_string(),
+            ExtractedItem::Email(s) => s.to_string(),
+            ExtractedItem::Ipv4(ip) => ip.to_string(),
+            ExtractedItem::Ipv6(ip) => ip.to_string(),
+            ExtractedItem::Hash(_, s) => s.to_string(),
+            ExtractedItem::Bitcoin(s) => s.to_string(),
+            ExtractedItem::Ethereum(s) => s.to_string(),
+            ExtractedItem::Monero(s) => s.to_string(),
+        }
+    }
 }
 
 /// A single extracted match with position information
@@ -1644,6 +1746,65 @@ mod tests {
     fn test_extractor_creation() {
         let extractor = Extractor::new().unwrap();
         assert!(extractor.extract_domains());
+    }
+
+    #[test]
+    fn test_extracted_item_type_name() {
+        let extractor = Extractor::new().unwrap();
+
+        // Test various types
+        let line = b"Check example.com user@test.com 192.168.1.1 2001:db8::1 5d41402abc4b2a76b9719d911017c592";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        // Verify each type has correct type_name()
+        for m in &matches {
+            let type_name = m.item.type_name();
+            match &m.item {
+                ExtractedItem::Domain(_) => assert_eq!(type_name, "Domain"),
+                ExtractedItem::Email(_) => assert_eq!(type_name, "Email"),
+                ExtractedItem::Ipv4(_) => assert_eq!(type_name, "IPv4"),
+                ExtractedItem::Ipv6(_) => assert_eq!(type_name, "IPv6"),
+                ExtractedItem::Hash(HashType::Md5, _) => assert_eq!(type_name, "MD5"),
+                ExtractedItem::Hash(HashType::Sha1, _) => assert_eq!(type_name, "SHA1"),
+                ExtractedItem::Hash(HashType::Sha256, _) => assert_eq!(type_name, "SHA256"),
+                ExtractedItem::Hash(HashType::Sha384, _) => assert_eq!(type_name, "SHA384"),
+                ExtractedItem::Bitcoin(_) => assert_eq!(type_name, "Bitcoin"),
+                ExtractedItem::Ethereum(_) => assert_eq!(type_name, "Ethereum"),
+                ExtractedItem::Monero(_) => assert_eq!(type_name, "Monero"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_extracted_item_as_value() {
+        let extractor = Extractor::new().unwrap();
+
+        let line = b"Check example.com and 192.168.1.1";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        assert!(matches.len() >= 2);
+
+        // Test domain
+        let domain_match = matches
+            .iter()
+            .find(|m| matches!(m.item, ExtractedItem::Domain(_)));
+        assert!(domain_match.is_some());
+        assert_eq!(domain_match.unwrap().item.as_value(), "example.com");
+
+        // Test IPv4
+        let ip_match = matches
+            .iter()
+            .find(|m| matches!(m.item, ExtractedItem::Ipv4(_)));
+        assert!(ip_match.is_some());
+        assert_eq!(ip_match.unwrap().item.as_value(), "192.168.1.1");
+    }
+
+    #[test]
+    fn test_hash_type_name() {
+        assert_eq!(HashType::Md5.type_name(), "MD5");
+        assert_eq!(HashType::Sha1.type_name(), "SHA1");
+        assert_eq!(HashType::Sha256.type_name(), "SHA256");
+        assert_eq!(HashType::Sha384.type_name(), "SHA384");
     }
 
     #[test]

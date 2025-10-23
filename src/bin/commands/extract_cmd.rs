@@ -236,19 +236,12 @@ fn process_file<W: Write>(
 
             // Debug: show candidates if requested
             if show_candidates {
-                let type_name = match match_item.item {
-                    ExtractedItem::Ipv4(_) => "IPv4",
-                    ExtractedItem::Ipv6(_) => "IPv6",
-                    ExtractedItem::Domain(_) => "Domain",
-                    ExtractedItem::Email(_) => "Email",
-                    ExtractedItem::Hash(_, _) => "Hash",
-                    ExtractedItem::Bitcoin(_) => "Bitcoin",
-                    ExtractedItem::Ethereum(_) => "Ethereum",
-                    ExtractedItem::Monero(_) => "Monero",
-                };
                 eprintln!(
                     "[CANDIDATE] {} at {}-{}: {}",
-                    type_name, match_item.span.0, match_item.span.1, matched_text
+                    match_item.item.type_name(),
+                    match_item.span.0,
+                    match_item.span.1,
+                    matched_text
                 );
             }
 
@@ -262,16 +255,7 @@ fn process_file<W: Write>(
             // Output the match
             match output_format {
                 OutputFormat::Json => {
-                    let type_str = match match_item.item {
-                        ExtractedItem::Ipv4(_) => "ipv4",
-                        ExtractedItem::Ipv6(_) => "ipv6",
-                        ExtractedItem::Domain(_) => "domain",
-                        ExtractedItem::Email(_) => "email",
-                        ExtractedItem::Hash(_, _) => "hash",
-                        ExtractedItem::Bitcoin(_) => "bitcoin",
-                        ExtractedItem::Ethereum(_) => "ethereum",
-                        ExtractedItem::Monero(_) => "monero",
-                    };
+                    let type_str = match_item.item.type_name().to_lowercase();
                     writeln!(
                         writer,
                         "{{\"type\":\"{}\",\"value\":\"{}\"}}",
@@ -280,16 +264,7 @@ fn process_file<W: Write>(
                     )?;
                 }
                 OutputFormat::Csv => {
-                    let type_str = match match_item.item {
-                        ExtractedItem::Ipv4(_) => "ipv4",
-                        ExtractedItem::Ipv6(_) => "ipv6",
-                        ExtractedItem::Domain(_) => "domain",
-                        ExtractedItem::Email(_) => "email",
-                        ExtractedItem::Hash(_, _) => "hash",
-                        ExtractedItem::Bitcoin(_) => "bitcoin",
-                        ExtractedItem::Ethereum(_) => "ethereum",
-                        ExtractedItem::Monero(_) => "monero",
-                    };
+                    let type_str = match_item.item.type_name().to_lowercase();
                     writeln!(
                         writer,
                         "{},\"{}\"",

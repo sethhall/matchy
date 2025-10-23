@@ -121,19 +121,16 @@ pub fn process_file(
                 } else {
                     None
                 };
-            let (result, candidate_str) = match item.item {
-                matchy::extractor::ExtractedItem::Ipv4(ip) => {
-                    (db.lookup_ip(IpAddr::V4(ip))?, ip.to_string())
-                }
-                matchy::extractor::ExtractedItem::Ipv6(ip) => {
-                    (db.lookup_ip(IpAddr::V6(ip))?, ip.to_string())
-                }
+            let candidate_str = item.item.as_value();
+            let result = match item.item {
+                matchy::extractor::ExtractedItem::Ipv4(ip) => db.lookup_ip(IpAddr::V4(ip))?,
+                matchy::extractor::ExtractedItem::Ipv6(ip) => db.lookup_ip(IpAddr::V6(ip))?,
                 matchy::extractor::ExtractedItem::Domain(s)
                 | matchy::extractor::ExtractedItem::Email(s)
                 | matchy::extractor::ExtractedItem::Hash(_, s)
                 | matchy::extractor::ExtractedItem::Bitcoin(s)
                 | matchy::extractor::ExtractedItem::Ethereum(s)
-                | matchy::extractor::ExtractedItem::Monero(s) => (db.lookup(s)?, s.to_string()),
+                | matchy::extractor::ExtractedItem::Monero(s) => db.lookup(s)?,
             };
             if let Some(start) = lookup_start {
                 stats.lookup_time += start.elapsed();
@@ -311,19 +308,16 @@ pub fn process_file_with_aggregate(
             } else {
                 None
             };
-            let (result, candidate_str) = match item.item {
-                matchy::extractor::ExtractedItem::Ipv4(ip) => {
-                    (db.lookup_ip(IpAddr::V4(ip))?, ip.to_string())
-                }
-                matchy::extractor::ExtractedItem::Ipv6(ip) => {
-                    (db.lookup_ip(IpAddr::V6(ip))?, ip.to_string())
-                }
+            let candidate_str = item.item.as_value();
+            let result = match item.item {
+                matchy::extractor::ExtractedItem::Ipv4(ip) => db.lookup_ip(IpAddr::V4(ip))?,
+                matchy::extractor::ExtractedItem::Ipv6(ip) => db.lookup_ip(IpAddr::V6(ip))?,
                 matchy::extractor::ExtractedItem::Domain(s)
                 | matchy::extractor::ExtractedItem::Email(s)
                 | matchy::extractor::ExtractedItem::Hash(_, s)
                 | matchy::extractor::ExtractedItem::Bitcoin(s)
                 | matchy::extractor::ExtractedItem::Ethereum(s)
-                | matchy::extractor::ExtractedItem::Monero(s) => (db.lookup(s)?, s.to_string()),
+                | matchy::extractor::ExtractedItem::Monero(s) => db.lookup(s)?,
             };
             if let Some(start) = lookup_start {
                 aggregate_stats.lookup_time += start.elapsed();
@@ -420,19 +414,16 @@ pub fn process_line_matches(
         stats.candidates_tested += 1;
 
         // Lookup candidate
-        let (result, candidate_str) = match item.item {
-            matchy::extractor::ExtractedItem::Ipv4(ip) => {
-                (db.lookup_ip(IpAddr::V4(ip))?, ip.to_string())
-            }
-            matchy::extractor::ExtractedItem::Ipv6(ip) => {
-                (db.lookup_ip(IpAddr::V6(ip))?, ip.to_string())
-            }
+        let candidate_str = item.item.as_value();
+        let result = match item.item {
+            matchy::extractor::ExtractedItem::Ipv4(ip) => db.lookup_ip(IpAddr::V4(ip))?,
+            matchy::extractor::ExtractedItem::Ipv6(ip) => db.lookup_ip(IpAddr::V6(ip))?,
             matchy::extractor::ExtractedItem::Domain(s)
             | matchy::extractor::ExtractedItem::Email(s)
             | matchy::extractor::ExtractedItem::Hash(_, s)
             | matchy::extractor::ExtractedItem::Bitcoin(s)
             | matchy::extractor::ExtractedItem::Ethereum(s)
-            | matchy::extractor::ExtractedItem::Monero(s) => (db.lookup(s)?, s.to_string()),
+            | matchy::extractor::ExtractedItem::Monero(s) => db.lookup(s)?,
         };
 
         let is_match = match &result {
