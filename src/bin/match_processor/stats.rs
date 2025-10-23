@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
 /// Statistics for processing a single file or batch
@@ -71,7 +72,7 @@ pub struct ProgressReporter {
 impl ProgressReporter {
     pub fn new() -> Self {
         // Check if stderr is a TTY for single-line updates
-        let is_tty = atty::is(atty::Stream::Stderr);
+        let is_tty = std::io::stderr().is_terminal();
 
         Self {
             last_update: Instant::now(),

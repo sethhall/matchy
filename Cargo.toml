@@ -87,7 +87,6 @@ memchr = "2.7"  # SIMD-accelerated byte searching
 rayon = "1.10"  # Parallel sort for large hash builds
 notify = "6.1"  # File system watching for log tailing
 ctrlc = "3.4"  # Cross-platform Ctrl+C handling
-atty = "0.2"  # TTY detection for progress display
 flate2 = "1.0"  # Gzip compression/decompression support
 bs58 = "0.5"  # Base58 encoding/decoding for Bitcoin/Monero addresses
 sha2 = "0.10"  # SHA256 for Bitcoin checksum validation
