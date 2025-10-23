@@ -75,9 +75,11 @@ pub fn cmd_bench(
     println!();
 
     // Determine output file
-    let temp_file = output
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(format!("/tmp/matchy_bench_{}_{}.mxy", db_type, count)));
+    let temp_file = output.clone().unwrap_or_else(|| {
+        let mut temp_dir = std::env::temp_dir();
+        temp_dir.push(format!("matchy_bench_{}_{}.mxy", db_type, count));
+        temp_dir
+    });
 
     match db_type.as_str() {
         "ip" => bench_ip_database(

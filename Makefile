@@ -125,6 +125,11 @@ fmt:
 clippy:
 	@echo "\n🔍 Running clippy lints..."
 	@cargo clippy --all-targets --all-features -- -D warnings
+	@if [ "$$(uname -m)" = "arm64" ]; then \
+		echo "🔍 Also checking x86_64 target (since we're on ARM)..."; \
+		rustup target add x86_64-unknown-linux-gnu 2>/dev/null || true; \
+		cargo clippy --all-targets --all-features --target x86_64-unknown-linux-gnu -- -D warnings; \
+	fi
 	@echo "✅ Clippy OK"
 
 # Check documentation builds without warnings
