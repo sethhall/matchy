@@ -158,7 +158,6 @@ pub fn ascii_lowercase_simd(text: &[u8], output: &mut Vec<u8>) {
         // SSE2 is guaranteed on x86_64, but use runtime check for safety
         if is_x86_feature_detected!("sse2") {
             unsafe { ascii_lowercase_simd_x86(text, output) };
-            return;
         }
     }
 
