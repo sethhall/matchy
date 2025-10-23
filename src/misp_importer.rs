@@ -77,6 +77,55 @@ where
     }
 }
 
+/// Custom deserializer for u8 fields that accepts both strings and numbers
+fn deserialize_u8_flexible<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    use serde_json::Value;
+
+    let value = Value::deserialize(deserializer)?;
+
+    match value {
+        Value::Number(n) => n
+            .as_u64()
+            .and_then(|n| u8::try_from(n).ok())
+            .ok_or_else(|| Error::custom("number out of u8 range"))
+            .map(Some),
+        Value::String(s) => s
+            .parse::<u8>()
+            .map(Some)
+            .map_err(|_| Error::custom("invalid u8 string")),
+        Value::Null => Ok(None),
+        _ => Err(Error::custom("expected number or string for u8")),
+    }
+}
+
+/// Custom deserializer for u64 fields that accepts both strings and numbers
+fn deserialize_u64_flexible<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    use serde_json::Value;
+
+    let value = Value::deserialize(deserializer)?;
+
+    match value {
+        Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| Error::custom("number out of u64 range"))
+            .map(Some),
+        Value::String(s) => s
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| Error::custom("invalid u64 string")),
+        Value::Null => Ok(None),
+        _ => Err(Error::custom("expected number or string for u64")),
+    }
+}
+
 /// MISP Event structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MispEvent {
@@ -89,11 +138,11 @@ pub struct MispEvent {
     pub info: Option<String>,
 
     /// Threat level (1=High, 2=Medium, 3=Low, 4=Undefined)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_u8_flexible")]
     pub threat_level_id: Option<u8>,
 
     /// Analysis level (0=Initial, 1=Ongoing, 2=Complete)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_u8_flexible")]
     pub analysis: Option<u8>,
 
     /// Event date
@@ -101,7 +150,7 @@ pub struct MispEvent {
     pub date: Option<String>,
 
     /// Unix timestamp
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_u64_flexible")]
     pub timestamp: Option<u64>,
 
     /// Published flag
@@ -177,7 +226,7 @@ pub struct MispAttribute {
     pub comment: Option<String>,
 
     /// Unix timestamp
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_u64_flexible")]
     pub timestamp: Option<u64>,
 
     /// Object relation (if part of an object)
@@ -212,7 +261,7 @@ pub struct MispObject {
     pub comment: Option<String>,
 
     /// Unix timestamp
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_u64_flexible")]
     pub timestamp: Option<u64>,
 
     /// Attributes in this object
