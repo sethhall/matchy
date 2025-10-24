@@ -156,6 +156,8 @@ pub enum HashType {
     Sha256,
     /// SHA384 hash (96 hex characters)
     Sha384,
+    /// SHA512 hash (128 hex characters)
+    Sha512,
 }
 
 impl HashType {
@@ -166,6 +168,7 @@ impl HashType {
             40 => Some(HashType::Sha1),
             64 => Some(HashType::Sha256),
             96 => Some(HashType::Sha384),
+            128 => Some(HashType::Sha512),
             _ => None,
         }
     }
@@ -177,6 +180,7 @@ impl HashType {
             HashType::Sha1 => 40,
             HashType::Sha256 => 64,
             HashType::Sha384 => 96,
+            HashType::Sha512 => 128,
         }
     }
 
@@ -193,6 +197,7 @@ impl HashType {
     /// - `"SHA1"` for 40-character SHA1 hashes
     /// - `"SHA256"` for 64-character SHA256 hashes
     /// - `"SHA384"` for 96-character SHA384 hashes
+    /// - `"SHA512"` for 128-character SHA512 hashes
     ///
     /// # Example
     /// ```
@@ -206,6 +211,7 @@ impl HashType {
             HashType::Sha1 => "SHA1",
             HashType::Sha256 => "SHA256",
             HashType::Sha384 => "SHA384",
+            HashType::Sha512 => "SHA512",
         }
     }
 }
@@ -1768,6 +1774,7 @@ mod tests {
                 ExtractedItem::Hash(HashType::Sha1, _) => assert_eq!(type_name, "SHA1"),
                 ExtractedItem::Hash(HashType::Sha256, _) => assert_eq!(type_name, "SHA256"),
                 ExtractedItem::Hash(HashType::Sha384, _) => assert_eq!(type_name, "SHA384"),
+                ExtractedItem::Hash(HashType::Sha512, _) => assert_eq!(type_name, "SHA512"),
                 ExtractedItem::Bitcoin(_) => assert_eq!(type_name, "Bitcoin"),
                 ExtractedItem::Ethereum(_) => assert_eq!(type_name, "Ethereum"),
                 ExtractedItem::Monero(_) => assert_eq!(type_name, "Monero"),
@@ -1805,6 +1812,30 @@ mod tests {
         assert_eq!(HashType::Sha1.type_name(), "SHA1");
         assert_eq!(HashType::Sha256.type_name(), "SHA256");
         assert_eq!(HashType::Sha384.type_name(), "SHA384");
+        assert_eq!(HashType::Sha512.type_name(), "SHA512");
+    }
+
+    #[test]
+    fn test_sha512_extraction() {
+        let extractor = Extractor::new().unwrap();
+
+        // SHA512 hash is 128 hex characters
+        let line = b"SHA512: cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e found";
+        let matches: Vec<_> = extractor.extract_from_line(line).collect();
+
+        let hashes: Vec<_> = matches
+            .iter()
+            .filter_map(|m| match m.item {
+                ExtractedItem::Hash(HashType::Sha512, h) => Some(h),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hashes.len(), 1, "Should extract SHA512 hash");
+        assert_eq!(
+            hashes[0],
+            "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+        );
     }
 
     #[test]

@@ -70,6 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     HashType::Sha1 => "SHA1  ",
                     HashType::Sha256 => "SHA256",
                     HashType::Sha384 => "SHA384",
+                    HashType::Sha512 => "SHA512",
                 };
                 println!("   ✅ {}: {}", type_str, hash);
             }
@@ -152,6 +153,7 @@ Line 6: Uppercase SHA1 2FD4E1C67A2D28FCED849EE1BB76E7391B93EB12
             HashType::Sha1 => "SHA1  ",
             HashType::Sha256 => "SHA256",
             HashType::Sha384 => "SHA384",
+            HashType::Sha512 => "SHA512",
         };
         println!("   {} {}", type_str, hash);
     }

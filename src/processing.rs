@@ -93,6 +93,8 @@ pub struct WorkerStats {
     pub sha256_count: usize,
     /// SHA384 hashes found
     pub sha384_count: usize,
+    /// SHA512 hashes found
+    pub sha512_count: usize,
     /// Bitcoin addresses found
     pub bitcoin_count: usize,
     /// Ethereum addresses found
@@ -350,6 +352,7 @@ impl Worker {
                     HashType::Sha1 => self.stats.sha1_count += 1,
                     HashType::Sha256 => self.stats.sha256_count += 1,
                     HashType::Sha384 => self.stats.sha384_count += 1,
+                    HashType::Sha512 => self.stats.sha512_count += 1,
                 },
                 ExtractedItem::Bitcoin(_) => self.stats.bitcoin_count += 1,
                 ExtractedItem::Ethereum(_) => self.stats.ethereum_count += 1,
