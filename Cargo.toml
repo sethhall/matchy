@@ -1,6 +1,6 @@
 [package]
 name = "matchy"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 authors = ["Seth Hall <seth@remor.com>"]
 license = "BSD-2-Clause"
