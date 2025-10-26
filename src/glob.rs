@@ -187,16 +187,43 @@ impl GlobPattern {
             GlobSegment::Literal(lit) => {
                 // Try to match literal at current position
                 let remaining = &text[text_pos..];
-                let matches = match self.mode {
-                    MatchMode::CaseSensitive => remaining.starts_with(lit.as_str()),
+                
+                let (matches, advance_bytes) = match self.mode {
+                    MatchMode::CaseSensitive => {
+                        (remaining.starts_with(lit.as_str()), lit.len())
+                    }
                     MatchMode::CaseInsensitive => {
-                        remaining.len() >= lit.len()
-                            && remaining[..lit.len()].eq_ignore_ascii_case(lit)
+                        // Compare char-by-char to ensure UTF-8 safety
+                        // We need to track how many bytes we've matched in the text
+                        let mut lit_chars = lit.chars();
+                        let mut matched_bytes = 0;
+                        let mut matches = true;
+                        
+                        for text_char in remaining.chars() {
+                            if let Some(lit_char) = lit_chars.next() {
+                                if !lit_char.eq_ignore_ascii_case(&text_char) {
+                                    matches = false;
+                                    break;
+                                }
+                                matched_bytes += text_char.len_utf8();
+                            } else {
+                                // Matched all chars in literal
+                                break;
+                            }
+                        }
+                        
+                        // Check if we matched all of lit
+                        if matches && lit_chars.next().is_some() {
+                            // Lit has more chars that we didn't match
+                            matches = false;
+                        }
+                        
+                        (matches, matched_bytes)
                     }
                 };
 
                 if matches {
-                    self.matches_impl(text, text_pos + lit.len(), seg_idx + 1, steps_remaining)
+                    self.matches_impl(text, text_pos + advance_bytes, seg_idx + 1, steps_remaining)
                 } else {
                     false
                 }

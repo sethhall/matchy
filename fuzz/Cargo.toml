@@ -61,3 +61,10 @@ path = "fuzz_targets/fuzz_literal_exact_match.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_lookup"
+path = "fuzz_targets/fuzz_lookup.rs"
+test = false
+doc = false
+bench = false
