@@ -92,6 +92,37 @@ pub fn cmd_build(
                     println!("  Reading: {}...", input.display());
                 }
 
+                // Validate that the file doesn't look like JSON or CSV
+                // (common user error: using wrong format flag)
+                if let Ok(content) = fs::read_to_string(input) {
+                    let trimmed = content.trim_start();
+                    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                        if trimmed.contains("\"Event\"") {
+                            anyhow::bail!(
+                                "File {} appears to be MISP JSON format.\n\n\
+                                You specified --format text, but this looks like MISP JSON.\n\
+                                Try: --format misp (or -f misp)",
+                                input.display()
+                            );
+                        } else {
+                            eprintln!(
+                                "Warning: {} looks like JSON but you specified --format text.\n\
+                                If this is a JSON file, use --format json instead.",
+                                input.display()
+                            );
+                        }
+                    }
+                    // Check for CSV-like content
+                    let first_line = content.lines().next().unwrap_or("");
+                    if first_line.contains(',') && first_line.split(',').count() > 3 {
+                        eprintln!(
+                            "Warning: {} looks like CSV but you specified --format text.\n\
+                            If this is a CSV file, use --format csv instead.",
+                            input.display()
+                        );
+                    }
+                }
+
                 let file = fs::File::open(input)
                     .with_context(|| format!("Failed to open input file: {}", input.display()))?;
                 let reader = io::BufReader::new(file);

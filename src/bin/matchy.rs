@@ -166,12 +166,17 @@ enum Commands {
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
 
-        /// Input format: text, csv, json, or misp (for MISP JSON threat intel files)
-        #[arg(short, long, default_value = "text")]
+        /// Input file format (how to parse input files)
+        /// - text: One pattern per line (default)
+        /// - csv: Comma-separated values with 'entry' or 'key' column
+        /// - json: JSON array of {"key": "pattern", "data": {...}}
+        /// - misp: MISP threat intelligence JSON format
+        #[arg(short = 'f', long, default_value = "text", value_name = "FORMAT")]
         format: String,
 
-        /// Database type name (e.g., "MyCompany-ThreatIntel")
-        #[arg(short = 't', long)]
+        /// Custom database type name for metadata (e.g., "MyCompany-ThreatIntel")
+        /// This is NOT the input format - use --format/-f for that
+        #[arg(short = 't', long, value_name = "NAME")]
         database_type: Option<String>,
 
         /// Description text (can be specified multiple times with --desc-lang)
