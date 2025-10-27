@@ -245,39 +245,66 @@ impl Hash for DataValue {
 ///
 /// Builds a data section by encoding values and tracking offsets.
 /// Supports deduplication - identical values get the same offset.
+/// Also supports string interning - duplicate strings are replaced with pointers.
 pub struct DataEncoder {
     /// Encoded data buffer
     buffer: Vec<u8>,
     /// Map from serialized value to offset (for deduplication)
     dedup_map: HashMap<Vec<u8>, u32>,
+    /// Map from string content to its first occurrence offset (for string interning)
+    string_cache: HashMap<String, u32>,
+    /// Enable string interning (default: true)
+    intern_strings: bool,
 }
 
 impl DataEncoder {
-    /// Create a new encoder
+    /// Create a new encoder with string interning enabled
     pub fn new() -> Self {
         Self {
             buffer: Vec::new(),
             dedup_map: HashMap::new(),
+            string_cache: HashMap::new(),
+            intern_strings: true,
+        }
+    }
+
+    /// Create a new encoder without string interning (legacy behavior)
+    pub fn new_without_interning() -> Self {
+        Self {
+            buffer: Vec::new(),
+            dedup_map: HashMap::new(),
+            string_cache: HashMap::new(),
+            intern_strings: false,
         }
     }
 
     /// Encode a value and return its offset
     ///
     /// If the value was previously encoded, returns the existing offset.
-    /// This enables automatic deduplication.
+    /// This enables automatic deduplication at the value level.
+    /// String interning happens during encoding for sub-strings within maps/arrays.
     pub fn encode(&mut self, value: &DataValue) -> u32 {
-        // First, serialize to temp buffer to check if we've seen this before
+        // For whole-value deduplication, we still use the temp buffer approach
+        // But we need to be careful about string interning during serialization
+
+        // Temporarily disable interning for the dedup check
+        let saved_intern = self.intern_strings;
+        self.intern_strings = false;
+
         let mut temp = Vec::new();
         Self::encode_to_buffer(value, &mut temp);
+
+        // Restore interning setting
+        self.intern_strings = saved_intern;
 
         // Check deduplication map
         if let Some(&offset) = self.dedup_map.get(&temp) {
             return offset;
         }
 
-        // New value - add to main buffer
+        // New value - encode with interning
         let offset = self.buffer.len() as u32;
-        self.buffer.extend_from_slice(&temp);
+        self.encode_value_interned(value);
         self.dedup_map.insert(temp, offset);
         offset
     }
@@ -292,7 +319,31 @@ impl DataEncoder {
         self.buffer.len()
     }
 
-    /// Encode a value to a buffer
+    /// Encode a value with string interning
+    ///
+    /// This is the main entry point that handles interning.
+    fn encode_value_interned(&mut self, value: &DataValue) {
+        match value {
+            DataValue::String(s) if self.intern_strings => {
+                // Check if we've seen this string before
+                if let Some(&existing_offset) = self.string_cache.get(s) {
+                    // Use a pointer to the existing string
+                    Self::encode_pointer(existing_offset, &mut self.buffer);
+                } else {
+                    // First occurrence - encode the string and cache its offset
+                    let offset = self.buffer.len() as u32;
+                    Self::encode_string(s, &mut self.buffer);
+                    self.string_cache.insert(s.clone(), offset);
+                }
+            }
+            DataValue::Map(m) => self.encode_map_interned(m),
+            DataValue::Array(a) => self.encode_array_interned(a),
+            // All other types use the static encoding
+            _ => Self::encode_to_buffer(value, &mut self.buffer),
+        }
+    }
+
+    /// Encode a value to a buffer (static version, no interning)
     fn encode_to_buffer(value: &DataValue, buffer: &mut Vec<u8>) {
         match value {
             DataValue::Pointer(offset) => Self::encode_pointer(*offset, buffer),
@@ -399,7 +450,34 @@ impl DataEncoder {
         buffer.extend_from_slice(&n.to_be_bytes());
     }
 
-    // Type 7: Map
+    // Type 7: Map (with interning)
+    fn encode_map_interned(&mut self, m: &HashMap<String, DataValue>) {
+        Self::encode_with_size(7, m.len(), &mut self.buffer);
+
+        // Encode key-value pairs (sorted by key for deterministic output)
+        let mut pairs: Vec<_> = m.iter().collect();
+        pairs.sort_by_key(|(k, _)| *k);
+
+        for (key, value) in pairs {
+            // Intern the map key
+            if self.intern_strings {
+                if let Some(&existing_offset) = self.string_cache.get(key) {
+                    Self::encode_pointer(existing_offset, &mut self.buffer);
+                } else {
+                    let offset = self.buffer.len() as u32;
+                    Self::encode_string(key, &mut self.buffer);
+                    self.string_cache.insert(key.clone(), offset);
+                }
+            } else {
+                Self::encode_string(key, &mut self.buffer);
+            }
+
+            // Recursively encode value with interning
+            self.encode_value_interned(value);
+        }
+    }
+
+    // Type 7: Map (static version, no interning)
     fn encode_map(m: &HashMap<String, DataValue>, buffer: &mut Vec<u8>) {
         Self::encode_with_size(7, m.len(), buffer);
 
@@ -436,7 +514,38 @@ impl DataEncoder {
         buffer.extend_from_slice(&n.to_be_bytes());
     }
 
-    // Type 11: Array
+    // Type 11: Array (with interning)
+    fn encode_array_interned(&mut self, a: &[DataValue]) {
+        let size = a.len();
+
+        // Control byte: type 0 << 5 | size bits
+        if size < 29 {
+            self.buffer.push(size as u8);
+        } else if size < 29 + 256 {
+            self.buffer.push(29);
+            self.buffer.push((size - 29) as u8);
+        } else if size < 29 + 256 + 65536 {
+            self.buffer.push(30);
+            let adjusted = size - 29 - 256;
+            self.buffer
+                .extend_from_slice(&(adjusted as u16).to_be_bytes());
+        } else {
+            self.buffer.push(31);
+            let adjusted = size - 29 - 256 - 65536;
+            self.buffer
+                .extend_from_slice(&(adjusted as u32).to_be_bytes()[1..]);
+        }
+
+        // Extended type byte
+        self.buffer.push(0x04); // 11 - 7 = 4
+
+        // Recursively encode each element with interning
+        for value in a {
+            self.encode_value_interned(value);
+        }
+    }
+
+    // Type 11: Array (static version, no interning)
     fn encode_array(a: &[DataValue], buffer: &mut Vec<u8>) {
         // Extended type encoding:
         // First byte: control byte with type 0 and size
@@ -1096,6 +1205,103 @@ mod tests {
         assert_eq!(decoder.decode(offset1).unwrap(), DataValue::String(short));
         assert_eq!(decoder.decode(offset2).unwrap(), DataValue::String(medium));
         assert_eq!(decoder.decode(offset3).unwrap(), DataValue::String(long));
+    }
+
+    #[test]
+    fn test_string_interning() {
+        // Test that repeated strings within structures are interned
+        let mut encoder = DataEncoder::new();
+
+        // Create multiple maps with repeated string values
+        let mut map1 = HashMap::new();
+        map1.insert(
+            "threat_level".to_string(),
+            DataValue::String("high".to_string()),
+        );
+        map1.insert(
+            "category".to_string(),
+            DataValue::String("malware".to_string()),
+        );
+        map1.insert("score".to_string(), DataValue::Uint32(95));
+
+        let mut map2 = HashMap::new();
+        map2.insert(
+            "threat_level".to_string(),
+            DataValue::String("high".to_string()),
+        ); // Repeated
+        map2.insert(
+            "category".to_string(),
+            DataValue::String("phishing".to_string()),
+        );
+        map2.insert("score".to_string(), DataValue::Uint32(88));
+
+        let mut map3 = HashMap::new();
+        map3.insert(
+            "threat_level".to_string(),
+            DataValue::String("high".to_string()),
+        ); // Repeated
+        map3.insert(
+            "category".to_string(),
+            DataValue::String("malware".to_string()),
+        ); // Repeated
+        map3.insert("score".to_string(), DataValue::Uint32(92));
+
+        // Encode all three maps
+        let offset1 = encoder.encode(&DataValue::Map(map1.clone()));
+        let offset2 = encoder.encode(&DataValue::Map(map2.clone()));
+        let offset3 = encoder.encode(&DataValue::Map(map3.clone()));
+
+        let bytes_with_interning = encoder.into_bytes();
+
+        // Now encode WITHOUT interning to compare size
+        let mut encoder_no_intern = DataEncoder::new_without_interning();
+        encoder_no_intern.encode(&DataValue::Map(map1.clone()));
+        encoder_no_intern.encode(&DataValue::Map(map2.clone()));
+        encoder_no_intern.encode(&DataValue::Map(map3.clone()));
+        let bytes_no_interning = encoder_no_intern.into_bytes();
+
+        // Interned version should be smaller
+        println!("With interning: {} bytes", bytes_with_interning.len());
+        println!("Without interning: {} bytes", bytes_no_interning.len());
+        println!(
+            "Savings: {} bytes ({:.1}%)",
+            bytes_no_interning.len() - bytes_with_interning.len(),
+            100.0 * (bytes_no_interning.len() - bytes_with_interning.len()) as f64
+                / bytes_no_interning.len() as f64
+        );
+        assert!(bytes_with_interning.len() < bytes_no_interning.len());
+
+        // Verify decoding still works correctly
+        let decoder = DataDecoder::new(&bytes_with_interning, 0);
+        let decoded1 = decoder.decode(offset1).unwrap();
+        let decoded2 = decoder.decode(offset2).unwrap();
+        let decoded3 = decoder.decode(offset3).unwrap();
+
+        assert_eq!(decoded1, DataValue::Map(map1));
+        assert_eq!(decoded2, DataValue::Map(map2));
+        assert_eq!(decoded3, DataValue::Map(map3));
+    }
+
+    #[test]
+    fn test_string_interning_in_arrays() {
+        // Test interning within arrays
+        let mut encoder = DataEncoder::new();
+
+        let array = DataValue::Array(vec![
+            DataValue::String("botnet".to_string()),
+            DataValue::String("c2".to_string()),
+            DataValue::String("botnet".to_string()), // Repeated
+            DataValue::String("malware".to_string()),
+            DataValue::String("c2".to_string()), // Repeated
+        ]);
+
+        let offset = encoder.encode(&array);
+        let bytes = encoder.into_bytes();
+
+        // Decode and verify
+        let decoder = DataDecoder::new(&bytes, 0);
+        let decoded = decoder.decode(offset).unwrap();
+        assert_eq!(decoded, array);
     }
 
     #[test]
