@@ -187,18 +187,16 @@ impl GlobPattern {
             GlobSegment::Literal(lit) => {
                 // Try to match literal at current position
                 let remaining = &text[text_pos..];
-                
+
                 let (matches, advance_bytes) = match self.mode {
-                    MatchMode::CaseSensitive => {
-                        (remaining.starts_with(lit.as_str()), lit.len())
-                    }
+                    MatchMode::CaseSensitive => (remaining.starts_with(lit.as_str()), lit.len()),
                     MatchMode::CaseInsensitive => {
                         // Compare char-by-char to ensure UTF-8 safety
                         // We need to track how many bytes we've matched in the text
                         let mut lit_chars = lit.chars();
                         let mut matched_bytes = 0;
                         let mut matches = true;
-                        
+
                         for text_char in remaining.chars() {
                             if let Some(lit_char) = lit_chars.next() {
                                 if !lit_char.eq_ignore_ascii_case(&text_char) {
@@ -211,13 +209,13 @@ impl GlobPattern {
                                 break;
                             }
                         }
-                        
+
                         // Check if we matched all of lit
                         if matches && lit_chars.next().is_some() {
                             // Lit has more chars that we didn't match
                             matches = false;
                         }
-                        
+
                         (matches, matched_bytes)
                     }
                 };
