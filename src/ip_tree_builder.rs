@@ -369,8 +369,31 @@ impl IpTreeBuilder {
     fn pointer_to_value(&self, pointer: NodePointer, node_count: u32) -> u32 {
         match pointer {
             NodePointer::Empty => node_count, // "not found" marker
-            NodePointer::Node(id) => id,
-            NodePointer::Data(offset, _prefix_len) => node_count + 16 + offset, // +16 for separator
+            NodePointer::Node(id) => {
+                // Validate node ID is within bounds
+                assert!(
+                    id < node_count,
+                    "Invalid node ID {} >= node_count {}",
+                    id,
+                    node_count
+                );
+                id
+            }
+            NodePointer::Data(offset, _prefix_len) => {
+                // Validate this won't underflow when read back
+                // Reader does: record - node_count - 16
+                // So we need: (node_count + 16 + offset) >= (node_count + 16)
+                // Which is always true for valid offsets, but let's validate the addition won't overflow
+                node_count
+                    .checked_add(16)
+                    .and_then(|base| base.checked_add(offset))
+                    .unwrap_or_else(|| {
+                        panic!(
+                        "Data pointer overflow: node_count={} + 16 + offset={} exceeds u32::MAX",
+                        node_count, offset
+                    )
+                    })
+            }
         }
     }
 

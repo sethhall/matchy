@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2025-10-28
+
+### Added
+- **String Interning for Database Size Reduction**
+  - Automatic deduplication of repeated string values in database data sections
+  - Significantly reduces database size for datasets with redundant metadata
+  - Zero query-time overhead - interning happens at build time
+  - Transparent to API users - no code changes required
+
+### Fixed
+- **Critical: Database Construction Bugs** (discovered via fuzzing)
+  - Fixed UTF-8 boundary bug in case-insensitive glob pattern matching that could create malformed databases
+  - Added overflow/underflow validation in IP tree builder to prevent invalid pointer arithmetic
+  - Database builder now validates all record values before writing to prevent creating unreadable databases
+  - Enhanced input validation during database construction
+  - Improved error messages for invalid data pointer calculations
+
+### Changed
+- Database loader now provides detailed error messages on invalid pointer arithmetic instead of panicking
+- Improved error messages for invalid input during database building
+- Better detection and reporting of malformed patterns and IP addresses
+
 ## [1.1.0] - 2025-10-25
 
 ### Added

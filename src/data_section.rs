@@ -690,9 +690,8 @@ impl<'a> DataDecoder<'a> {
         // The next byte contains the raw extended type number
         // Actual type = 7 + raw_ext_type (per libmaxminddb)
         let raw_ext_type = self.buffer[*cursor];
-        *cursor += 1;
-
         let type_id = 7 + raw_ext_type;
+        *cursor += 1;
 
         match type_id {
             8 => self.decode_int32(cursor, size_from_ctrl), // Extended type 1
@@ -701,7 +700,13 @@ impl<'a> DataDecoder<'a> {
             11 => self.decode_array(cursor, size_from_ctrl), // Extended type 4
             14 => Ok(DataValue::Bool(size_from_ctrl != 0)), // Extended type 7
             15 => self.decode_float(cursor, size_from_ctrl), // Extended type 8
-            _ => Err("Unknown extended type"),
+            _ => {
+                eprintln!(
+                    "Unknown extended type: raw_ext_type={}, type_id={}, size_from_ctrl={}, offset={}",
+                    raw_ext_type, type_id, size_from_ctrl, *cursor - 1
+                );
+                Err("Unknown extended type")
+            }
         }
     }
 

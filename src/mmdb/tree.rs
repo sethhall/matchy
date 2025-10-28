@@ -229,7 +229,21 @@ impl<'a> SearchTree<'a> {
         }
 
         // Per spec: subtract node count, then subtract 16 for separator
-        let offset = record - self.header.node_count - 16;
+        let offset_before_separator =
+            record.checked_sub(self.header.node_count).ok_or_else(|| {
+                MmdbError::InvalidFormat(format!(
+                    "Record {} - node_count {} underflow",
+                    record, self.header.node_count
+                ))
+            })?;
+
+        let offset = offset_before_separator.checked_sub(16).ok_or_else(|| {
+            MmdbError::InvalidFormat(format!(
+                "Data pointer {} - 16 underflow (record={}, node_count={})",
+                offset_before_separator, record, self.header.node_count
+            ))
+        })?;
+
         Ok(offset)
     }
 
