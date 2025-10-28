@@ -386,6 +386,11 @@ impl Worker {
                 };
 
                 if let Some(query_result) = result_opt {
+                    // Skip QueryResult::NotFound - not a real match
+                    if matches!(query_result, crate::QueryResult::NotFound) {
+                        continue;
+                    }
+
                     self.stats.matches_found += 1;
 
                     results.push(MatchResult {
