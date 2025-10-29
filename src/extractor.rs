@@ -103,10 +103,10 @@ impl ExtractorBuilder {
     /// Build the Extractor
     pub fn build(self) -> Result<Extractor, ParaglobError> {
         // Load embedded TLD automaton if domain extraction enabled
-        // Use trusted mode since TLD_AUTOMATON is compiled into the binary
+        // Use trusted mode since tld_automaton() is compiled into the binary
         let tld_matcher = if self.extract_domains {
             let paraglob = crate::serialization::from_bytes_trusted(
-                TLD_AUTOMATON,
+                tld_automaton(),
                 MatchMode::CaseInsensitive,
             )?;
             Some(paraglob)
@@ -1434,7 +1434,11 @@ struct AlignedTldData([u8; include_bytes!("data/tld_automaton.ac").len()]);
 static TLD_AUTOMATON_ALIGNED: AlignedTldData =
     AlignedTldData(*include_bytes!("data/tld_automaton.ac"));
 
-const TLD_AUTOMATON: &[u8] = &TLD_AUTOMATON_ALIGNED.0;
+// Inline function instead of const to avoid referencing statics in constants
+#[inline(always)]
+fn tld_automaton() -> &'static [u8] {
+    &TLD_AUTOMATON_ALIGNED.0
+}
 
 /// Compile-time boundary character lookup table for O(1) checking
 /// This replaces the branch-heavy is_word_boundary() function with a single array lookup.

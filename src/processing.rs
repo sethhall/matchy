@@ -43,7 +43,7 @@
 
 use crate::extractor::{ExtractedItem, Extractor, HashType};
 use crate::{Database, QueryResult};
-use std::io::{self, Read};
+use std::io::{self, BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -142,7 +142,7 @@ pub struct LineMatch {
 /// Supports gzip-compressed files via extension detection.
 pub struct LineFileReader {
     source_path: PathBuf,
-    reader: Box<dyn Read + Send>,
+    reader: Box<dyn BufRead + Send>,
     read_buffer: Vec<u8>,
     current_line_number: usize,
     eof: bool,

@@ -67,7 +67,7 @@ pub fn process_file(
         };
 
         // Extract candidates from the line
-        let extract_start = if show_stats && stats.lines_processed.is_multiple_of(SAMPLE_INTERVAL) {
+        let extract_start = if show_stats && stats.lines_processed % SAMPLE_INTERVAL == 0 {
             Some(Instant::now())
         } else {
             None
@@ -75,7 +75,7 @@ pub fn process_file(
 
         // Resync wall clock periodically
         let should_check_resync =
-            extract_start.is_some() || stats.lines_processed.is_multiple_of(6000);
+            extract_start.is_some() || stats.lines_processed % 6000 == 0;
         if output_json && should_check_resync {
             let now = extract_start.unwrap_or_else(Instant::now);
             if now.duration_since(last_resync) >= RESYNC_INTERVAL {
@@ -116,7 +116,7 @@ pub fn process_file(
 
             // Lookup candidate
             let lookup_start =
-                if show_stats && stats.candidates_tested.is_multiple_of(SAMPLE_INTERVAL) {
+                if show_stats && stats.candidates_tested % SAMPLE_INTERVAL == 0 {
                     Some(Instant::now())
                 } else {
                     None
@@ -252,7 +252,7 @@ pub fn process_file_with_aggregate(
         let extract_start = if show_stats
             && aggregate_stats
                 .lines_processed
-                .is_multiple_of(SAMPLE_INTERVAL)
+                % SAMPLE_INTERVAL == 0
         {
             Some(Instant::now())
         } else {
@@ -261,7 +261,7 @@ pub fn process_file_with_aggregate(
 
         // Resync wall clock periodically
         let should_check_resync =
-            extract_start.is_some() || aggregate_stats.lines_processed.is_multiple_of(6000);
+            extract_start.is_some() || aggregate_stats.lines_processed % 6000 == 0;
         if output_json && should_check_resync {
             let now = extract_start.unwrap_or_else(Instant::now);
             if now.duration_since(last_resync) >= RESYNC_INTERVAL {
@@ -302,7 +302,7 @@ pub fn process_file_with_aggregate(
             let lookup_start = if show_stats
                 && aggregate_stats
                     .candidates_tested
-                    .is_multiple_of(SAMPLE_INTERVAL)
+                    % SAMPLE_INTERVAL == 0
             {
                 Some(Instant::now())
             } else {

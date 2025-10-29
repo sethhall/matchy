@@ -1120,7 +1120,7 @@ fn validate_paraglob_offsets(
             ));
         } else {
             // Check alignment
-            if !offset.is_multiple_of(mem::align_of::<ACNodeHot>()) {
+            if offset % mem::align_of::<ACNodeHot>() != 0 {
                 report.error(format!(
                     "AC nodes section misaligned: offset={}, required_alignment={}",
                     offset,
@@ -1140,7 +1140,7 @@ fn validate_paraglob_offsets(
                 "Patterns section out of bounds: offset={}, size={}, buffer={}",
                 offset, size, buffer_len
             ));
-        } else if !offset.is_multiple_of(mem::align_of::<PatternEntry>()) {
+        } else if offset % mem::align_of::<PatternEntry>() != 0 {
             report.error(format!(
                 "Patterns section misaligned: offset={}, required_alignment={}",
                 offset,
@@ -1330,7 +1330,7 @@ fn validate_ac_structure(
             let failure_node_offset = node.failure_offset as usize;
             if failure_node_offset < nodes_offset
                 || failure_node_offset >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
-                || !(failure_node_offset - nodes_offset).is_multiple_of(mem::size_of::<ACNodeHot>())
+                || (failure_node_offset - nodes_offset) % mem::size_of::<ACNodeHot>() != 0
             {
                 report.error(format!(
                     "AC node {} has invalid failure link offset: {}",
@@ -1367,8 +1367,7 @@ fn validate_ac_structure(
                 if target_offset != 0
                     && (target_offset < nodes_offset
                         || target_offset >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
-                        || !(target_offset - nodes_offset)
-                            .is_multiple_of(mem::size_of::<ACNodeHot>()))
+                        || (target_offset - nodes_offset) % mem::size_of::<ACNodeHot>() != 0)
                 {
                     report.error(format!(
                         "AC node {} (One) has invalid target offset: {}",
@@ -1398,8 +1397,7 @@ fn validate_ac_structure(
                             if target_offset < nodes_offset
                                 || target_offset
                                     >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
-                                || !(target_offset - nodes_offset)
-                                    .is_multiple_of(mem::size_of::<ACNodeHot>())
+                                || (target_offset - nodes_offset) % mem::size_of::<ACNodeHot>() != 0
                             {
                                 report.error(format!(
                                     "AC node {} edge {} has invalid target: {}",
@@ -1420,7 +1418,7 @@ fn validate_ac_structure(
                         "AC node {} dense lookup out of bounds: offset={}",
                         i, lookup_offset
                     ));
-                } else if !lookup_offset.is_multiple_of(64) {
+                } else if lookup_offset % 64 != 0 {
                     report.warning(format!(
                         "AC node {} dense lookup not cache-aligned: offset={}",
                         i, lookup_offset
@@ -1443,8 +1441,7 @@ fn validate_ac_structure(
                                 && (target_offset < nodes_offset
                                     || target_offset
                                         >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
-                                    || !(target_offset - nodes_offset)
-                                        .is_multiple_of(mem::size_of::<ACNodeHot>()))
+                                    || (target_offset - nodes_offset) % mem::size_of::<ACNodeHot>() != 0)
                             {
                                 report.error(format!(
                                     "AC node {} dense entry [{}] has invalid target: {}",

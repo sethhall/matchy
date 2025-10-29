@@ -159,7 +159,7 @@ pub fn bench_combined_database(
     for i in 0..(query_count - half_queries) {
         let query_idx = i % unique_half.max(1);
         let pattern_id = (query_idx * 43) % pattern_count;
-        let test_str = if pattern_id.is_multiple_of(20) {
+        let test_str = if pattern_id % 20 == 0 {
             // Match complex patterns (~5%)
             match (pattern_id / 20) % 4 {
                 0 => format!("prefix5.suffix.attacker{}.com", pattern_id),

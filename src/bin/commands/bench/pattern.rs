@@ -235,7 +235,7 @@ pub fn bench_pattern_database(
                 }
                 "mixed" => {
                     // Match mixed patterns
-                    if pattern_id.is_multiple_of(2) {
+                    if pattern_id % 2 == 0 {
                         // Prefix pattern match
                         format!("{}-{}-suffix", word, domain_word)
                     } else {
@@ -245,7 +245,7 @@ pub fn bench_pattern_database(
                 }
                 _ => {
                     // "complex" - match original complex patterns
-                    if pattern_id.is_multiple_of(20) {
+                    if pattern_id % 20 == 0 {
                         // Match complex patterns (~5%)
                         match (pattern_id / 20) % 4 {
                             0 => format!("prefix5.middle.{}-attack-{}.{}", word, pattern_id, tld),
