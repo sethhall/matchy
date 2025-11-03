@@ -172,9 +172,6 @@ pub struct DatabaseOptions {
     /// Path to the database file (optional for from_bytes)
     pub path: PathBuf,
 
-    /// Skip validation checks (faster but less safe)
-    pub trusted: bool,
-
     /// LRU cache capacity (None = use default, Some(0) = disable)
     pub cache_capacity: Option<usize>,
 
@@ -186,7 +183,6 @@ impl Default for DatabaseOptions {
     fn default() -> Self {
         Self {
             path: PathBuf::new(),
-            trusted: false,
             cache_capacity: Some(DEFAULT_QUERY_CACHE_SIZE),
             bytes: None,
         }
@@ -228,16 +224,6 @@ impl DatabaseOpener {
         }
     }
 
-    /// Skip validation checks (faster, for trusted databases)
-    ///
-    /// # Security Warning
-    ///
-    /// Only use this for databases from trusted sources. Skips UTF-8
-    /// validation and other safety checks for ~15-20% performance improvement.
-    pub fn trusted(mut self) -> Self {
-        self.options.trusted = true;
-        self
-    }
 
     /// Set LRU cache capacity
     ///
@@ -481,21 +467,19 @@ impl Database {
     ///
     /// Most users should use `Database::from()` builder instead.
     pub fn open_with_options(options: DatabaseOptions) -> Result<Self, DatabaseError> {
-        let trusted = options.trusted;
         let cache_capacity = options.cache_capacity;
 
         // Open the database - either from bytes or from file
         let mut db = if let Some(bytes) = options.bytes {
             // Load from bytes
-            Self::from_storage_with_trust(DatabaseStorage::Owned(bytes), trusted)?
+            Self::from_storage(DatabaseStorage::Owned(bytes))?
         } else {
             // Load from file
-            Self::open_with_trust_internal(
+            Self::open_internal(
                 options
                     .path
                     .to_str()
                     .ok_or_else(|| DatabaseError::Io("Invalid path encoding".to_string()))?,
-                trusted,
             )?
         };
 
@@ -517,12 +501,12 @@ impl Database {
 
         Ok(db)
     }
-    /// Open a database file using memory mapping - SAFE mode (validates UTF-8)
+    /// Open a database file using memory mapping
     ///
     /// This uses mmap for zero-copy file access, which is much faster than
     /// loading the entire file into memory, especially for large databases.
     ///
-    /// Validates UTF-8 on pattern string reads. Use for untrusted databases.
+    /// Validates UTF-8 on pattern string reads.
     ///
     /// Automatically detects the database format and initializes
     /// the appropriate lookup structures. Uses default cache settings.
@@ -551,51 +535,16 @@ impl Database {
         Self::from(path).open()
     }
 
-    /// Open a database file using memory mapping - TRUSTED mode (skips UTF-8 validation)
-    ///
-    /// **SECURITY WARNING**: Only use for databases from trusted sources!
-    /// Skips UTF-8 validation for ~15-20% performance improvement.
-    ///
-    /// This uses mmap for zero-copy file access, which is much faster than
-    /// loading the entire file into memory, especially for large databases.
-    ///
-    /// # Deprecation
-    ///
-    /// Use `Database::from(path).trusted().open()` for the new builder API.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use matchy::Database;
-    /// // Old way (still works)
-    /// let db = Database::open_trusted("threats.mxy")?;
-    ///
-    /// // New way (recommended)
-    /// let db = Database::from("threats.mxy").trusted().open()?;
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    #[deprecated(
-        since = "1.1.0",
-        note = "Use `Database::from(path).trusted().open()` instead"
-    )]
-    pub fn open_trusted(path: &str) -> Result<Self, DatabaseError> {
-        // Delegate to new builder API
-        Self::from(path).trusted().open()
-    }
-
-    /// Internal: Open database with explicit trust mode
-    /// Used by database_opener to bypass deprecated API
-    pub(crate) fn open_with_trust_internal(
-        path: &str,
-        trusted: bool,
-    ) -> Result<Self, DatabaseError> {
+    /// Internal: Open database
+    /// Used by database_opener
+    pub(crate) fn open_internal(path: &str) -> Result<Self, DatabaseError> {
         let file = File::open(path)
             .map_err(|e| DatabaseError::Io(format!("Failed to open {}: {}", path, e)))?;
 
         let mmap = unsafe { Mmap::map(&file) }
             .map_err(|e| DatabaseError::Io(format!("Failed to mmap {}: {}", path, e)))?;
 
-        Self::from_storage_with_trust(DatabaseStorage::Mmap(mmap), trusted)
+        Self::from_storage(DatabaseStorage::Mmap(mmap))
     }
 
     /// Create database from raw bytes (for testing)
@@ -603,16 +552,8 @@ impl Database {
         Self::from_storage(DatabaseStorage::Owned(data))
     }
 
-    /// Internal: Create database from storage (safe mode - validates UTF-8)
+    /// Internal: Create database from storage
     fn from_storage(storage: DatabaseStorage) -> Result<Self, DatabaseError> {
-        Self::from_storage_with_trust(storage, false)
-    }
-
-    /// Internal: Create database from storage with explicit trust mode
-    fn from_storage_with_trust(
-        storage: DatabaseStorage,
-        trusted: bool,
-    ) -> Result<Self, DatabaseError> {
         // First, create the struct with minimal initialization
         let mut db = Self {
             data: storage,
@@ -642,7 +583,7 @@ impl Database {
             }
             DatabaseFormat::PatternOnly => {
                 // Pattern-only: load from start of file
-                let pg = Self::load_pattern_section(data, 0, trusted).map_err(|e| {
+                let pg = Self::load_pattern_section(data, 0).map_err(|e| {
                     DatabaseError::Unsupported(format!("Failed to load pattern section: {}", e))
                 })?;
                 db.pattern_matcher = Some(RefCell::new(pg));
@@ -653,7 +594,7 @@ impl Database {
 
                 // Find and load pattern section after MMDB_PATTERN separator
                 if let Some(offset) = Self::find_pattern_section_fast(data) {
-                    let (pg, map) = Self::load_combined_pattern_section(data, offset, trusted)
+                    let (pg, map) = Self::load_combined_pattern_section(data, offset)
                         .map_err(|e| {
                             DatabaseError::Unsupported(format!(
                                 "Failed to load pattern section: {}",
@@ -1180,11 +1121,7 @@ impl Database {
     /// Load pattern section from data at given offset (for pattern-only databases)
     /// The format at offset is: PARAGLOB magic + data
     /// Uses zero-copy from_mmap for O(1) loading
-    fn load_pattern_section(
-        data: &'static [u8],
-        offset: usize,
-        trusted: bool,
-    ) -> Result<Paraglob, String> {
+    fn load_pattern_section(data: &'static [u8], offset: usize) -> Result<Paraglob, String> {
         if offset >= data.len() {
             return Err("Pattern section offset out of bounds".to_string());
         }
@@ -1196,11 +1133,7 @@ impl Database {
         if offset == 0 && data.len() >= 8 && &data[0..8] == b"PARAGLOB" {
             // Standard .pgb format - load with zero-copy
             // SAFETY: data is 'static lifetime from mmap, valid for entire Database lifetime
-            let result = if trusted {
-                unsafe { Paraglob::from_mmap_trusted(data, match_mode) }
-            } else {
-                unsafe { Paraglob::from_mmap(data, match_mode) }
-            };
+            let result = unsafe { Paraglob::from_mmap(data, match_mode) };
             return result.map_err(|e| format!("Failed to parse pattern-only database: {}", e));
         }
 
@@ -1214,7 +1147,6 @@ impl Database {
     fn load_combined_pattern_section(
         data: &'static [u8],
         offset: usize,
-        trusted: bool,
     ) -> Result<(Paraglob, PatternDataMappings), String> {
         if offset >= data.len() {
             return Err("Pattern section offset out of bounds".to_string());
@@ -1258,11 +1190,7 @@ impl Database {
         // Extract and load paraglob data with zero-copy
         let paraglob_data = &data[paraglob_start..paraglob_end];
         // SAFETY: data is 'static lifetime from mmap, valid for entire Database lifetime
-        let paraglob = if trusted {
-            unsafe { Paraglob::from_mmap_trusted(paraglob_data, match_mode) }
-        } else {
-            unsafe { Paraglob::from_mmap(paraglob_data, match_mode) }
-        };
+        let paraglob = unsafe { Paraglob::from_mmap(paraglob_data, match_mode) };
         let paraglob = paraglob.map_err(|e| format!("Failed to parse paraglob section: {}", e))?;
 
         // Store mapping metadata WITHOUT parsing all offsets (O(1) instead of O(n))

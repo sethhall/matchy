@@ -103,9 +103,9 @@ impl ExtractorBuilder {
     /// Build the Extractor
     pub fn build(self) -> Result<Extractor, ParaglobError> {
         // Load embedded TLD automaton if domain extraction enabled
-        // Use trusted mode since TLD_AUTOMATON is compiled into the binary
+        // TLD_AUTOMATON is compiled into the binary at build time
         let tld_matcher = if self.extract_domains {
-            let paraglob = crate::serialization::from_bytes_trusted(
+            let paraglob = crate::serialization::from_bytes(
                 TLD_AUTOMATON,
                 MatchMode::CaseInsensitive,
             )?;

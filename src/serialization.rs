@@ -156,29 +156,6 @@ pub fn from_bytes(data: &[u8], mode: GlobMatchMode) -> Result<Paraglob, Paraglob
     Paraglob::from_buffer(data.to_vec(), mode)
 }
 
-/// Create a Paraglob from trusted bytes (e.g., embedded data compiled into binary)
-///
-/// **SECURITY WARNING**: Only use for data from trusted sources (e.g., compile-time embedded data)!
-/// Skips UTF-8 validation and uses unsafe fast paths for ~15-20% performance improvement.
-///
-/// # Example
-///
-/// ```
-/// use matchy::paraglob_offset::Paraglob;
-/// use matchy::glob::MatchMode;
-/// use matchy::serialization::{to_bytes, from_bytes_trusted};
-///
-/// let patterns = vec!["*.txt"];
-/// let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
-/// let bytes = to_bytes(&pg);
-///
-/// // Later, if you trust the source (e.g., embedded in your binary)
-/// let pg2 = from_bytes_trusted(&bytes, MatchMode::CaseSensitive).unwrap();
-/// assert_eq!(pg.pattern_count(), pg2.pattern_count());
-/// ```
-pub fn from_bytes_trusted(data: &[u8], mode: GlobMatchMode) -> Result<Paraglob, ParaglobError> {
-    Paraglob::from_buffer_trusted(data.to_vec(), mode)
-}
 
 #[cfg(test)]
 mod tests {

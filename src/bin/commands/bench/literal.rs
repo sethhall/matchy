@@ -13,7 +13,6 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
         load_iterations,
         query_count,
         hit_rate,
-        trusted,
         cache_size,
         cache_hit_rate,
     } = config;
@@ -143,11 +142,7 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
     let mut load_times = Vec::new();
     for i in 1..=load_iterations {
         let load_start = Instant::now();
-        let mut opener = Database::from(temp_file.to_str().unwrap());
-        if trusted {
-            opener = opener.trusted();
-        }
-        let _db = opener.open()?;
+        let _db = Database::from(temp_file.to_str().unwrap()).open()?;
         let load_time = load_start.elapsed();
         load_times.push(load_time);
         println!(
@@ -162,9 +157,6 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
 
     println!("--- Phase 4: Query Performance ---");
     let mut opener = Database::from(temp_file.to_str().unwrap());
-    if trusted {
-        opener = opener.trusted();
-    }
     if cache_size == 0 {
         opener = opener.no_cache();
     } else {

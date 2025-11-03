@@ -13,7 +13,6 @@ pub fn bench_pattern_database(
     load_iterations: usize,
     query_count: usize,
     hit_rate: usize,
-    trusted: bool,
     cache_size: usize,
     cache_hit_rate: usize,
     pattern_style: &str,
@@ -145,11 +144,7 @@ pub fn bench_pattern_database(
     let mut load_times = Vec::new();
     for i in 1..=load_iterations {
         let load_start = Instant::now();
-        let mut opener = Database::from(temp_file.to_str().unwrap());
-        if trusted {
-            opener = opener.trusted();
-        }
-        let _db = opener.open()?;
+        let _db = Database::from(temp_file.to_str().unwrap()).open()?;
         let load_time = load_start.elapsed();
         load_times.push(load_time);
         println!(
@@ -164,9 +159,6 @@ pub fn bench_pattern_database(
 
     println!("--- Phase 4: Query Performance ---");
     let mut opener = Database::from(temp_file.to_str().unwrap());
-    if trusted {
-        opener = opener.trusted();
-    }
     if cache_size == 0 {
         opener = opener.no_cache();
     } else {

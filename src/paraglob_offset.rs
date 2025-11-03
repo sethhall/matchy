@@ -695,17 +695,12 @@ struct PatternDataMetadata {
 /// # Security
 ///
 /// By default, pattern strings are validated for UTF-8 correctness on each query.
-/// For trusted databases (built by this library), you can use `trusted` mode which
-/// skips UTF-8 validation for ~15-20% performance improvement.
-///
-/// **Only use trusted mode for databases from trusted sources!**
+/// All string operations are validated for UTF-8 correctness.
 pub struct Paraglob {
     /// Binary buffer containing all data
     buffer: BufferStorage,
     /// Matching mode (public for Database::mode() access)
     pub(crate) mode: GlobMatchMode,
-    /// Whether to trust database and skip UTF-8 validation (faster but unsafe for untrusted DBs)
-    trusted: bool,
     /// Compiled glob patterns (cached on first use)
     /// Uses RefCell for interior mutability - allows &self methods while caching patterns
     glob_cache: RefCell<HashMap<u32, GlobPattern>>,
@@ -736,7 +731,6 @@ impl Paraglob {
         Self {
             buffer: BufferStorage::Owned(Vec::new()),
             mode,
-            trusted: true, // Databases we build ourselves are trusted
             glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash: None,
             pattern_data_map: None,
@@ -985,28 +979,16 @@ impl Paraglob {
                 };
                 let entry = *entry_ref;
 
-                let pattern_str = if self.trusted {
-                    // TRUSTED mode: Skip UTF-8 validation (fast)
-                    // SAFETY: We trust the database source to have valid UTF-8
-                    unsafe {
-                        read_str_unchecked(
-                            buffer,
-                            entry.pattern_string_offset as usize,
-                            entry.pattern_string_length as usize,
-                        )
-                    }
-                } else {
-                    // SAFE mode: Validate UTF-8 on untrusted databases
-                    match unsafe {
-                        read_str_checked(
-                            buffer,
-                            entry.pattern_string_offset as usize,
-                            entry.pattern_string_length as usize,
-                        )
-                    } {
-                        Ok(s) => s,
-                        Err(_) => continue, // Skip corrupted pattern
-                    }
+                // Validate UTF-8 on every string read
+                let pattern_str = match unsafe {
+                    read_str_checked(
+                        buffer,
+                        entry.pattern_string_offset as usize,
+                        entry.pattern_string_length as usize,
+                    )
+                } {
+                    Ok(s) => s,
+                    Err(_) => continue, // Skip corrupted pattern
                 };
 
                 // Check glob pattern - ensure it's cached first
@@ -1051,28 +1033,16 @@ impl Paraglob {
                 self.result_buffer.borrow_mut().push(entry.pattern_id);
             } else {
                 // Glob pattern - need to read pattern string and do glob matching
-                let pattern_str = if self.trusted {
-                    // TRUSTED mode: Skip UTF-8 validation (fast)
-                    // SAFETY: We trust the database source to have valid UTF-8
-                    unsafe {
-                        read_str_unchecked(
-                            buffer,
-                            entry.pattern_string_offset as usize,
-                            entry.pattern_string_length as usize,
-                        )
-                    }
-                } else {
-                    // SAFE mode: Validate UTF-8 on untrusted databases
-                    match unsafe {
-                        read_str_checked(
-                            buffer,
-                            entry.pattern_string_offset as usize,
-                            entry.pattern_string_length as usize,
-                        )
-                    } {
-                        Ok(s) => s,
-                        Err(_) => continue, // Skip corrupted pattern
-                    }
+                // Validate UTF-8 on every string read
+                let pattern_str = match unsafe {
+                    read_str_checked(
+                        buffer,
+                        entry.pattern_string_offset as usize,
+                        entry.pattern_string_length as usize,
+                    )
+                } {
+                    Ok(s) => s,
+                    Err(_) => continue, // Skip corrupted pattern
                 };
 
                 // Ensure pattern is cached first
@@ -1211,28 +1181,16 @@ impl Paraglob {
                 };
                 let entry = *entry_ref;
 
-                let pattern_str = if self.trusted {
-                    // TRUSTED mode: Skip UTF-8 validation (fast)
-                    // SAFETY: We trust the database source to have valid UTF-8
-                    unsafe {
-                        read_str_unchecked(
-                            buffer,
-                            entry.pattern_string_offset as usize,
-                            entry.pattern_string_length as usize,
-                        )
-                    }
-                } else {
-                    // SAFE mode: Validate UTF-8 on untrusted databases
-                    match unsafe {
-                        read_str_checked(
-                            buffer,
-                            entry.pattern_string_offset as usize,
-                            entry.pattern_string_length as usize,
-                        )
-                    } {
-                        Ok(s) => s,
-                        Err(_) => continue, // Skip corrupted pattern
-                    }
+                // Validate UTF-8 on every string read
+                let pattern_str = match unsafe {
+                    read_str_checked(
+                        buffer,
+                        entry.pattern_string_offset as usize,
+                        entry.pattern_string_length as usize,
+                    )
+                } {
+                    Ok(s) => s,
+                    Err(_) => continue, // Skip corrupted pattern
                 };
 
                 // Check glob pattern - ensure it's cached first
@@ -1277,28 +1235,16 @@ impl Paraglob {
                 self.result_buffer.borrow_mut().push(entry.pattern_id);
             } else {
                 // Glob pattern - need to read pattern string and do glob matching
-                let pattern_str = if self.trusted {
-                    // TRUSTED mode: Skip UTF-8 validation (fast)
-                    // SAFETY: We trust the database source to have valid UTF-8
-                    unsafe {
-                        read_str_unchecked(
-                            buffer,
-                            entry.pattern_string_offset as usize,
-                            entry.pattern_string_length as usize,
-                        )
-                    }
-                } else {
-                    // SAFE mode: Validate UTF-8 on untrusted databases
-                    match unsafe {
-                        read_str_checked(
-                            buffer,
-                            entry.pattern_string_offset as usize,
-                            entry.pattern_string_length as usize,
-                        )
-                    } {
-                        Ok(s) => s,
-                        Err(_) => continue, // Skip corrupted pattern
-                    }
+                // Validate UTF-8 on every string read
+                let pattern_str = match unsafe {
+                    read_str_checked(
+                        buffer,
+                        entry.pattern_string_offset as usize,
+                        entry.pattern_string_length as usize,
+                    )
+                } {
+                    Ok(s) => s,
+                    Err(_) => continue, // Skip corrupted pattern
                 };
 
                 // Ensure pattern is cached first
@@ -1639,33 +1585,13 @@ impl Paraglob {
         self.buffer.as_slice()
     }
 
-    /// Load from buffer (for deserialization) - SAFE mode (validates UTF-8)
+    /// Load from buffer (for deserialization)
     ///
     /// Uses ACLiteralHash for O(1) AC literal lookups. Load time is O(1) since
     /// the hash table is already serialized in the buffer.
     ///
-    /// Validates UTF-8 on every pattern string read. Use for untrusted databases.
+    /// Validates UTF-8 on every pattern string read.
     pub fn from_buffer(buffer: Vec<u8>, mode: GlobMatchMode) -> Result<Self, ParaglobError> {
-        Self::from_buffer_with_trust(buffer, mode, false)
-    }
-
-    /// Load from buffer (for deserialization) - TRUSTED mode (skips UTF-8 validation)
-    ///
-    /// **SECURITY WARNING**: Only use for databases from trusted sources!
-    /// Skips UTF-8 validation for ~15-20% performance improvement.
-    pub fn from_buffer_trusted(
-        buffer: Vec<u8>,
-        mode: GlobMatchMode,
-    ) -> Result<Self, ParaglobError> {
-        Self::from_buffer_with_trust(buffer, mode, true)
-    }
-
-    /// Load from buffer with explicit trust mode
-    fn from_buffer_with_trust(
-        buffer: Vec<u8>,
-        mode: GlobMatchMode,
-        trusted: bool,
-    ) -> Result<Self, ParaglobError> {
         if buffer.len() < mem::size_of::<ParaglobHeader>() {
             return Err(ParaglobError::SerializationError(
                 "Buffer too small".to_string(),
@@ -1714,7 +1640,6 @@ impl Paraglob {
         Ok(Self {
             buffer: BufferStorage::Owned(buffer),
             mode,
-            trusted,
             glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash,
             pattern_data_map,
@@ -1725,7 +1650,7 @@ impl Paraglob {
         })
     }
 
-    /// Load from mmap'd slice (zero-copy) - SAFE mode (validates UTF-8)
+    /// Load from mmap'd slice (zero-copy)
     ///
     /// # Safety
     ///
@@ -1734,34 +1659,11 @@ impl Paraglob {
     ///
     /// This is truly O(1) - only validates header and stores offsets,
     /// no data copying or HashMap building.
+    ///
+    /// Validates UTF-8 on every pattern string read.
     pub unsafe fn from_mmap(
         slice: &'static [u8],
         mode: GlobMatchMode,
-    ) -> Result<Self, ParaglobError> {
-        Self::from_mmap_with_trust(slice, mode, false)
-    }
-
-    /// Load from mmap'd slice (zero-copy) - TRUSTED mode (skips UTF-8 validation)
-    ///
-    /// **SECURITY WARNING**: Only use for databases from trusted sources!
-    /// Skips UTF-8 validation for ~15-20% performance improvement.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the slice remains valid for the lifetime
-    /// of this Paraglob instance. Typically used with memory-mapped files.
-    pub unsafe fn from_mmap_trusted(
-        slice: &'static [u8],
-        mode: GlobMatchMode,
-    ) -> Result<Self, ParaglobError> {
-        Self::from_mmap_with_trust(slice, mode, true)
-    }
-
-    /// Load from mmap'd slice with explicit trust mode
-    unsafe fn from_mmap_with_trust(
-        slice: &'static [u8],
-        mode: GlobMatchMode,
-        trusted: bool,
     ) -> Result<Self, ParaglobError> {
         if slice.len() < mem::size_of::<ParaglobHeader>() {
             return Err(ParaglobError::SerializationError(
@@ -1808,7 +1710,6 @@ impl Paraglob {
         Ok(Self {
             buffer: BufferStorage::Borrowed(slice),
             mode,
-            trusted,
             glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash,
             pattern_data_map,
