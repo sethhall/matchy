@@ -156,7 +156,6 @@ pub fn from_bytes(data: &[u8], mode: GlobMatchMode) -> Result<Paraglob, Paraglob
     Paraglob::from_buffer(data.to_vec(), mode)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

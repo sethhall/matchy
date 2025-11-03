@@ -105,10 +105,8 @@ impl ExtractorBuilder {
         // Load embedded TLD automaton if domain extraction enabled
         // TLD_AUTOMATON is compiled into the binary at build time
         let tld_matcher = if self.extract_domains {
-            let paraglob = crate::serialization::from_bytes(
-                TLD_AUTOMATON,
-                MatchMode::CaseInsensitive,
-            )?;
+            let paraglob =
+                crate::serialization::from_bytes(TLD_AUTOMATON, MatchMode::CaseInsensitive)?;
             Some(paraglob)
         } else {
             None
