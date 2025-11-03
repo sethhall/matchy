@@ -28,9 +28,8 @@ let db = Database::from("database.mxy")
     .cache_capacity(1000)
     .open()?;
 
-// Performance mode (skip validation, large cache)
+// Large cache for high repetition workloads
 let db = Database::from("threats.mxy")
-    .trusted()
     .cache_capacity(100_000)
     .open()?;
 
@@ -46,7 +45,6 @@ let db = Database::from("database.mxy")
 |--------|-------------|
 | `.cache_capacity(size)` | Set LRU cache size (default: 10,000) |
 | `.no_cache()` | Disable caching entirely |
-| `.trusted()` | Skip UTF-8 validation (~15-20% faster) |
 | `.open()` | Load the database |
 
 **Cache Size Guidelines**:

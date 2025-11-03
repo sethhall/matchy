@@ -72,7 +72,7 @@ The C API is organized into these groups:
 - `matchy_open()` - Open database (default settings)
 - `matchy_open_with_options()` - Open database with custom options
 - `matchy_init_open_options()` - Initialize option structure
-- `matchy_open_trusted()` - Open database (skip validation)
+- `matchy_open()` - Open database (skip validation)
 - `matchy_close()` - Close database
 - `matchy_query()` - Query database
 - `matchy_get_stats()` - Get database statistics
@@ -185,7 +185,6 @@ matchy_init_open_options(&opts);
 
 // Configure cache and validation
 opts.cache_capacity = 100000;  // Large cache for high repetition
-opts.trusted = 1;              // Skip validation (faster)
 
 matchy_t *db = matchy_open_with_options("threats.mxy", &opts);
 if (db == NULL) {

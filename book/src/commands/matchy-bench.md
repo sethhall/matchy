@@ -95,14 +95,6 @@ matchy bench ip --hit-rate 50    # 50% of queries find matches
 matchy bench ip --hit-rate 90    # 90% of queries find matches
 ```
 
-### `--trusted`
-
-Trust database and skip UTF-8 validation (faster, only for trusted sources).
-
-```bash
-matchy bench pattern --trusted
-```
-
 ### `--pattern-style <PATTERN_STYLE>`
 
 Pattern style for pattern benchmarks. Default: `complex`
@@ -266,7 +258,6 @@ How long it takes to memory-map the database:
 - Check system load
 - Verify no swap usage
 - Check disk I/O (shouldn't be any after load)
-- Try `--trusted` flag
 
 ## Use Cases
 
@@ -308,18 +299,6 @@ Compare:
 - Query throughput
 - Build time
 - Load time
-
-### Optimization Validation
-
-```bash
-# Test with validation
-matchy bench ip --count 1000000
-
-# Test without validation (trusted)
-matchy bench ip --count 1000000 --trusted
-```
-
-Compare the difference to see validation overhead.
 
 ## Exit Status
 

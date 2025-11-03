@@ -424,7 +424,6 @@ All formats **must** be UTF-8 encoded.
 
 - Automatic UTF-8 validation during build
 - Invalid UTF-8 → build error
-- Use `--trusted` to skip validation (unsafe)
 
 ### BOM Handling
 
