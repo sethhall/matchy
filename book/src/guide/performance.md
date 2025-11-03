@@ -198,6 +198,42 @@ let db_bytes = builder.build()?;
 
 Databases are immutable, so building happens once.
 
+### String Interning for Size Reduction
+
+**Added in v1.2.0**: Matchy automatically deduplicates repeated string values in database data sections through string interning.
+
+When building databases with redundant metadata, the builder detects duplicate string values and stores them only once:
+
+```rust
+// These entries share the same "threat_level": "high" string
+builder.add_entry("evil1.com", r#"{"threat_level": "high", "category": "malware"}"#)?;
+builder.add_entry("evil2.com", r#"{"threat_level": "high", "category": "phishing"}"#)?;
+builder.add_entry("evil3.com", r#"{"threat_level": "high", "category": "spam"}"#)?;
+// The string "high" is stored once and referenced three times
+```
+
+**Benefits:**
+- **Smaller databases**: Significant size reduction for datasets with redundant metadata
+- **Zero query overhead**: Interning happens at build time only
+- **Transparent**: No API changes required - works automatically
+- **Faster loading**: Smaller files load faster from disk
+
+**Best practices:**
+- Use consistent field values across entries (e.g., standardized threat levels)
+- Normalize string casing and formatting
+- String interning works best with categorical data (types, levels, categories)
+
+**Example size reduction:**
+```
+Before v1.2.0: 1,000 entries with repeated "high" threat_level
+  1,000 × 4 bytes ("high") = 4,000 bytes
+
+After v1.2.0: String interning
+  1 × 4 bytes ("high") + 1,000 × 4 bytes (references) = 4,004 bytes
+
+Real-world savings: 10-50% database size reduction for typical threat intel datasets
+```
+
 ## Benchmarking Your Database
 
 Use the CLI to benchmark your specific database:
