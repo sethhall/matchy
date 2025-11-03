@@ -131,14 +131,6 @@ $ matchy match threats.mxy huge.log -j auto --progress
            Lookup rate: 1,324.35K queries/sec
 ```
 
-### `--trusted`
-
-Skip UTF-8 validation for faster processing. Only use with trusted data sources.
-
-```console
-$ matchy match threats.mxy trusted.log --trusted
-```
-
 ### `--cache-size <SIZE>`
 
 Set LRU cache capacity for query results (default: 10000). Use `0` to disable caching.
@@ -323,7 +315,6 @@ Typical throughput:
 **Best practices for performance:**
 - Use parallel mode (`-j auto`) for multiple large files
 - Enable caching (default) for repeated patterns
-- Use `--trusted` flag for trusted data sources
 - Increase `--batch-bytes` for very large files (>1GB)
 - Use sequential mode for small files (<10MB total)
 

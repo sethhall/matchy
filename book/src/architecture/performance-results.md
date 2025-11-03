@@ -33,7 +33,7 @@ All benchmarks run on the same hardware using `matchy bench`:
 <summary>Command used</summary>
 
 ```bash
-matchy bench ip -n 100000 --query-count 50000 --hit-rate 1 --trusted
+matchy bench ip -n 100000 --query-count 50000 --hit-rate 1
 ```
 </details>
 
@@ -54,7 +54,7 @@ matchy bench ip -n 100000 --query-count 50000 --hit-rate 1 --trusted
 <summary>Command used</summary>
 
 ```bash
-matchy bench literal -n 50000 --query-count 50000 --hit-rate 1 --trusted
+matchy bench literal -n 50000 --query-count 50000 --hit-rate 1
 ```
 </details>
 
@@ -75,7 +75,7 @@ matchy bench literal -n 50000 --query-count 50000 --hit-rate 1 --trusted
 <summary>Command used</summary>
 
 ```bash
-matchy bench pattern -n 10000 --query-count 50000 --hit-rate 1 --trusted --pattern-style mixed
+matchy bench pattern -n 10000 --query-count 50000 --hit-rate 1 --pattern-style mixed
 ```
 </details>
 
@@ -96,7 +96,7 @@ matchy bench pattern -n 10000 --query-count 50000 --hit-rate 1 --trusted --patte
 <summary>Command used</summary>
 
 ```bash
-matchy bench combined -n 20000 --query-count 50000 --hit-rate 1 --trusted --pattern-style mixed
+matchy bench combined -n 20000 --query-count 50000 --hit-rate 1 --pattern-style mixed
 ```
 </details>
 

@@ -138,7 +138,6 @@ Higher hit rates show slightly lower throughput due to result extraction overhea
 | Safe | 4.9M/sec | UTF-8 validation |
 | Trusted | 5.8M/sec | **~18% faster** |
 
-Use `--trusted` flag for databases you control.
 
 ## Memory Usage
 
@@ -259,7 +258,6 @@ time matchy query test.mxy < queries.txt
 
 ### For Best Query Performance
 
-1. Use `--trusted` for controlled databases
 2. Reuse database handles
 3. Use memory-mapped files (automatic)
 4. Keep database on fast storage (SSD)

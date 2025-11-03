@@ -35,25 +35,6 @@ if (!db) {
 matchy_close(db);
 ```
 
-### Open Trusted Database
-
-```c
-matchy_t *matchy_open_trusted(const char *filename);
-```
-
-Opens a database **without UTF-8 validation**:
-- ~15-20% faster than `matchy_open()`
-- Use **only** for databases you control
-- Unsafe for untrusted sources
-
-**Example:**
-```c
-// Safe: database created by your own application
-matchy_t *db = matchy_open_trusted("internal.mxy");
-```
-
-**⚠️ Warning:** Never use with databases from untrusted sources!
-
 ### Open from Buffer
 
 ```c
@@ -377,14 +358,7 @@ for (int i = 0; i < 1000; i++) {
 matchy_close(db);
 ```
 
-### 2. Use Trusted Mode for Known Databases
-
-```c
-// 15-20% faster for databases you control
-matchy_t *db = matchy_open_trusted("internal.mxy");
-```
-
-### 3. Free Results Promptly
+### 2. Free Results Promptly
 
 ```c
 matchy_result_t *result = NULL;
@@ -399,7 +373,7 @@ if (result) {
 }
 ```
 
-### 4. Use Direct IP Lookup
+### 3. Use Direct IP Lookup
 
 ❌ **Slower:**
 ```c
