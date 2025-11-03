@@ -204,7 +204,6 @@ impl Default for DatabaseOptions {
 ///
 /// // Custom configuration
 /// let db = Database::from("threats.mxy")
-///     .trusted()
 ///     .cache_capacity(100_000)
 ///     .open()?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -320,9 +319,8 @@ impl Database {
     /// // Defaults (cache enabled, validation on)
     /// let db = Database::from("threats.mxy").open()?;
     ///
-    /// // Performance mode
+    /// // Custom cache size
     /// let db = Database::from("threats.mxy")
-    ///     .trusted()
     ///     .cache_capacity(100_000)
     ///     .open()?;
     ///
