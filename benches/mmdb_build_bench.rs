@@ -171,7 +171,7 @@ fn bench_mmdb_build_complex_data(c: &mut Criterion) {
     };
 
     // 5 threat categories that will be reused
-    let threat_categories = vec![
+    let threat_categories = [
         create_complex_data("malware", 8),
         create_complex_data("phishing", 7),
         create_complex_data("spam", 3),
