@@ -20,7 +20,7 @@ use crate::data_section::{DataEncoder, DataValue};
 use crate::error::ParaglobError;
 use crate::glob::{GlobPattern, MatchMode as GlobMatchMode};
 use crate::offset_format::{
-    read_cstring, read_str_checked, read_str_unchecked, ACEdge, ParaglobHeader, PatternDataMapping,
+    read_cstring, read_str_checked, ACEdge, ParaglobHeader, PatternDataMapping,
     PatternEntry, SingleWildcard,
 };
 use std::cell::RefCell;
@@ -375,7 +375,6 @@ impl ParaglobBuilder {
         Ok(Paraglob {
             buffer: BufferStorage::Owned(buffer),
             mode,
-            trusted: true, // Databases we build are trusted
             glob_cache: RefCell::new(HashMap::new()),
             ac_literal_hash,
             pattern_data_map,

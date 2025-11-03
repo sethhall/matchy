@@ -224,7 +224,6 @@ impl DatabaseOpener {
         }
     }
 
-
     /// Set LRU cache capacity
     ///
     /// The cache dramatically improves performance for workloads with
@@ -594,8 +593,8 @@ impl Database {
 
                 // Find and load pattern section after MMDB_PATTERN separator
                 if let Some(offset) = Self::find_pattern_section_fast(data) {
-                    let (pg, map) = Self::load_combined_pattern_section(data, offset)
-                        .map_err(|e| {
+                    let (pg, map) =
+                        Self::load_combined_pattern_section(data, offset).map_err(|e| {
                             DatabaseError::Unsupported(format!(
                                 "Failed to load pattern section: {}",
                                 e

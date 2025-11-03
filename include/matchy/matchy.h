@@ -236,11 +236,6 @@ typedef struct matchy_builder_t {
  */
 typedef struct matchy_open_options_t {
   /*
-   Skip UTF-8 validation (faster but less safe)
-   0 = validate (safe), 1 = skip validation (trusted mode)
-   */
-  uint8_t trusted;
-  /*
    LRU cache capacity
    0 = disable cache, >0 = cache this many entries
    Default: 10000
@@ -502,7 +497,6 @@ void matchy_builder_free(struct matchy_builder_t *builder);
  Initialize database opening options with defaults
 
  Sets default values:
- - trusted = 0 (validation enabled)
  - cache_capacity = 10000
 
  # Parameters
@@ -543,7 +537,6 @@ void matchy_init_open_options(struct matchy_open_options_t *options);
  // High-performance mode
  matchy_open_options_t opts;
  matchy_init_open_options(&opts);
- opts.trusted = 1;            // Skip validation
  opts.cache_capacity = 100000; // Large cache
 
  matchy_t *db = matchy_open_with_options("threats.mxy", &opts);
@@ -583,38 +576,6 @@ struct matchy_t *matchy_open_with_options(const char *filename, const struct mat
  ```
  */
 struct matchy_t *matchy_open(const char *filename);
-
-/*
- Open database from file (memory-mapped) - TRUSTED mode
-
- **SECURITY WARNING**: Only use for databases from trusted sources!
- Skips UTF-8 validation for ~15-20% performance improvement.
-
- Opens a database file using memory mapping for optimal performance.
- The file is not loaded into memory - it's accessed on-demand.
-
- # Parameters
- * `filename` - Path to database file (null-terminated C string, must not be NULL)
-
- # Returns
- * Non-null pointer on success
- * NULL on failure
-
- # Safety
- * `filename` must be a valid null-terminated C string
- * Database must be from a trusted source (undefined behavior if malicious)
-
- # Example
- ```c
- // Only for databases you built yourself or trust completely
- matchy_t *db = matchy_open_trusted("my-threats.db");
- if (db == NULL) {
-     fprintf(stderr, "Failed to open database\n");
-     return 1;
- }
- ```
- */
-struct matchy_t *matchy_open_trusted(const char *filename);
 
 /*
  Open database from memory buffer (zero-copy)

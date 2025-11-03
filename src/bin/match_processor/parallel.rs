@@ -298,10 +298,7 @@ fn process_stdin(
 }
 
 /// Initialize database for a worker thread
-pub fn init_worker_database(
-    database_path: &Path,
-    cache_size: usize,
-) -> Result<matchy::Database> {
+pub fn init_worker_database(database_path: &Path, cache_size: usize) -> Result<matchy::Database> {
     use matchy::Database;
 
     let mut opener = Database::from(database_path.to_str().unwrap());
