@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For detailed version history, see the [full CHANGELOG.md](https://github.com/sethhall/matchy/blob/main/CHANGELOG.md) in the repository.
 
+## [1.2.1] - 2025-10-28
+
+### Fixed
+- **Critical: Worker False Positive Bug**
+  - Fixed bug where Worker was treating `QueryResult::NotFound` as a valid match
+  - Affects batch processing and `matchy match` command accuracy
+  - Now correctly distinguishes between matches and non-matches
+
+## [1.2.0] - 2025-10-28
+
+### Added
+- **String Interning for Database Size Reduction**
+  - Automatic deduplication of repeated string values in database data sections
+  - Significantly reduces database size for datasets with redundant metadata
+  - Zero query-time overhead - interning happens at build time
+  - Transparent to API users - no code changes required
+
+### Fixed
+- **Critical: Database Construction Bugs** (discovered via fuzzing)
+  - Fixed UTF-8 boundary bug in case-insensitive glob pattern matching that could create malformed databases
+  - Added overflow/underflow validation in IP tree builder to prevent invalid pointer arithmetic
+  - Database builder now validates all record values before writing to prevent creating unreadable databases
+  - Enhanced input validation during database construction
+  - Improved error messages for invalid data pointer calculations
+
+### Changed
+- Database loader now provides detailed error messages on invalid pointer arithmetic instead of panicking
+- Improved error messages for invalid input during database building
+- Better detection and reporting of malformed patterns and IP addresses
+
+## [1.1.0] - 2025-10-25
+
+### Added
+- **`matchy extract` Command** for high-performance pattern extraction from logs
+  - Extract domains, IPv4/IPv6 addresses, and email addresses from unstructured text
+  - Multiple output formats: JSON (NDJSON), CSV, plain text
+  - Configurable extraction types with `--types` flag (ipv4, ipv6, domain, email, all)
+  - Deduplication mode with `--unique` flag
+  - Statistics reporting with `--stats` flag
+  - 200-500 MB/s typical throughput
+
+- **Parallel Multi-File Processing** for `matchy match`
+  - `-j/--threads` flag for parallel processing (default: auto-detect cores)
+  - 2-8x faster throughput on multi-core systems
+  - Per-worker LRU caches for optimal performance
+  - `--batch-bytes` tuning option for large files
+
+- **Follow Mode** for `matchy match`
+  - `-f/--follow` flag for log tailing (like `tail -f`)
+  - Monitors files for changes using file system notifications
+  - Processes new lines immediately as they are written
+  - Supports parallel processing with multiple files
+
+- **Live Progress Reporting**
+  - `-p/--progress` flag shows live 3-line progress indicator
+  - Displays lines processed, matches, hit rate, throughput, elapsed time
+  - Candidate breakdown (IPv4, IPv6, domains, emails)
+  - Query rate statistics
+
+- **Query Result Caching** for high-throughput workloads
+  - Configurable LRU cache with `Database::from().cache_capacity(size)` builder API
+  - Disable caching with `Database::from().no_cache()` for memory-constrained environments
+  - `clear_cache()` method for cache management
+  - Benchmarks show 2-10x speedup at 80%+ cache hit rates
+
+- **Pattern Extractor API** for log scanning and data extraction
+  - SIMD-accelerated extraction of domains, IPv4/IPv6 addresses, and email addresses
+  - Zero-copy line scanning with `memchr` for maximum throughput
+  - Unicode/IDN domain support with automatic punycode conversion
+  - Binary log support (extracts ASCII patterns from non-UTF-8 data)
+
+### Performance
+- **AC Automaton Optimizations**: 2.4% speedup from memory-locked automaton
+- **Parallel Processing**: 2-8x speedup on multi-core systems
+- **Caching**: 2-10x query speedup with 80%+ hit rates
+
 ## [1.0.1] - 2025-10-14
 
 ### Fixed
