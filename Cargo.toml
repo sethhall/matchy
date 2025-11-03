@@ -102,7 +102,7 @@ proptest = "1.4"
 tempfile = "3.8"
 rand = "0.9"
 dhat = "0.3"  # Heap profiling for benchmarks
-assert_cmd = "2.0"  # CLI integration testing
+assert_cmd = "2.1"  # CLI integration testing
 predicates = "3.0"  # Assertions for command output
 
 [build-dependencies]
