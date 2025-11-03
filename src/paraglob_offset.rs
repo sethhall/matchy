@@ -20,8 +20,8 @@ use crate::data_section::{DataEncoder, DataValue};
 use crate::error::ParaglobError;
 use crate::glob::{GlobPattern, MatchMode as GlobMatchMode};
 use crate::offset_format::{
-    read_cstring, read_str_checked, ACEdge, ParaglobHeader, PatternDataMapping,
-    PatternEntry, SingleWildcard,
+    read_cstring, read_str_checked, ACEdge, ParaglobHeader, PatternDataMapping, PatternEntry,
+    SingleWildcard,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
