@@ -22,7 +22,6 @@ pub fn cmd_match(
     format: String,
     show_stats: bool,
     show_progress: bool,
-    trusted: bool,
     cache_size: usize,
 ) -> Result<()> {
     use matchy::extractor::Extractor;
@@ -50,9 +49,6 @@ pub fn cmd_match(
     // Load database
     let load_start = Instant::now();
     let mut opener = Database::from(database.to_str().unwrap());
-    if trusted {
-        opener = opener.trusted();
-    }
     if cache_size == 0 {
         opener = opener.no_cache();
     } else {
@@ -151,7 +147,6 @@ pub fn cmd_match(
                 &format,
                 show_stats,
                 show_progress,
-                trusted,
                 cache_size,
                 overall_start,
                 shutdown,
@@ -183,7 +178,6 @@ pub fn cmd_match(
             &format,
             show_stats,
             show_progress,
-            trusted,
             cache_size,
             overall_start,
         )?;

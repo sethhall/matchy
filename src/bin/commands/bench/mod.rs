@@ -20,7 +20,6 @@ pub struct BenchConfig<'a> {
     pub load_iterations: usize,
     pub query_count: usize,
     pub hit_rate: usize,
-    pub trusted: bool,
     pub cache_size: usize,
     pub cache_hit_rate: usize,
 }
@@ -34,7 +33,6 @@ pub fn cmd_bench(
     load_iterations: usize,
     query_count: usize,
     hit_rate: usize,
-    trusted: bool,
     cache_size: usize,
     cache_hit_rate: usize,
     pattern_style: String,
@@ -69,9 +67,6 @@ pub fn cmd_bench(
     if db_type == "pattern" {
         println!("  Pattern style:     {}", pattern_style);
     }
-    if trusted {
-        println!("  Trust mode:        TRUSTED (UTF-8 validation disabled)");
-    }
     println!();
 
     // Determine output file
@@ -98,7 +93,6 @@ pub fn cmd_bench(
             load_iterations,
             query_count,
             hit_rate,
-            trusted,
             cache_size,
             cache_hit_rate,
         }),
@@ -109,7 +103,6 @@ pub fn cmd_bench(
             load_iterations,
             query_count,
             hit_rate,
-            trusted,
             cache_size,
             cache_hit_rate,
             &pattern_style,

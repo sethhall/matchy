@@ -281,7 +281,6 @@ pub fn follow_files_parallel(
     output_format: &str,
     show_stats: bool,
     show_progress: bool,
-    trusted: bool,
     cache_size: usize,
     overall_start: Instant,
     shutdown: Arc<AtomicBool>,
@@ -333,7 +332,6 @@ pub fn follow_files_parallel(
                 work_rx,
                 result_tx,
                 database_path,
-                trusted,
                 cache_size,
                 show_stats,
             )
@@ -488,7 +486,6 @@ fn worker_thread_follow(
     work_rx: Arc<Mutex<Receiver<Option<super::parallel::LineBatch>>>>,
     result_tx: SyncSender<Option<super::parallel::WorkerMessage>>,
     database_path: PathBuf,
-    trusted: bool,
     cache_size: usize,
     _show_stats: bool,
 ) -> super::parallel::WorkerStats {
@@ -498,7 +495,7 @@ fn worker_thread_follow(
     };
 
     // Initialize database
-    let db = match init_worker_database(&database_path, trusted, cache_size) {
+    let db = match init_worker_database(&database_path, cache_size) {
         Ok(db) => db,
         Err(e) => {
             eprintln!(

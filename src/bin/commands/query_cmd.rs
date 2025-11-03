@@ -5,15 +5,9 @@ use std::path::PathBuf;
 
 use crate::cli_utils::{data_value_to_json, format_cidr};
 
-pub fn cmd_query(database: PathBuf, query: String, quiet: bool, trusted: bool) -> Result<()> {
+pub fn cmd_query(database: PathBuf, query: String, quiet: bool) -> Result<()> {
     // Load database using fluent API
-    let mut opener = Database::from(database.to_str().unwrap());
-
-    if trusted {
-        opener = opener.trusted();
-    }
-
-    let db = opener
+    let db = Database::from(database.to_str().unwrap())
         .open()
         .with_context(|| format!("Failed to load database: {}", database.display()))?;
 

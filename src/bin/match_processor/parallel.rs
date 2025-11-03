@@ -49,7 +49,6 @@ pub fn process_parallel(
     output_format: &str,
     show_stats: bool,
     show_progress: bool,
-    trusted: bool,
     cache_size: usize,
     overall_start: Instant,
 ) -> Result<ProcessingStats> {
@@ -88,7 +87,6 @@ pub fn process_parallel(
                 work_rx,
                 result_tx,
                 database_path,
-                trusted,
                 cache_size,
                 show_stats,
             )
@@ -302,15 +300,11 @@ fn process_stdin(
 /// Initialize database for a worker thread
 pub fn init_worker_database(
     database_path: &Path,
-    trusted: bool,
     cache_size: usize,
 ) -> Result<matchy::Database> {
     use matchy::Database;
 
     let mut opener = Database::from(database_path.to_str().unwrap());
-    if trusted {
-        opener = opener.trusted();
-    }
     if cache_size == 0 {
         opener = opener.no_cache();
     } else {
@@ -360,12 +354,11 @@ fn worker_thread(
     work_rx: Arc<Mutex<Receiver<Option<LineBatch>>>>,
     result_tx: SyncSender<Option<WorkerMessage>>,
     database_path: PathBuf,
-    trusted: bool,
     cache_size: usize,
     _show_stats: bool,
 ) -> WorkerStats {
     // Initialize database
-    let db = match init_worker_database(&database_path, trusted, cache_size) {
+    let db = match init_worker_database(&database_path, cache_size) {
         Ok(db) => db,
         Err(e) => {
             eprintln!(

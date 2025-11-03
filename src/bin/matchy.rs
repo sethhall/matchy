@@ -113,10 +113,6 @@ enum Commands {
         #[arg(short, long)]
         progress: bool,
 
-        /// Trust database and skip UTF-8 validation (faster, only for trusted sources)
-        #[arg(long)]
-        trusted: bool,
-
         /// LRU cache capacity per worker (default: 10000, use 0 to disable)
         #[arg(long, default_value = "10000")]
         cache_size: usize,
@@ -135,10 +131,6 @@ enum Commands {
         /// Quiet mode - no output, only exit code (0 = found, 1 = not found)
         #[arg(short, long)]
         quiet: bool,
-
-        /// Trust database and skip UTF-8 validation (faster, only for trusted sources)
-        #[arg(long)]
-        trusted: bool,
     },
 
     /// Inspect a pattern database
@@ -249,10 +241,6 @@ enum Commands {
         #[arg(long, default_value = "10")]
         hit_rate: usize,
 
-        /// Trust database and skip UTF-8 validation (faster, only for trusted sources)
-        #[arg(long)]
-        trusted: bool,
-
         /// LRU cache capacity (default: 10000, use 0 to disable)
         #[arg(long, default_value = "10000")]
         cache_size: usize,
@@ -302,7 +290,6 @@ fn main() -> Result<()> {
             format,
             stats,
             progress,
-            trusted,
             cache_size,
         } => cmd_match(
             database,
@@ -313,15 +300,13 @@ fn main() -> Result<()> {
             format,
             stats,
             progress,
-            trusted,
             cache_size,
         ),
         Commands::Query {
             database,
             query,
             quiet,
-            trusted,
-        } => cmd_query(database, query, quiet, trusted),
+        } => cmd_query(database, query, quiet),
         Commands::Inspect {
             database,
             json,
@@ -362,7 +347,6 @@ fn main() -> Result<()> {
             load_iterations,
             query_count,
             hit_rate,
-            trusted,
             cache_size,
             cache_hit_rate,
             pattern_style,
@@ -374,7 +358,6 @@ fn main() -> Result<()> {
             load_iterations,
             query_count,
             hit_rate,
-            trusted,
             cache_size,
             cache_hit_rate,
             pattern_style,

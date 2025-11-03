@@ -371,10 +371,6 @@ pub unsafe extern "C" fn matchy_builder_free(builder: *mut matchy_builder_t) {
 /// Configure how databases are loaded, including cache settings and validation.
 #[repr(C)]
 pub struct matchy_open_options_t {
-    /// Skip UTF-8 validation (faster but less safe)
-    /// 0 = validate (safe), 1 = skip validation (trusted mode)
-    pub trusted: u8,
-
     /// LRU cache capacity
     /// 0 = disable cache, >0 = cache this many entries
     /// Default: 10000
@@ -384,7 +380,6 @@ pub struct matchy_open_options_t {
 impl Default for matchy_open_options_t {
     fn default() -> Self {
         Self {
-            trusted: 0,
             cache_capacity: 10000,
         }
     }
@@ -393,7 +388,6 @@ impl Default for matchy_open_options_t {
 /// Initialize database opening options with defaults
 ///
 /// Sets default values:
-/// - trusted = 0 (validation enabled)
 /// - cache_capacity = 10000
 ///
 /// # Parameters
@@ -438,7 +432,6 @@ pub unsafe extern "C" fn matchy_init_open_options(options: *mut matchy_open_opti
 /// // High-performance mode
 /// matchy_open_options_t opts;
 /// matchy_init_open_options(&opts);
-/// opts.trusted = 1;            // Skip validation
 /// opts.cache_capacity = 100000; // Large cache
 ///
 /// matchy_t *db = matchy_open_with_options("threats.mxy", &opts);
@@ -465,10 +458,6 @@ pub unsafe extern "C" fn matchy_open_with_options(
 
     // Build database using fluent API
     let mut opener = RustDatabase::from(path);
-
-    if opts.trusted != 0 {
-        opener = opener.trusted();
-    }
 
     if opts.cache_capacity == 0 {
         opener = opener.no_cache();
@@ -514,44 +503,6 @@ pub unsafe extern "C" fn matchy_open_with_options(
 pub unsafe extern "C" fn matchy_open(filename: *const c_char) -> *mut matchy_t {
     // Delegate to matchy_open_with_options with default settings
     let opts = matchy_open_options_t::default();
-    matchy_open_with_options(filename, &opts)
-}
-
-/// Open database from file (memory-mapped) - TRUSTED mode
-///
-/// **SECURITY WARNING**: Only use for databases from trusted sources!
-/// Skips UTF-8 validation for ~15-20% performance improvement.
-///
-/// Opens a database file using memory mapping for optimal performance.
-/// The file is not loaded into memory - it's accessed on-demand.
-///
-/// # Parameters
-/// * `filename` - Path to database file (null-terminated C string, must not be NULL)
-///
-/// # Returns
-/// * Non-null pointer on success
-/// * NULL on failure
-///
-/// # Safety
-/// * `filename` must be a valid null-terminated C string
-/// * Database must be from a trusted source (undefined behavior if malicious)
-///
-/// # Example
-/// ```c
-/// // Only for databases you built yourself or trust completely
-/// matchy_t *db = matchy_open_trusted("my-threats.db");
-/// if (db == NULL) {
-///     fprintf(stderr, "Failed to open database\n");
-///     return 1;
-/// }
-/// ```
-#[no_mangle]
-pub unsafe extern "C" fn matchy_open_trusted(filename: *const c_char) -> *mut matchy_t {
-    // Delegate to matchy_open_with_options with trusted=true
-    let opts = matchy_open_options_t {
-        trusted: 1,
-        cache_capacity: 10000,
-    };
     matchy_open_with_options(filename, &opts)
 }
 
