@@ -1,0 +1,12 @@
+# Force C classification for header files (not C++)
+include/matchy/matchy.h linguist-language=C
+
+# Exclude third-party tooling files from language statistics
+book/mermaid-init.js linguist-vendored
+
+# Exclude test and example code from language statistics
+tests/** linguist-detectable=false
+examples/** linguist-detectable=false
+
+# Exclude build/tooling scripts from language statistics
+*.sh linguist-detectable=false
