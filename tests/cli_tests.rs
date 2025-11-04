@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 /// Helper to create a matchy command
 fn matchy_cmd() -> Command {
-    Command::cargo_bin("matchy").unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("matchy"))
 }
 
 #[test]
