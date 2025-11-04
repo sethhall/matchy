@@ -4,15 +4,24 @@ This directory contains the source for the Matchy book, built with [mdbook](http
 
 ## Quick Start
 
+**Important**: All mdbook commands must be run from the `book/` directory.
+
 ### Build the book
 
 ```bash
+cd book
 mdbook build
+```
+
+Or from project root:
+```bash
+(cd book && mdbook build)
 ```
 
 ### Serve locally with live reload
 
 ```bash
+cd book
 mdbook serve
 ```
 
@@ -72,6 +81,7 @@ Command examples with the ✓ indicator have their output committed to the repos
 ### Normal Build (Fast)
 
 ```bash
+cd book
 mdbook build
 ```
 
@@ -81,11 +91,10 @@ Uses saved command outputs from `command-outputs/` directory. Fast builds for ev
 
 ```bash
 # First, ensure matchy is built
-cd ..
 cargo build --release
-cd book
 
-# Run commands and save outputs
+# Run commands and save outputs (from book/ directory)
+cd book
 RUN_CMDS=1 mdbook build
 ```
 
@@ -98,11 +107,12 @@ This:
 ### How It Works
 
 - Commands marked with `<!-- cmdrun ... -->` are processed by `mdbook-cmdrun`
-- The `run-cmdrun.sh` wrapper intercepts commands:
+- The `run-cmdrun.sh` wrapper (located in `book/` directory) intercepts commands:
   - **Normal mode**: Returns saved output from `command-outputs/`
   - **RUN_CMDS=1**: Runs commands and saves new outputs
 - Output files are committed to the repo for reproducibility
 - The wrapper script ensures `matchy` is in PATH during execution
+- **Note**: mdbook must be run from the `book/` directory for the wrapper to be found
 
 ### Managing Command Outputs
 
@@ -155,8 +165,9 @@ Requires:
 - `mdbook` - Install with `cargo install mdbook`
 - `mdbook-mermaid` - For diagrams (optional)
 
-Build commands:
+Build commands (run from `book/` directory):
 ```bash
+cd book
 mdbook build              # Build once
 mdbook serve              # Serve with live reload
 mdbook test               # Test code examples

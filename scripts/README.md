@@ -256,7 +256,7 @@ cargo bench
 ./scripts/generate_perf_docs.sh
 
 # Update mdbook and commit
-mdbook build
+(cd book && mdbook build)
 git add book/src/architecture/performance-results.md
 git commit -m "Update performance docs for v2.0"
 ```

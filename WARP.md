@@ -108,6 +108,8 @@ cargo run --release --example glob_demo
 
 ### Documentation
 
+#### Rust API Documentation
+
 ```bash
 # Generate and open docs
 cargo doc --no-deps --open
@@ -115,6 +117,31 @@ cargo doc --no-deps --open
 # Generate docs for all dependencies
 cargo doc --open
 ```
+
+#### mdbook User Documentation
+
+**Important**: All mdbook commands must be run from the `book/` directory.
+
+```bash
+# Build the book
+cd book
+mdbook build
+
+# Serve with live reload during editing
+cd book
+mdbook serve
+# Then open http://localhost:3000
+
+# Or from project root
+(cd book && mdbook build)
+```
+
+The book uses preprocessors that require the working directory to be `book/`:
+- `mdbook-project-version` - Injects version from Cargo.toml
+- `mdbook-cmdrun` - Executes command examples (via `run-cmdrun.sh` wrapper)
+- `mdbook-mermaid` - Renders Mermaid diagrams
+
+See `book/README.md` for details on command output management and regeneration.
 
 ### C Integration Testing
 
