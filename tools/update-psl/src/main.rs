@@ -6,7 +6,7 @@
 //! This is NOT part of the matchy library API and is only used during development
 //! to refresh the TLD patterns in `src/data/tld_automaton.ac`.
 //!
-//! Run with: `cargo run --example update-psl`
+//! Run with: `cd tools/update-psl && cargo run`
 
 use matchy::glob::MatchMode;
 use matchy::paraglob_offset::Paraglob;
@@ -15,7 +15,7 @@ use std::fs;
 use std::process::Command;
 
 const PSL_URL: &str = "https://publicsuffix.org/list/public_suffix_list.dat";
-const AC_PATH: &str = "src/data/tld_automaton.ac";
+const AC_PATH: &str = "../../src/data/tld_automaton.ac";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Downloading Public Suffix List from {}", PSL_URL);

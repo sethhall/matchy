@@ -6,9 +6,16 @@ Setting up a project to use Matchy.
 
 ### Cargo.toml
 
+**Full installation** (includes CLI):
 ```toml
 [dependencies]
-matchy = "0.1"
+matchy = "{{version_minor}}"
+```
+
+**Library only** (minimal dependencies):
+```toml
+[dependencies]
+matchy = { version = "{{version_minor}}", default-features = false }
 ```
 
 ### main.rs

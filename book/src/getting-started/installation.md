@@ -27,12 +27,25 @@ cargo --version
 
 ## Using as a Rust Dependency
 
+### Full Installation
+
 Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 matchy = "{{version_minor}}"
 ```
+
+### Library Only (Minimal Dependencies)
+
+If you're embedding Matchy in your application and don't need CLI components:
+
+```toml
+[dependencies]
+matchy = { version = "{{version_minor}}", default-features = false }
+```
+
+This saves ~40 transitive dependencies by excluding CLI-only features (`clap`, `notify`, `ctrlc`, `csv`).
 
 Then run:
 

@@ -94,9 +94,11 @@ The TLD matching feature uses a pre-built Aho-Corasick automaton generated from 
 
 ```bash
 # Download latest PSL and rebuild the automaton
-cargo run --example update-psl
+cd tools/update-psl
+cargo run
 
 # Commit the updated automaton
+cd ../..
 git add src/data/tld_automaton.ac
 git commit -m "Update Public Suffix List"
 ```

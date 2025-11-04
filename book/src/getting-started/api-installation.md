@@ -4,10 +4,23 @@
 
 Add Matchy to your `Cargo.toml`:
 
+### Full Installation (includes CLI dependencies)
+
 ```toml
 [dependencies]
 matchy = "{{version_minor}}"
 ```
+
+### Library Only (minimal dependencies)
+
+If you're only using Matchy as a library and don't need CLI components, save ~40 transitive dependencies:
+
+```toml
+[dependencies]
+matchy = { version = "{{version_minor}}", default-features = false }
+```
+
+This excludes CLI-only dependencies (`clap`, `notify`, `ctrlc`, `csv`) while keeping all core functionality.
 
 Then run `cargo build`:
 

@@ -79,7 +79,11 @@ matchy match threats.mxy access.log --stats
 ### Rust API
 
 ```bash
+# Full installation (includes CLI)
 cargo add matchy
+
+# Library only (no CLI dependencies - saves ~40 crates)
+cargo add matchy --no-default-features
 ```
 
 ```rust
