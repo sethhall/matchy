@@ -151,6 +151,30 @@ jobs:
           files: ./cobertura.xml
           fail_ci_if_error: false
 
+  freebsd:
+    name: FreeBSD Test
+    runs-on: ubuntu-latest  # Cross-platform VM
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Test on FreeBSD
+        uses: cross-platform-actions/action@v0.25.0
+        with:
+          operating_system: freebsd
+          architecture: x86-64
+          version: '14.1'
+          shell: bash
+          run: |
+            # Install Rust
+            pkg install -y rust
+            
+            # Basic build test
+            cargo build --verbose
+            cargo test --lib --verbose
+            
+            # Skip integration tests on FreeBSD for now (may need more setup)
+            echo "FreeBSD basic build: SUCCESS"
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest
