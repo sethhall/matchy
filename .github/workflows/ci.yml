@@ -153,27 +153,21 @@ jobs:
 
   freebsd:
     name: FreeBSD Test
-    runs-on: ubuntu-latest  # Cross-platform VM
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       
       - name: Test on FreeBSD
-        uses: cross-platform-actions/action@v0.25.0
+        uses: vmactions/freebsd-vm@v1
         with:
-          operating_system: freebsd
-          architecture: x86-64
-          version: '14.1'
-          shell: bash
+          release: '14.1'
+          usesh: true
+          prepare: |
+            pkg install -y rust cbindgen
           run: |
-            # Install Rust
-            pkg install -y rust
-            
-            # Basic build test
             cargo build --verbose
             cargo test --lib --verbose
-            
-            # Skip integration tests on FreeBSD for now (may need more setup)
-            echo "FreeBSD basic build: SUCCESS"
+            echo "FreeBSD build successful!"
 
   security:
     name: Security Audit
