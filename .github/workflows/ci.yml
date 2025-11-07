@@ -163,7 +163,8 @@ jobs:
           release: '14.1'
           usesh: true
           prepare: |
-            pkg install -y rust cbindgen
+            pkg install -y rust
+            cargo install cbindgen
           run: |
             cargo build --verbose
             cargo test --lib --verbose
