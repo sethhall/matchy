@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2025-11-07
+
+### Fixed
+- **FreeBSD Support**: Fixed build failure on FreeBSD due to Linux-specific `MADV_HUGEPAGE` constant
+  - Added FreeBSD-specific memory optimization using `MADV_NOSYNC`
+  - All 224 tests passing on FreeBSD 14.1
+
+### Added
+- FreeBSD CI testing to catch platform-specific issues
+
 ## [1.2.0] - 2025-10-28
 
 ### Added
