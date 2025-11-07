@@ -210,6 +210,14 @@ impl MmapFile {
             madvise(ptr, size, MADV_HUGEPAGE);
         }
 
+        // FreeBSD: Supports MADV_NOSYNC for better performance with mmap
+        #[cfg(target_os = "freebsd")]
+        {
+            // MADV_NOSYNC tells kernel not to sync changes back to disk
+            // (we're read-only anyway)
+            madvise(ptr, size, libc::MADV_NOSYNC);
+        }
+
         // macOS with Apple Silicon automatically uses 16K pages for file mappings
         // when the size and alignment are appropriate. No explicit hint needed.
 

@@ -229,8 +229,8 @@ pub unsafe extern "C" fn MMDB_lookup_string(
 /// - `sockaddr` must be a valid socket address
 ///
 /// # Platform Support
-/// This function works on both Unix and Windows platforms.
-/// - On Unix: Uses libc's sockaddr types
+/// This function works on Unix-like and Windows platforms.
+/// - On Unix (Linux, macOS, FreeBSD, etc.): Uses libc's sockaddr types
 /// - On Windows: Uses Windows socket types (winsock2)
 #[cfg(unix)]
 #[no_mangle]
