@@ -156,7 +156,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      
+
       - name: Test on FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
@@ -164,10 +164,19 @@ jobs:
           usesh: true
           prepare: |
             pkg install -y rust
-            cargo install cbindgen
           run: |
+            # Build library and binary
             cargo build --verbose
-            cargo test --lib --verbose
+
+            # Run all tests (not just --lib)
+            cargo test --verbose
+
+            # Test installation (what users actually do)
+            cargo install --path . --locked --verbose
+
+            # Verify the binary works
+            ~/.cargo/bin/matchy --version
+
             echo "FreeBSD build successful!"
 
   security:
