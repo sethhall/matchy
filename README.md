@@ -46,6 +46,10 @@ db.lookup("sub.evil.example.com")?; // Matches *.example.com pattern
 # Install
 cargo install matchy
 
+# FreeBSD users: Use rustup for best compatibility
+# If you get linker errors with pkg rust:
+#   pkg remove rust && curl https://sh.rustup.rs | sh
+
 # Create a threats database
 cat > threats.csv << EOF
 entry,threat_level,category
@@ -140,6 +144,20 @@ cargo test
 ```
 
 **Requirements:** Rust 1.70+
+
+### FreeBSD
+
+FreeBSD is fully supported. For best results, use `rustup` instead of `pkg install rust`:
+
+```bash
+# Recommended: Install via rustup
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Verify correct target
+rustc -vV  # Should show "host: x86_64-unknown-freebsd"
+```
+
+If you encounter linker errors about missing glibc symbols (`fstat64`, `__errno_location`, etc.), your Rust toolchain is misconfigured for FreeBSD. Switch to rustup to resolve this.
 
 ## Contributing
 
