@@ -46,9 +46,10 @@ db.lookup("sub.evil.example.com")?; // Matches *.example.com pattern
 # Install
 cargo install matchy
 
-# FreeBSD users: Use rustup for best compatibility
-# If you get linker errors with pkg rust:
-#   pkg remove rust && curl https://sh.rustup.rs | sh
+# FreeBSD users: Ensure you have the FreeBSD toolchain!
+# Check with: rustc -vV
+# Should show "x86_64-unknown-freebsd", NOT "x86_64-unknown-linux-gnu"
+# See FreeBSD section below for troubleshooting
 
 # Create a threats database
 cat > threats.csv << EOF
@@ -147,17 +148,31 @@ cargo test
 
 ### FreeBSD
 
-FreeBSD is fully supported. For best results, use `rustup` instead of `pkg install rust`:
+FreeBSD is fully supported. **Important**: Ensure you have the FreeBSD Rust toolchain, not the Linux one.
 
 ```bash
-# Recommended: Install via rustup
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Check your current toolchain
+rustc -vV
 
-# Verify correct target
-rustc -vV  # Should show "host: x86_64-unknown-freebsd"
+# Should show: host: x86_64-unknown-freebsd
+# If it shows: host: x86_64-unknown-linux-gnu  <- WRONG!
 ```
 
-If you encounter linker errors about missing glibc symbols (`fstat64`, `__errno_location`, etc.), your Rust toolchain is misconfigured for FreeBSD. Switch to rustup to resolve this.
+**If you see `x86_64-unknown-linux-gnu`** (Linux toolchain on FreeBSD), you need to reinstall:
+
+```bash
+# Remove existing rustup
+rustup self uninstall
+
+# Reinstall rustup (it should auto-detect FreeBSD)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Or explicitly install FreeBSD toolchain
+rustup toolchain install stable-x86_64-unknown-freebsd
+rustup default stable-x86_64-unknown-freebsd
+```
+
+**Symptoms of wrong toolchain**: Linker errors about `fstat64`, `__errno_location`, `mmap64`, etc. (glibc symbols that don't exist on FreeBSD).
 
 ## Contributing
 
