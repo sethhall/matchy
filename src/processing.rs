@@ -43,7 +43,7 @@
 
 use crate::extractor::{ExtractedItem, Extractor, HashType};
 use crate::{Database, QueryResult};
-use std::io::{self, Read};
+use std::io::{self, BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -154,10 +154,11 @@ pub struct LineMatch {
 /// Supports gzip-compressed files via extension detection.
 pub struct LineFileReader {
     source_path: PathBuf,
-    reader: Box<dyn Read + Send>,
+    reader: Box<dyn BufRead + Send>,
     read_buffer: Vec<u8>,
     current_line_number: usize,
     eof: bool,
+    leftover: Vec<u8>, // Partial line from previous read
 }
 
 impl LineFileReader {
@@ -188,6 +189,7 @@ impl LineFileReader {
             read_buffer: vec![0u8; chunk_size],
             current_line_number: 1,
             eof: false,
+            leftover: Vec::new(),
         })
     }
 
@@ -211,21 +213,48 @@ impl LineFileReader {
             return Ok(None);
         }
 
+        // Read a chunk - BufReader (128KB) underneath handles syscall batching efficiently
+        // Single read() call is actually fine since BufReader does the buffering
         let bytes_read = self.reader.read(&mut self.read_buffer)?;
+
         if bytes_read == 0 {
             self.eof = true;
+            // Send any leftover data from previous reads
+            if !self.leftover.is_empty() {
+                let chunk = std::mem::take(&mut self.leftover);
+                let line_offsets: Vec<usize> = memchr::memchr_iter(b'\n', &chunk).collect();
+                let line_count = line_offsets.len();
+                let batch = LineBatch {
+                    source: self.source_path.clone(),
+                    starting_line_number: self.current_line_number,
+                    data: Arc::new(chunk),
+                    line_offsets: Arc::new(line_offsets),
+                    word_boundaries: None,
+                };
+                self.current_line_number += line_count;
+                return Ok(Some(batch));
+            }
             return Ok(None);
         }
 
+        // Combine with leftover from previous read
+        let mut combined = std::mem::take(&mut self.leftover);
+        combined.extend_from_slice(&self.read_buffer[..bytes_read]);
+
         // Find last newline using memchr (SIMD-accelerated)
-        let chunk_end = if let Some(pos) = memchr::memrchr(b'\n', &self.read_buffer[..bytes_read]) {
+        let chunk_end = if let Some(pos) = memchr::memrchr(b'\n', &combined) {
             pos + 1 // Include the newline
         } else {
-            bytes_read // No newline found, send entire chunk
+            // No newline found - save for next read
+            self.leftover = combined;
+            return self.next_batch(); // Try to read more
         };
 
-        // Copy chunk data
-        let chunk = self.read_buffer[..chunk_end].to_vec();
+        // Split at last newline
+        let chunk = combined[..chunk_end].to_vec();
+        if chunk_end < combined.len() {
+            self.leftover = combined[chunk_end..].to_vec();
+        }
 
         // Pre-compute newline offsets (avoid duplicate memchr in workers)
         let line_offsets: Vec<usize> = memchr::memchr_iter(b'\n', &chunk).collect();
