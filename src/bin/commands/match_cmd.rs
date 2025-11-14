@@ -42,7 +42,7 @@ pub fn cmd_match(
         } else if num_threads == 1 {
             eprintln!("[INFO] Mode: Sequential (single-threaded)");
         } else {
-            eprintln!("[INFO] Mode: Parallel ({} worker threads)", num_threads);
+            eprintln!("[INFO] Mode: Parallel (1 reader, {} workers)", num_threads);
             eprintln!("[INFO] Batch size: {} bytes", batch_bytes);
         }
     }
