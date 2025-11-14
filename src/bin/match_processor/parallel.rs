@@ -481,12 +481,21 @@ pub fn create_extractor_for_db(db: &matchy::Database) -> Result<matchy::extracto
     let has_strings = db.has_literal_data() || db.has_glob_data();
 
     let mut builder = Extractor::builder();
+    
+    // Only enable extractors if database has corresponding data
     if !has_ip {
         builder = builder.extract_ipv4(false).extract_ipv6(false);
     }
     if !has_strings {
-        builder = builder.extract_domains(false).extract_emails(false);
+        builder = builder
+            .extract_domains(false)
+            .extract_emails(false)
+            .extract_hashes(false)
+            .extract_bitcoin(false)
+            .extract_ethereum(false)
+            .extract_monero(false);
     }
+    
     builder.build().context("Failed to create extractor")
 }
 
