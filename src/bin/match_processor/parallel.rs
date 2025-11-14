@@ -394,6 +394,7 @@ fn process_stdin(
                     starting_line_number: current_line_number,
                     data: Arc::new(leftover.clone()),
                     line_offsets: Arc::new(line_offsets),
+                    word_boundaries: None,
                 };
                 work_tx.send(Some(batch))?;
             }
@@ -420,6 +421,7 @@ fn process_stdin(
                     starting_line_number: current_line_number,
                     data: Arc::new(combined.clone()),
                     line_offsets: Arc::new(line_offsets),
+                    word_boundaries: None,
                 };
                 work_tx.send(Some(batch))?;
 
@@ -449,6 +451,7 @@ fn process_stdin(
             starting_line_number: current_line_number,
             data: Arc::new(chunk),
             line_offsets: Arc::new(line_offsets),
+            word_boundaries: None,
         };
         work_tx.send(Some(batch))?;
 

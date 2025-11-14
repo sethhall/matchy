@@ -62,6 +62,10 @@ pub struct LineBatch {
     /// Pre-computed newline positions (offsets of '\n' bytes in data)
     /// Workers use these to avoid re-scanning with memchr
     pub line_offsets: Arc<Vec<usize>>,
+    /// Pre-computed word boundary positions (for hash/crypto extractors)
+    /// Only computed when needed extractors are enabled
+    /// Boundaries mark the start/end of tokens (non-boundary character runs)
+    pub word_boundaries: Option<Arc<Vec<usize>>>,
 }
 
 /// Statistics from parallel line processing
@@ -232,6 +236,7 @@ impl LineFileReader {
             starting_line_number: self.current_line_number,
             data: Arc::new(chunk),
             line_offsets: Arc::new(line_offsets),
+            word_boundaries: None, // Computed lazily by workers if needed
         };
 
         self.current_line_number += line_count;

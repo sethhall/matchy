@@ -422,6 +422,7 @@ fn reader_watcher_thread(
                                 starting_line_number: 1,
                                 data: Arc::new(content.clone()),
                                 line_offsets: Arc::new(line_offsets),
+                                word_boundaries: None,
                             };
                             let _ = work_tx.send(Some(batch));
 
@@ -736,6 +737,7 @@ fn handle_file_event_parallel(
                                             starting_line_number: starting_line,
                                             data: Arc::new(new_content.clone()),
                                             line_offsets: Arc::new(line_offsets),
+                                            word_boundaries: None,
                                         };
                                         let _ = work_tx.send(Some(batch));
 

@@ -394,6 +394,15 @@ impl Extractor {
     pub fn extract_from_chunk<'a>(&'a self, chunk: &'a [u8]) -> Vec<Match<'a>> {
         let mut matches = Vec::new();
 
+        // Pre-compute word boundaries once if any boundary-dependent extractors are enabled
+        // This eliminates redundant scans across Bitcoin, hash, and Monero extractors
+        let boundaries = if self.extract_hashes || self.extract_bitcoin || self.extract_monero {
+            Some(find_word_boundaries(chunk))
+        } else {
+            None
+        };
+        let boundaries_ref = boundaries.as_deref();
+
         // Extract IPv6 (::) in one pass over entire chunk
         if self.extract_ipv6 {
             self.extract_ipv6_chunk(chunk, &mut matches);
@@ -414,14 +423,14 @@ impl Extractor {
             self.extract_domains_chunk(chunk, &mut matches);
         }
 
-        // Extract hashes in one pass
+        // Extract hashes using pre-computed boundaries
         if self.extract_hashes {
-            self.extract_hashes_chunk(chunk, &mut matches);
+            self.extract_hashes_chunk_with_boundaries(chunk, &mut matches, boundaries_ref);
         }
 
-        // Extract crypto addresses
+        // Extract crypto addresses using pre-computed boundaries
         if self.extract_bitcoin {
-            self.extract_bitcoin_chunk(chunk, &mut matches);
+            self.extract_bitcoin_chunk_with_boundaries(chunk, &mut matches, boundaries_ref);
         }
 
         if self.extract_ethereum {
@@ -429,7 +438,7 @@ impl Extractor {
         }
 
         if self.extract_monero {
-            self.extract_monero_chunk(chunk, &mut matches);
+            self.extract_monero_chunk_with_boundaries(chunk, &mut matches, boundaries_ref);
         }
 
         matches
@@ -1138,9 +1147,22 @@ impl Extractor {
     /// - Cheap integer distance checks
     /// - Auto-vectorized hex validation (16-32 bytes/cycle)
     /// - Zero allocation (boundary vec reused)
-    fn extract_hashes_chunk<'a>(&'a self, chunk: &'a [u8], matches: &mut Vec<Match<'a>>) {
-        // Step 1: Find all word boundaries in one pass
-        let boundaries = find_word_boundaries(chunk);
+    ///
+    /// If pre-computed boundaries are provided, uses them instead of computing.
+    fn extract_hashes_chunk_with_boundaries<'a>(
+        &'a self,
+        chunk: &'a [u8],
+        matches: &mut Vec<Match<'a>>,
+        boundaries: Option<&[usize]>,
+    ) {
+        // Step 1: Use provided boundaries or compute them
+        let owned_boundaries;
+        let boundaries = if let Some(b) = boundaries {
+            b
+        } else {
+            owned_boundaries = find_word_boundaries(chunk);
+            &owned_boundaries
+        };
 
         // Step 2: Check distances between consecutive boundaries
         // boundaries come in pairs: [start1, end1, start2, end2, ...]
@@ -1167,6 +1189,11 @@ impl Extractor {
         }
     }
 
+    /// Extract hashes from chunk (convenience wrapper without pre-computed boundaries)
+    fn extract_hashes_chunk<'a>(&'a self, chunk: &'a [u8], matches: &mut Vec<Match<'a>>) {
+        self.extract_hashes_chunk_with_boundaries(chunk, matches, None);
+    }
+
     /// Extract hashes from a single line (for line-by-line processing)
     fn extract_hashes_internal<'a>(&'a self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
         // Delegate to chunk-based implementation
@@ -1177,8 +1204,22 @@ impl Extractor {
 
     /// Extract Bitcoin addresses from chunk
     /// Supports all formats: legacy (1...), P2SH (3...), and bech32 (bc1...)
-    fn extract_bitcoin_chunk<'a>(&'a self, chunk: &'a [u8], matches: &mut Vec<Match<'a>>) {
-        let boundaries = find_word_boundaries(chunk);
+    ///
+    /// If pre-computed boundaries are provided, uses them instead of computing.
+    fn extract_bitcoin_chunk_with_boundaries<'a>(
+        &'a self,
+        chunk: &'a [u8],
+        matches: &mut Vec<Match<'a>>,
+        boundaries: Option<&[usize]>,
+    ) {
+        // Use provided boundaries or compute them
+        let owned_boundaries;
+        let boundaries = if let Some(b) = boundaries {
+            b
+        } else {
+            owned_boundaries = find_word_boundaries(chunk);
+            &owned_boundaries
+        };
 
         for window in boundaries.chunks_exact(2) {
             let start = window[0];
@@ -1215,6 +1256,11 @@ impl Extractor {
                 }
             }
         }
+    }
+
+    /// Extract Bitcoin addresses from chunk (convenience wrapper without pre-computed boundaries)
+    fn extract_bitcoin_chunk<'a>(&'a self, chunk: &'a [u8], matches: &mut Vec<Match<'a>>) {
+        self.extract_bitcoin_chunk_with_boundaries(chunk, matches, None);
     }
 
     /// Extract Ethereum addresses from chunk
@@ -1256,8 +1302,22 @@ impl Extractor {
 
     /// Extract Monero addresses from chunk
     /// Format: starts with '4' or '8', followed by ~95 base58 chars
-    fn extract_monero_chunk<'a>(&'a self, chunk: &'a [u8], matches: &mut Vec<Match<'a>>) {
-        let boundaries = find_word_boundaries(chunk);
+    ///
+    /// If pre-computed boundaries are provided, uses them instead of computing.
+    fn extract_monero_chunk_with_boundaries<'a>(
+        &'a self,
+        chunk: &'a [u8],
+        matches: &mut Vec<Match<'a>>,
+        boundaries: Option<&[usize]>,
+    ) {
+        // Use provided boundaries or compute them
+        let owned_boundaries;
+        let boundaries = if let Some(b) = boundaries {
+            b
+        } else {
+            owned_boundaries = find_word_boundaries(chunk);
+            &owned_boundaries
+        };
 
         for window in boundaries.chunks_exact(2) {
             let start = window[0];
@@ -1286,6 +1346,11 @@ impl Extractor {
                 }
             }
         }
+    }
+
+    /// Extract Monero addresses from chunk (convenience wrapper without pre-computed boundaries)
+    fn extract_monero_chunk<'a>(&'a self, chunk: &'a [u8], matches: &mut Vec<Match<'a>>) {
+        self.extract_monero_chunk_with_boundaries(chunk, matches, None);
     }
 }
 
@@ -1573,7 +1638,9 @@ fn is_all_hex_simd(bytes: &[u8]) -> bool {
 /// Find all word boundary positions in chunk
 /// Returns sorted vec of positions where tokens start/end
 /// A token is a sequence of non-boundary characters
-fn find_word_boundaries(chunk: &[u8]) -> Vec<usize> {
+///
+/// Public for use by processing infrastructure to pre-compute boundaries
+pub(crate) fn find_word_boundaries(chunk: &[u8]) -> Vec<usize> {
     let mut boundaries = Vec::new();
 
     if chunk.is_empty() {
