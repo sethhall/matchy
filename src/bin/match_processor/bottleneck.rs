@@ -248,16 +248,14 @@ pub fn format_stage_breakdown(breakdown: &StageBreakdown) -> String {
     let mut output = String::new();
     
     output.push_str("Pipeline Stage Breakdown:\n");
-    output.push_str(&format_stage_bar("Disk Read", breakdown.read_percent));
-    output.push_str(&format_stage_bar("Decompression", breakdown.decompress_percent));
-    output.push_str(&format_stage_bar("Batch Prep", breakdown.batch_prep_percent));
-    output.push_str(&format_stage_bar("Worker Idle", breakdown.worker_idle_percent));
-    output.push_str(&format_stage_bar("Worker Active", breakdown.worker_active_percent));
+    output.push_str("  Reader Thread (I/O):\n");
+    output.push_str(&format_stage_bar_indented("Disk Read", breakdown.read_percent));
+    output.push_str(&format_stage_bar_indented("Decompression", breakdown.decompress_percent));
+    output.push_str(&format_stage_bar_indented("Batch Prep", breakdown.batch_prep_percent));
     
-    // Calculate and show total to verify math
-    let total = breakdown.read_percent + breakdown.decompress_percent + breakdown.batch_prep_percent
-        + breakdown.worker_idle_percent + breakdown.worker_active_percent;
-    output.push_str(&format!("  {:15} {:7.1}%\n", "Total:", total));
+    output.push_str("  Worker Threads (Processing):  [runs in parallel with reader]\n");
+    output.push_str(&format_stage_bar_indented("Worker Idle", breakdown.worker_idle_percent));
+    output.push_str(&format_stage_bar_indented("Worker Active", breakdown.worker_active_percent));
     
     output
 }
@@ -268,4 +266,12 @@ fn format_stage_bar(label: &str, percent: f64) -> String {
     let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
     
     format!("  {:15} [{bar}] {:5.1}%\n", label, percent)
+}
+
+fn format_stage_bar_indented(label: &str, percent: f64) -> String {
+    let bar_width = 50;
+    let filled = ((percent / 100.0) * bar_width as f64) as usize;
+    let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+    
+    format!("    {:15} [{bar}] {:5.1}%\n", label, percent)
 }

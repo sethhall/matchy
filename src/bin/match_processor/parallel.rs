@@ -371,12 +371,21 @@ fn process_file(
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
 
     // Stream batches to workers
-    for batch in reader.batches() {
-        // Time the read operation (includes decompression if .gz)
+    // We need to time the iterator.next() call, not the batch after it's retrieved
+    let mut batches_iter = reader.batches();
+    loop {
+        // Time the batch retrieval (I/O + decompression happens in iterator.next())
         let read_start = Instant::now();
-        let batch =
-            batch.with_context(|| format!("Failed to read from {}", input_path.display()))?;
+        let batch_opt = batches_iter.next();
         let read_elapsed = read_start.elapsed();
+        
+        let batch_result = match batch_opt {
+            Some(b) => b,
+            None => break, // No more batches
+        };
+        
+        let batch =
+            batch_result.with_context(|| format!("Failed to read from {}", input_path.display()))?;
         
         // Track time by type (read includes decompression time for .gz)
         if is_gzip {
