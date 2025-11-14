@@ -89,6 +89,7 @@ lru = "0.16"  # LRU cache for query results
 memchr = "2.7"  # SIMD-accelerated byte searching
 rayon = "1.10"  # Parallel sort for large hash builds
 flate2 = "1.1"  # Gzip compression/decompression support
+gdt-cpus = "25.5"  # Physical/logical core detection for thread recommendations
 bs58 = "0.5"  # Base58 encoding/decoding for Bitcoin/Monero addresses
 sha2 = "0.10"  # SHA256 for Bitcoin checksum validation
 tiny-keccak = { version = "2.0", features = ["keccak"] }  # Keccak256 for Ethereum checksum validation

@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use crate::cli_utils::{format_number, format_qps};
 use crate::match_processor::{
-    follow_files, follow_files_parallel, process_file_with_aggregate, process_parallel,
-    ProcessingStats,
+    analyze_performance, follow_files, follow_files_parallel, format_stage_breakdown,
+    process_file_with_aggregate, process_parallel, ProcessingStats,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -27,18 +27,18 @@ pub fn cmd_match(
     use matchy::extractor::Extractor;
     use matchy::Database;
 
-    // Parse thread count: None = auto, "auto" = auto, "0" = auto, "N" = N
+    // Parse thread count: None = auto (0 triggers auto-tuning), "N" = N
     let num_threads = match threads_arg.as_deref() {
-        None | Some("auto") | Some("0") => std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1),
+        None | Some("auto") | Some("0") => 0, // 0 = auto-tune in process_parallel
         Some(s) => s.parse::<usize>().with_context(|| {
             format!("Invalid thread count '{}', expected a number or 'auto'", s)
         })?,
     };
 
     if show_stats && !follow {
-        if num_threads == 1 {
+        if num_threads == 0 {
+            eprintln!("[INFO] Mode: Auto-tuning (detecting optimal configuration)");
+        } else if num_threads == 1 {
             eprintln!("[INFO] Mode: Sequential (single-threaded)");
         } else {
             eprintln!("[INFO] Mode: Parallel ({} worker threads)", num_threads);
@@ -168,8 +168,8 @@ pub fn cmd_match(
         }
         files_processed = inputs.len();
         files_failed = 0;
-    } else if num_threads > 1 {
-        // Parallel mode
+    } else if num_threads == 0 || num_threads > 1 {
+        // Parallel mode (num_threads=0 means auto-tune, >1 means explicit count)
         aggregate_stats = process_parallel(
             inputs.clone(),
             &database,
@@ -335,8 +335,9 @@ pub fn cmd_match(
             },
             format_number(aggregate_stats.lookup_samples)
         );
+        
         eprintln!(
-            "[INFO] Query rate: {} candidates/sec (overall)",
+            "[INFO] Query rate: {} queries/s",
             format_qps(if overall_elapsed.as_secs_f64() > 0.0 {
                 aggregate_stats.candidates_tested as f64 / overall_elapsed.as_secs_f64()
             } else {
@@ -350,6 +351,34 @@ pub fn cmd_match(
                 format_number(cache_size),
                 db_stats.cache_hit_rate() * 100.0
             );
+        }
+        
+        // Bottleneck analysis (only for parallel mode with timing data)
+        if num_threads > 1 && overall_elapsed.as_secs_f64() > 0.1 {
+            eprintln!();
+            eprintln!("[INFO] === Performance Analysis ===");
+            
+            let analysis = analyze_performance(
+                &aggregate_stats,
+                overall_elapsed,
+                num_threads,
+                inputs.len(),
+                db_stats.cache_hit_rate(),
+            );
+            
+            // Show stage breakdown
+            eprintln!();
+            eprint!("{}", format_stage_breakdown(&analysis.stage_breakdown));
+            
+            // Show bottleneck and recommendations
+            eprintln!();
+            eprintln!("[INFO] Bottleneck: {}", analysis.explanation);
+            if !analysis.recommendations.is_empty() {
+                eprintln!("[INFO] Recommendations:");
+                for rec in &analysis.recommendations {
+                    eprintln!("[INFO]   • {}", rec);
+                }
+            }
         }
     }
 

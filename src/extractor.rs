@@ -132,7 +132,6 @@ impl ExtractorBuilder {
             tld_matcher,
             double_colon_finder,
             ox_finder,
-            tld_match_buffer: std::cell::RefCell::new(Vec::with_capacity(16)),
         })
     }
 }
@@ -350,8 +349,6 @@ pub struct Extractor {
     double_colon_finder: memchr::memmem::Finder<'static>,
     /// Pre-built memchr finder for 0x (Ethereum addresses)
     ox_finder: memchr::memmem::Finder<'static>,
-    /// Reusable buffer for TLD matching (avoids per-line allocation)
-    tld_match_buffer: std::cell::RefCell<Vec<(usize, u32)>>,
 }
 
 impl Extractor {
@@ -412,13 +409,9 @@ impl Extractor {
             self.extract_emails_chunk(chunk, &mut matches);
         }
 
-        // Domains still use AC per-line for now (more complex)
+        // Extract domains from entire chunk in one pass
         if self.extract_domains {
-            // Fall back to line-by-line for domains
-            // TODO: Could optimize this too with chunk-wide AC
-            for line in chunk.split(|&b| b == b'\n') {
-                self.extract_domains_internal(line, &mut matches);
-            }
+            self.extract_domains_chunk(chunk, &mut matches);
         }
 
         // Extract hashes in one pass
@@ -487,8 +480,8 @@ impl Extractor {
         self.min_domain_labels
     }
 
-    /// Extract domains by finding TLD anchors and expanding boundaries
-    fn extract_domains_internal<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+    /// Extract domains from entire chunk in one pass
+    fn extract_domains_chunk<'a>(&'a self, chunk: &'a [u8], matches: &mut Vec<Match<'a>>) {
         use memchr::memchr;
 
         let tld_matcher = match self.tld_matcher.as_ref() {
@@ -497,34 +490,29 @@ impl Extractor {
         };
 
         // Quick pre-filter: skip if no dots at all (domains need at least one)
-        // This SIMD check is extremely fast and saves TLD matching on lines without domains
-        if memchr(b'.', line).is_none() {
+        if memchr(b'.', chunk).is_none() {
             return;
         }
 
         // Find all TLD suffix matches with positions using byte-based matching
-        // No UTF-8 validation needed - AC works on raw bytes
-        // Returns (end_position, pattern_id) for each TLD match
-        // OPTIMIZATION: Reuse buffer across lines to avoid per-line allocation
-        let mut tld_buffer = self.tld_match_buffer.borrow_mut();
-        tld_matcher.find_matches_with_positions_bytes_into(line, &mut tld_buffer);
+        // Allocate buffer once for entire chunk (not per-line)
+        let mut tld_buffer = Vec::new();
+        tld_matcher.find_matches_with_positions_bytes_into(chunk, &mut tld_buffer);
 
         for &(tld_end, _pattern_id) in tld_buffer.iter() {
             // e.g., "evil.example.com" with ".com" match gives tld_end = 18
 
-            // Fast boundary check: TLD must be followed by non-domain char or end of line
+            // Fast boundary check: TLD must be followed by non-domain char or end of chunk
             // This rejects false positives like "blah.community" (.com matches but continues)
-            // Single byte check is much faster than backward scan
-            if tld_end < line.len() && is_domain_char(line[tld_end]) {
+            if tld_end < chunk.len() && is_domain_char(chunk[tld_end]) {
                 continue; // TLD continues with domain chars - not a real TLD boundary
             }
 
             // Expand backwards to find domain start
-            if let Some(domain_span) = self.expand_domain_backwards(line, tld_end) {
-                let domain_bytes = &line[domain_span.0..domain_span.1];
+            if let Some(domain_span) = self.expand_domain_backwards(chunk, tld_end) {
+                let domain_bytes = &chunk[domain_span.0..domain_span.1];
 
-                // Validate UTF-8 only on the domain candidate (not the whole line!)
-                // This is a small slice (10-30 bytes typically) vs entire KB lines
+                // Validate UTF-8 only on the domain candidate (not the whole chunk!)
                 let domain_str = match std::str::from_utf8(domain_bytes) {
                     Ok(s) => s,
                     Err(_) => continue, // Invalid UTF-8 in domain - skip
@@ -537,7 +525,7 @@ impl Extractor {
                 }
 
                 // Validate the extracted domain (label checks, etc.)
-                if self.is_valid_domain(line, domain_span) {
+                if self.is_valid_domain(chunk, domain_span) {
                     matches.push(Match {
                         item: ExtractedItem::Domain(domain_str),
                         span: domain_span,
@@ -545,6 +533,12 @@ impl Extractor {
                 }
             }
         }
+    }
+
+    /// Extract domains from a single line (for line-by-line processing)
+    /// Delegates to chunk-based implementation since spans are compatible
+    fn extract_domains_internal<'a>(&'a self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
+        self.extract_domains_chunk(line, matches);
     }
 
     /// Expand backwards from TLD end to find domain start using fast lookup table

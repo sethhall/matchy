@@ -683,3 +683,104 @@ fn test_multiple_input_files() {
         .assert()
         .success();
 }
+
+#[test]
+fn test_json_output_includes_input_line() {
+    // Regression test: ensure JSON output includes complete input line, not empty string
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("ips.txt");
+    let db_file = temp_dir.path().join("test.mxy");
+    let log_file = temp_dir.path().join("test.log");
+
+    // Build database with an IP
+    fs::write(&input_file, "192.168.1.100/32\n").unwrap();
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&db_file)
+        .assert()
+        .success();
+
+    // Create log file with known content
+    let test_line = "2024-01-15 Connection from 192.168.1.100 detected";
+    fs::write(&log_file, format!("{}\n", test_line)).unwrap();
+
+    // Run match with JSON output
+    let output = matchy_cmd()
+        .arg("match")
+        .arg(&db_file)
+        .arg(&log_file)
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    let json_lines: Vec<&str> = stdout.lines().collect();
+    assert!(!json_lines.is_empty(), "Expected JSON output");
+
+    // Parse the JSON and verify input_line field
+    let json: serde_json::Value = serde_json::from_str(json_lines[0])
+        .expect("Failed to parse JSON output");
+
+    let input_line = json.get("input_line")
+        .expect("JSON missing 'input_line' field")
+        .as_str()
+        .expect("input_line should be a string");
+
+    assert!(!input_line.is_empty(), "input_line should not be empty");
+    assert_eq!(input_line, test_line, "input_line should contain complete line content");
+}
+
+#[test]
+fn test_json_output_parallel_mode() {
+    // Verify input_line is populated in parallel mode too
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("patterns.txt");
+    let db_file = temp_dir.path().join("test.mxy");
+    let log_file = temp_dir.path().join("test.log");
+
+    // Build database
+    fs::write(&input_file, "*.malware.com\n").unwrap();
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&db_file)
+        .assert()
+        .success();
+
+    // Create log with multiple lines
+    let target_line = "Line 2: Request to bad.malware.com blocked";
+    fs::write(&log_file, format!("Line 1: Normal traffic\n{}\nLine 3: More content\n", target_line)).unwrap();
+
+    // Run with parallel mode
+    let output = matchy_cmd()
+        .arg("match")
+        .arg(&db_file)
+        .arg(&log_file)
+        .arg("--format")
+        .arg("json")
+        .arg("--threads")
+        .arg("4")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    let first_line = stdout.lines().next().unwrap();
+    let json: serde_json::Value = serde_json::from_str(first_line)
+        .expect("Failed to parse JSON");
+
+    let input_line = json["input_line"].as_str().unwrap();
+    let line_number = json["line_number"].as_u64().unwrap();
+    
+    assert_eq!(line_number, 2, "Should be line 2");
+    assert_eq!(input_line, target_line, "Parallel mode should also populate input_line");
+}

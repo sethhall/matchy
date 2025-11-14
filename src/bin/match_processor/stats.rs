@@ -17,6 +17,13 @@ pub struct ProcessingStats {
     pub ipv6_count: usize,
     pub domain_count: usize,
     pub email_count: usize,
+    // Pipeline stage timings (parallel mode)
+    pub read_time: Duration,          // Time spent reading from disk
+    pub decompress_time: Duration,    // Time spent decompressing (if .gz)
+    pub batch_prep_time: Duration,    // Time spent preparing batches (line splitting)
+    pub worker_idle_time: Duration,   // Time workers spent waiting for work
+    pub worker_busy_time: Duration,   // Time workers spent processing
+    pub output_time: Duration,        // Time spent in output thread
 }
 
 impl ProcessingStats {
@@ -35,6 +42,12 @@ impl ProcessingStats {
             ipv6_count: 0,
             domain_count: 0,
             email_count: 0,
+            read_time: Duration::ZERO,
+            decompress_time: Duration::ZERO,
+            batch_prep_time: Duration::ZERO,
+            worker_idle_time: Duration::ZERO,
+            worker_busy_time: Duration::ZERO,
+            output_time: Duration::ZERO,
         }
     }
 
@@ -53,6 +66,12 @@ impl ProcessingStats {
         self.ipv6_count += other.ipv6_count;
         self.domain_count += other.domain_count;
         self.email_count += other.email_count;
+        self.read_time += other.read_time;
+        self.decompress_time += other.decompress_time;
+        self.batch_prep_time += other.batch_prep_time;
+        self.worker_idle_time += other.worker_idle_time;
+        self.worker_busy_time += other.worker_busy_time;
+        self.output_time += other.output_time;
     }
 }
 

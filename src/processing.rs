@@ -77,6 +77,14 @@ pub struct WorkerStats {
     pub lines_with_matches: usize,
     /// Total bytes processed
     pub total_bytes: usize,
+    /// Time spent extracting candidates (sampled)
+    pub extraction_time: std::time::Duration,
+    /// Number of extraction samples
+    pub extraction_samples: usize,
+    /// Time spent on database lookups (sampled)
+    pub lookup_time: std::time::Duration,
+    /// Number of lookup samples
+    pub lookup_samples: usize,
     /// IPv4 addresses found
     pub ipv4_count: usize,
     /// IPv6 addresses found
@@ -335,8 +343,23 @@ impl Worker {
         // Update byte count
         self.stats.total_bytes += data.len();
 
+        // Sample timing every 1000 operations to avoid overhead
+        let should_sample_extraction = self.stats.extraction_samples < 100_000 
+            && self.stats.candidates_tested % 1000 == 0;
+        
         // Extract all candidates in one pass
+        let extraction_start = if should_sample_extraction {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        
         let extracted = self.extractor.extract_from_chunk(data);
+        
+        if let Some(start) = extraction_start {
+            self.stats.extraction_time += start.elapsed();
+            self.stats.extraction_samples += 1;
+        }
 
         for item in extracted {
             self.stats.candidates_tested += 1;
@@ -359,8 +382,18 @@ impl Worker {
                 ExtractedItem::Monero(_) => self.stats.monero_count += 1,
             }
 
+            // Sample lookup timing every 100 lookups
+            let should_sample_lookup = self.stats.lookup_samples < 100_000
+                && self.stats.candidates_tested % 100 == 0;
+            
             // Lookup in all databases
             for (database_id, database) in &self.databases {
+                let lookup_start = if should_sample_lookup {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                
                 let (result_opt, matched_text) = match &item.item {
                     ExtractedItem::Ipv4(ip) => {
                         let result = database
@@ -384,6 +417,11 @@ impl Worker {
                         (result, s.to_string())
                     }
                 };
+                
+                if let Some(start) = lookup_start {
+                    self.stats.lookup_time += start.elapsed();
+                    self.stats.lookup_samples += 1;
+                }
 
                 if let Some(query_result) = result_opt {
                     // Skip QueryResult::NotFound - not a real match
@@ -443,12 +481,12 @@ impl Worker {
             .into_iter()
             .map(|match_result| {
                 // Calculate line number from byte offset
-                let line_number = batch.starting_line_number
-                    + batch
-                        .line_offsets
-                        .iter()
-                        .take_while(|&&off| off < match_result.byte_offset)
-                        .count();
+                let newlines_before = batch
+                    .line_offsets
+                    .iter()
+                    .take_while(|&&off| off < match_result.byte_offset)
+                    .count();
+                let line_number = batch.starting_line_number + newlines_before;
 
                 lines_with_matches.insert(line_number);
 
