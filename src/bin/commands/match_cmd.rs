@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use crate::cli_utils::{format_number, format_qps};
 use crate::match_processor::{
-    analyze_performance, follow_files, follow_files_parallel, format_stage_breakdown,
+    analyze_performance, follow_files, follow_files_parallel,
     process_file_with_aggregate, process_parallel, ProcessingStats,
 };
 
@@ -18,6 +18,7 @@ pub fn cmd_match(
     inputs: Vec<PathBuf>,
     follow: bool,
     threads_arg: Option<String>,
+    readers_arg: Option<usize>,
     batch_bytes: usize,
     format: String,
     show_stats: bool,
@@ -42,7 +43,12 @@ pub fn cmd_match(
         } else if num_threads == 1 {
             eprintln!("[INFO] Mode: Sequential (single-threaded)");
         } else {
-            eprintln!("[INFO] Mode: Parallel (1 reader, {} workers)", num_threads);
+            // Show reader/worker split
+            if let Some(readers) = readers_arg {
+                eprintln!("[INFO] Mode: Parallel ({} readers, {} workers)", readers, num_threads);
+            } else {
+                eprintln!("[INFO] Mode: Parallel (1 reader, {} workers)", num_threads);
+            }
             eprintln!("[INFO] Batch size: {} bytes", batch_bytes);
         }
     }
@@ -82,15 +88,19 @@ pub fn cmd_match(
     let has_ip = db.has_ip_data();
     let has_strings = db.has_literal_data() || db.has_glob_data();
 
-    // Apply database-based defaults
-    let default_ipv4 = has_ip;
-    let default_ipv6 = has_ip;
-    let default_domains = has_strings;
-    let default_emails = has_strings;
-    let default_hashes = has_strings;
-    let default_bitcoin = has_strings;
-    let default_ethereum = has_strings;
-    let default_monero = has_strings;
+    // Determine defaults based on whether user specified explicit includes
+    // If user says --extractors=ip,domain (positive), ONLY enable those (exclusive mode)
+    // If user says --extractors=-crypto (negative), enable all defaults except those
+    let use_defaults = !extractor_config.has_explicit_enables();
+    
+    let default_ipv4 = use_defaults && has_ip;
+    let default_ipv6 = use_defaults && has_ip;
+    let default_domains = use_defaults && has_strings;
+    let default_emails = use_defaults && has_strings;
+    let default_hashes = use_defaults && has_strings;
+    let default_bitcoin = use_defaults && has_strings;
+    let default_ethereum = use_defaults && has_strings;
+    let default_monero = use_defaults && has_strings;
 
     // Build extractor with CLI overrides
     let builder = Extractor::builder()
@@ -169,6 +179,8 @@ pub fn cmd_match(
     let aggregate_stats: ProcessingStats;
     let files_processed: usize;
     let files_failed: usize;
+    let actual_workers: usize;  // Actual worker count (may differ from num_threads in auto-tune)
+    let is_auto_tuned = num_threads == 0;  // Track if auto-tune was used
 
     if follow {
         // Follow mode - use parallel or sequential based on thread count
@@ -191,6 +203,7 @@ pub fn cmd_match(
                 shutdown,
                 extractor_config,
             )?;
+            actual_workers = num_threads;
         } else {
             if show_stats {
                 eprintln!("[INFO] Using sequential follow (single-threaded)");
@@ -205,15 +218,17 @@ pub fn cmd_match(
                 overall_start,
                 shutdown,
             )?;
+            actual_workers = 1;
         }
         files_processed = inputs.len();
         files_failed = 0;
     } else if num_threads == 0 || num_threads > 1 {
         // Parallel mode (num_threads=0 means auto-tune, >1 means explicit count)
-        aggregate_stats = process_parallel(
+        let (stats, workers) = process_parallel(
             inputs.clone(),
             &database,
             num_threads,
+            readers_arg,
             batch_bytes,
             &format,
             show_stats,
@@ -222,6 +237,8 @@ pub fn cmd_match(
             overall_start,
             extractor_config,
         )?;
+        aggregate_stats = stats;
+        actual_workers = workers;
         files_processed = inputs.len();
         files_failed = 0;
     } else {
@@ -277,6 +294,7 @@ pub fn cmd_match(
         }
 
         aggregate_stats = seq_stats;
+        actual_workers = 1;  // Sequential mode
         files_processed = seq_processed;
         files_failed = seq_failed;
     }
@@ -395,29 +413,25 @@ pub fn cmd_match(
         }
         
         // Bottleneck analysis (only for parallel mode with timing data)
-        if num_threads > 1 && overall_elapsed.as_secs_f64() > 0.1 {
+        if actual_workers > 1 && overall_elapsed.as_secs_f64() > 0.1 {
             eprintln!();
             eprintln!("[INFO] === Performance Analysis ===");
             
             let analysis = analyze_performance(
                 &aggregate_stats,
                 overall_elapsed,
-                num_threads,
+                actual_workers,
                 inputs.len(),
                 db_stats.cache_hit_rate(),
+                is_auto_tuned,
             );
-            
-            // Show stage breakdown
-            eprintln!();
-            eprint!("{}", format_stage_breakdown(&analysis.stage_breakdown));
             
             // Show bottleneck and recommendations
             eprintln!();
-            eprintln!("[INFO] Bottleneck: {}", analysis.explanation);
+            eprintln!("[INFO] {}", analysis.explanation);
             if !analysis.recommendations.is_empty() {
-                eprintln!("[INFO] Recommendations:");
                 for rec in &analysis.recommendations {
-                    eprintln!("[INFO]   • {}", rec);
+                    eprintln!("[INFO] → {}", rec);
                 }
             }
         }

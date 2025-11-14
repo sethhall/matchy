@@ -93,9 +93,15 @@ enum Commands {
         follow: bool,
 
         /// Number of worker threads (default: auto-detect, use 1 for sequential)
-        /// "auto" or "0" uses all available CPU cores
+        /// "auto" or "0" uses all available CPU cores with auto-tuned reader/worker split
         #[arg(short = 'j', long)]
         threads: Option<String>,
+        
+        /// Number of reader threads for I/O and decompression (default: auto-detect)
+        /// Only used with --threads > 1. Explicit value overrides auto-tuning.
+        /// Use more readers for compressed files (.gz). Example: --readers=4 --threads=12
+        #[arg(long)]
+        readers: Option<usize>,
 
         /// Batch size in bytes for parallel mode (default: 131072 = 128KB)
         #[arg(long, default_value = "131072")]
@@ -118,7 +124,10 @@ enum Commands {
         cache_size: usize,
 
         /// Enable/disable extractors (comma-separated): ipv4,ipv6,domain,email,hash,bitcoin,ethereum,monero
-        /// Prefix with '-' to disable (e.g., -domain,-email). Default: auto-detect from database
+        /// Prefix with '-' to disable (e.g., -domain,-email). Supports plurals (domains, hashes, emails)
+        /// Group aliases: 'crypto' (bitcoin+ethereum+monero), 'ip' (ipv4+ipv6)
+        /// Examples: --extractors=ip,domain  --extractors=-crypto,-hash  --extractors=-domains
+        /// Default: auto-detect from database capabilities
         #[arg(long)]
         extractors: Option<String>,
     },
@@ -291,6 +300,7 @@ fn main() -> Result<()> {
             inputs,
             follow,
             threads,
+            readers,
             batch_bytes,
             format,
             stats,
@@ -302,6 +312,7 @@ fn main() -> Result<()> {
             inputs,
             follow,
             threads,
+            readers,
             batch_bytes,
             format,
             stats,

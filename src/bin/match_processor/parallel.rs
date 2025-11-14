@@ -16,30 +16,66 @@ use crate::cli_utils::{data_value_to_json, format_cidr_into};
 #[derive(Debug, Clone, Default)]
 pub struct ExtractorConfig {
     pub overrides: HashMap<String, bool>,
+    /// True if any explicit enables were specified (positive values)
+    /// When true, defaults are disabled (exclusive mode)
+    has_enables: bool,
 }
 
 impl ExtractorConfig {
     pub fn from_arg(arg: Option<String>) -> Self {
         let mut overrides = HashMap::new();
+        let mut has_enables = false;
         
         if let Some(ref extractors_str) = arg {
             for extractor in extractors_str.split(',') {
                 let extractor = extractor.trim();
-                if let Some(name) = extractor.strip_prefix('-') {
-                    // Disable extractor
-                    overrides.insert(name.to_string(), false);
+                let (is_disable, name) = if let Some(name) = extractor.strip_prefix('-') {
+                    (true, name)
                 } else {
-                    // Enable extractor
-                    overrides.insert(extractor.to_string(), true);
+                    (false, extractor)
+                };
+                
+                // Track if any explicit enables (positive values)
+                if !is_disable {
+                    has_enables = true;
+                }
+                
+                // Expand group aliases
+                let names = Self::expand_alias(name);
+                
+                for n in names {
+                    overrides.insert(n.to_string(), !is_disable);
                 }
             }
         }
         
-        Self { overrides }
+        Self { overrides, has_enables }
+    }
+    
+    /// Expand group aliases and normalize names
+    fn expand_alias(name: &str) -> Vec<&str> {
+        match name {
+            // Group aliases
+            "crypto" => vec!["bitcoin", "ethereum", "monero"],
+            "ip" => vec!["ipv4", "ipv6"],
+            // Plural normalization
+            "domains" => vec!["domain"],
+            "emails" => vec!["email"],
+            "hashes" => vec!["hash"],
+            "ips" => vec!["ipv4", "ipv6"],
+            // Pass through as-is
+            _ => vec![name],
+        }
     }
     
     pub fn should_enable(&self, name: &str, default: bool) -> bool {
         self.overrides.get(name).copied().unwrap_or(default)
+    }
+    
+    /// Returns true if any explicit enables were specified
+    /// Used to determine if we're in exclusive mode (only enable what was specified)
+    pub fn has_explicit_enables(&self) -> bool {
+        self.has_enables
     }
 }
 
@@ -98,12 +134,13 @@ fn auto_tune_thread_count(inputs: &[PathBuf], show_stats: bool) -> (usize, usize
         // Single file: 1 reader, rest workers
         (1, physical_cores.saturating_sub(1).max(1))
     } else if compressed_count > file_count / 2 {
-        // Mostly compressed: more workers for decompression
-        let readers = (physical_cores / 4).max(1).min(file_count);
+        // Mostly compressed: decompression is CPU-intensive, allocate ~40% to readers
+        // Gzip decompression can easily saturate 1-2 cores per stream
+        let readers = (physical_cores * 2 / 5).max(2).min(file_count);
         let workers = physical_cores.saturating_sub(readers).max(1);
         (readers, workers)
     } else {
-        // Mixed or uncompressed: balance readers and workers
+        // Mixed or uncompressed: balance readers and workers  (1/3 readers, 2/3 workers)
         let readers = (physical_cores / 3).max(1).min(file_count);
         let workers = physical_cores.saturating_sub(readers).max(1);
         (readers, workers)
@@ -155,6 +192,7 @@ pub fn process_parallel(
     inputs: Vec<PathBuf>,
     database_path: &Path,
     num_threads: usize,
+    explicit_readers: Option<usize>,
     batch_bytes: usize,
     output_format: &str,
     show_stats: bool,
@@ -162,12 +200,24 @@ pub fn process_parallel(
     cache_size: usize,
     overall_start: Instant,
     extractor_config: ExtractorConfig,
-) -> Result<ProcessingStats> {
-    // Auto-tune thread count if num_threads is 0
-    let (num_readers, num_threads) = if num_threads == 0 {
+) -> Result<(ProcessingStats, usize)> {
+    // Determine reader and worker counts
+    let (num_readers, num_threads) = if let Some(readers) = explicit_readers {
+        // Explicit reader count specified
+        let workers = if num_threads == 0 {
+            // Auto-detect total cores, subtract readers
+            let physical_cores = gdt_cpus::num_physical_cores().unwrap_or(4).max(1);
+            physical_cores.saturating_sub(readers).max(1)
+        } else {
+            num_threads
+        };
+        (readers, workers)
+    } else if num_threads == 0 {
+        // Full auto-tune
         auto_tune_thread_count(&inputs, show_stats)
     } else {
-        (1, num_threads)  // Explicit thread count = 1 reader, N workers
+        // Explicit thread count only = 1 reader, N workers
+        (1, num_threads)
     };
     let output_json = output_format == "json";
 
@@ -303,7 +353,7 @@ pub fn process_parallel(
         aggregate.email_count += stats.email_count;
     }
 
-    Ok(aggregate)
+    Ok((aggregate, num_threads))
 }
 
 /// Message from worker to output thread
@@ -325,11 +375,7 @@ fn reader_thread(
     let mut stats = ProcessingStats::new();
 
     // Pop files from queue and process them
-    loop {
-        let input_path = match pop_file(&file_queue) {
-            Some(path) => path,
-            None => break, // Queue empty
-        };
+    while let Some(input_path) = pop_file(&file_queue) {
         // Handle stdin specially (cannot be parallelized)
         if input_path.to_str() == Some("-") {
             // Process stdin (cannot seek, so read in chunks)
