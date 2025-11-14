@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde_json::json;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -11,6 +11,37 @@ use std::time::{Duration, Instant};
 use super::stats::ProcessingStats;
 use super::thread_utils::set_thread_name;
 use crate::cli_utils::{data_value_to_json, format_cidr_into};
+
+/// Extractor configuration from CLI flags
+#[derive(Debug, Clone, Default)]
+pub struct ExtractorConfig {
+    pub overrides: HashMap<String, bool>,
+}
+
+impl ExtractorConfig {
+    pub fn from_arg(arg: Option<String>) -> Self {
+        let mut overrides = HashMap::new();
+        
+        if let Some(ref extractors_str) = arg {
+            for extractor in extractors_str.split(',') {
+                let extractor = extractor.trim();
+                if let Some(name) = extractor.strip_prefix('-') {
+                    // Disable extractor
+                    overrides.insert(name.to_string(), false);
+                } else {
+                    // Enable extractor
+                    overrides.insert(extractor.to_string(), true);
+                }
+            }
+        }
+        
+        Self { overrides }
+    }
+    
+    pub fn should_enable(&self, name: &str, default: bool) -> bool {
+        self.overrides.get(name).copied().unwrap_or(default)
+    }
+}
 
 /// Timeout for flushing partial batches without newline (stdin streaming)
 /// Only applies to slow/streaming stdin - normal file processing doesn't need this
@@ -130,6 +161,7 @@ pub fn process_parallel(
     show_progress: bool,
     cache_size: usize,
     overall_start: Instant,
+    extractor_config: ExtractorConfig,
 ) -> Result<ProcessingStats> {
     // Auto-tune thread count if num_threads is 0
     let (num_readers, num_threads) = if num_threads == 0 {
@@ -164,6 +196,7 @@ pub fn process_parallel(
         let work_rx = Arc::clone(&work_rx);
         let result_tx = result_tx.clone();
         let database_path = database_path.to_owned();
+        let extractor_config = extractor_config.clone();
 
         let handle = thread::spawn(move || {
             set_thread_name(&format!("matchy-worker-{}", worker_id));
@@ -174,6 +207,7 @@ pub fn process_parallel(
                 database_path,
                 cache_size,
                 show_stats,
+                extractor_config,
             )
         });
         worker_handles.push(handle);
@@ -476,30 +510,38 @@ pub fn init_worker_database(database_path: &Path, cache_size: usize) -> Result<m
     opener.open().context("Failed to open database")
 }
 
-/// Create extractor configured for database capabilities
-pub fn create_extractor_for_db(db: &matchy::Database) -> Result<matchy::extractor::Extractor> {
+/// Create extractor configured for database capabilities and CLI overrides
+pub fn create_extractor_for_db(
+    db: &matchy::Database,
+    config: &ExtractorConfig,
+) -> Result<matchy::extractor::Extractor> {
     use matchy::extractor::Extractor;
 
     let has_ip = db.has_ip_data();
     let has_strings = db.has_literal_data() || db.has_glob_data();
 
-    let mut builder = Extractor::builder();
-    
-    // Only enable extractors if database has corresponding data
-    if !has_ip {
-        builder = builder.extract_ipv4(false).extract_ipv6(false);
-    }
-    if !has_strings {
-        builder = builder
-            .extract_domains(false)
-            .extract_emails(false)
-            .extract_hashes(false)
-            .extract_bitcoin(false)
-            .extract_ethereum(false)
-            .extract_monero(false);
-    }
-    
-    builder.build().context("Failed to create extractor")
+    // Apply database-based defaults
+    let default_ipv4 = has_ip;
+    let default_ipv6 = has_ip;
+    let default_domains = has_strings;
+    let default_emails = has_strings;
+    let default_hashes = has_strings;
+    let default_bitcoin = has_strings;
+    let default_ethereum = has_strings;
+    let default_monero = has_strings;
+
+    // Build extractor with CLI overrides
+    Extractor::builder()
+        .extract_ipv4(config.should_enable("ipv4", default_ipv4))
+        .extract_ipv6(config.should_enable("ipv6", default_ipv6))
+        .extract_domains(config.should_enable("domain", default_domains))
+        .extract_emails(config.should_enable("email", default_emails))
+        .extract_hashes(config.should_enable("hash", default_hashes))
+        .extract_bitcoin(config.should_enable("bitcoin", default_bitcoin))
+        .extract_ethereum(config.should_enable("ethereum", default_ethereum))
+        .extract_monero(config.should_enable("monero", default_monero))
+        .build()
+        .context("Failed to create extractor")
 }
 
 /// Reusable buffers for match result construction (eliminates per-match allocations)
@@ -529,6 +571,7 @@ fn worker_thread(
     database_path: PathBuf,
     cache_size: usize,
     _show_stats: bool,
+    extractor_config: ExtractorConfig,
 ) -> (WorkerStats, Duration, Duration) {
     // Initialize database
     let db = match init_worker_database(&database_path, cache_size) {
@@ -543,7 +586,7 @@ fn worker_thread(
     };
 
     // Create extractor
-    let extractor = match create_extractor_for_db(&db) {
+    let extractor = match create_extractor_for_db(&db, &extractor_config) {
         Ok(ext) => ext,
         Err(e) => {
             eprintln!(

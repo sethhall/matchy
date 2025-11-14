@@ -284,6 +284,7 @@ pub fn follow_files_parallel(
     cache_size: usize,
     overall_start: Instant,
     shutdown: Arc<AtomicBool>,
+    extractor_config: super::parallel::ExtractorConfig,
 ) -> Result<ProcessingStats> {
     if inputs.iter().any(|p| p.to_str() == Some("-")) {
         anyhow::bail!("--follow mode not supported with stdin");
@@ -324,6 +325,7 @@ pub fn follow_files_parallel(
         let work_rx = Arc::clone(&work_rx);
         let result_tx = result_tx.clone();
         let database_path = database_path.to_owned();
+        let extractor_config = extractor_config.clone();
 
         let handle = thread::spawn(move || {
             set_thread_name(&format!("matchy-follow-worker-{}", worker_id));
@@ -334,6 +336,7 @@ pub fn follow_files_parallel(
                 database_path,
                 cache_size,
                 show_stats,
+                extractor_config,
             )
         });
         worker_handles.push(handle);
@@ -489,6 +492,7 @@ fn worker_thread_follow(
     database_path: PathBuf,
     cache_size: usize,
     _show_stats: bool,
+    extractor_config: super::parallel::ExtractorConfig,
 ) -> super::parallel::WorkerStats {
     use super::parallel::{
         build_match_result, create_extractor_for_db, init_worker_database, MatchBuffers,
@@ -508,7 +512,7 @@ fn worker_thread_follow(
     };
 
     // Create extractor
-    let extractor = match create_extractor_for_db(&db) {
+    let extractor = match create_extractor_for_db(&db, &extractor_config) {
         Ok(ext) => ext,
         Err(e) => {
             eprintln!(

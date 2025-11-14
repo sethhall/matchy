@@ -74,34 +74,13 @@ pub fn cmd_match(
         );
     }
 
+    // Parse extractor configuration from CLI flags
+    use crate::match_processor::ExtractorConfig;
+    let extractor_config = ExtractorConfig::from_arg(extractors_arg.clone());
+
     // Configure extractor based on database capabilities and CLI flags
     let has_ip = db.has_ip_data();
     let has_strings = db.has_literal_data() || db.has_glob_data();
-
-    // Build extractor optimized for what the database contains
-    let mut builder = Extractor::builder();
-
-    // Parse extractor flags: --extractors=ipv4,ipv6,-domain (enable/disable specific extractors)
-    // Format: comma-separated list, prefix with '-' to disable
-    let mut extractor_overrides: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
-    
-    if let Some(ref extractors_str) = extractors_arg {
-        for extractor in extractors_str.split(',') {
-            let extractor = extractor.trim();
-            if let Some(name) = extractor.strip_prefix('-') {
-                // Disable extractor
-                extractor_overrides.insert(name, false);
-            } else {
-                // Enable extractor
-                extractor_overrides.insert(extractor, true);
-            }
-        }
-    }
-
-    // Helper to check if extractor should be enabled
-    let should_enable = |name: &str, default: bool| -> bool {
-        extractor_overrides.get(name).copied().unwrap_or(default)
-    };
 
     // Apply database-based defaults
     let default_ipv4 = has_ip;
@@ -113,16 +92,16 @@ pub fn cmd_match(
     let default_ethereum = has_strings;
     let default_monero = has_strings;
 
-    // Configure each extractor
-    builder = builder
-        .extract_ipv4(should_enable("ipv4", default_ipv4))
-        .extract_ipv6(should_enable("ipv6", default_ipv6))
-        .extract_domains(should_enable("domain", default_domains))
-        .extract_emails(should_enable("email", default_emails))
-        .extract_hashes(should_enable("hash", default_hashes))
-        .extract_bitcoin(should_enable("bitcoin", default_bitcoin))
-        .extract_ethereum(should_enable("ethereum", default_ethereum))
-        .extract_monero(should_enable("monero", default_monero));
+    // Build extractor with CLI overrides
+    let builder = Extractor::builder()
+        .extract_ipv4(extractor_config.should_enable("ipv4", default_ipv4))
+        .extract_ipv6(extractor_config.should_enable("ipv6", default_ipv6))
+        .extract_domains(extractor_config.should_enable("domain", default_domains))
+        .extract_emails(extractor_config.should_enable("email", default_emails))
+        .extract_hashes(extractor_config.should_enable("hash", default_hashes))
+        .extract_bitcoin(extractor_config.should_enable("bitcoin", default_bitcoin))
+        .extract_ethereum(extractor_config.should_enable("ethereum", default_ethereum))
+        .extract_monero(extractor_config.should_enable("monero", default_monero));
 
     let extractor = builder
         .build()
@@ -210,6 +189,7 @@ pub fn cmd_match(
                 cache_size,
                 overall_start,
                 shutdown,
+                extractor_config,
             )?;
         } else {
             if show_stats {
@@ -240,6 +220,7 @@ pub fn cmd_match(
             show_progress,
             cache_size,
             overall_start,
+            extractor_config,
         )?;
         files_processed = inputs.len();
         files_failed = 0;
