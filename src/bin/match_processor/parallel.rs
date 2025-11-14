@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -274,12 +274,12 @@ pub fn process_parallel(
     };
     let output_json = output_format == "json";
 
-    // Create channels for pipeline
+    // Create lock-free channels for pipeline (crossbeam is much faster than std::mpsc)
     let work_queue_capacity = num_threads * 4;
     let result_queue_capacity = 1000;
 
-    let (work_tx, work_rx) = mpsc::sync_channel::<Option<LineBatch>>(work_queue_capacity);
-    let (result_tx, result_rx) = mpsc::sync_channel::<Option<WorkerMessage>>(result_queue_capacity);
+    let (work_tx, work_rx) = bounded::<Option<LineBatch>>(work_queue_capacity);
+    let (result_tx, result_rx) = bounded::<Option<WorkerMessage>>(result_queue_capacity);
 
     // Spawn output thread
     let output_handle = {
@@ -290,13 +290,13 @@ pub fn process_parallel(
         })
     };
 
-    // Share work receiver across workers using Arc<Mutex>
-    let work_rx = Arc::new(std::sync::Mutex::new(work_rx));
+    // Crossbeam channels are naturally MPMC (multi-producer, multi-consumer)
+    // No need for Arc<Mutex> wrapper - just clone the receiver
 
     // Spawn worker pool
     let mut worker_handles = Vec::new();
     for worker_id in 0..num_threads {
-        let work_rx = Arc::clone(&work_rx);
+        let work_rx = work_rx.clone(); // Clone receiver (crossbeam is MPMC)
         let result_tx = result_tx.clone();
         let database_path = database_path.to_owned();
         let extractor_config = extractor_config.clone();
@@ -422,7 +422,7 @@ pub enum WorkerMessage {
 /// Processes files until queue is empty
 fn reader_thread(
     file_queue: FileQueue,
-    work_tx: SyncSender<Option<LineBatch>>,
+    work_tx: Sender<Option<LineBatch>>,
     batch_bytes: usize,
 ) -> Result<(ProcessingStats,)> {
     let mut stats = ProcessingStats::new();
@@ -452,7 +452,7 @@ fn reader_thread(
 
 /// Process a regular file using library's LineFileReader
 fn process_file(
-    work_tx: &SyncSender<Option<LineBatch>>,
+    work_tx: &Sender<Option<LineBatch>>,
     input_path: &Path,
     batch_bytes: usize,
 ) -> Result<ProcessingStats> {
@@ -509,7 +509,7 @@ fn process_file(
 
 /// Process stdin (non-seekable) with timeout-based flushing
 fn process_stdin(
-    work_tx: &SyncSender<Option<LineBatch>>,
+    work_tx: &Sender<Option<LineBatch>>,
     input_path: &Path,
     batch_bytes: usize,
 ) -> Result<ProcessingStats> {
@@ -678,8 +678,8 @@ impl MatchBuffers {
 /// Gracefully shuts down when work queue closes
 fn worker_thread(
     worker_id: usize,
-    work_rx: Arc<Mutex<Receiver<Option<LineBatch>>>>,
-    result_tx: SyncSender<Option<WorkerMessage>>,
+    work_rx: Receiver<Option<LineBatch>>,
+    result_tx: Sender<Option<WorkerMessage>>,
     database_path: PathBuf,
     cache_size: usize,
     _show_stats: bool,
@@ -728,10 +728,7 @@ fn worker_thread(
     loop {
         // Time waiting for work (idle)
         let wait_start = Instant::now();
-        let batch_opt = {
-            let rx = work_rx.lock().unwrap();
-            rx.recv()
-        };
+        let batch_opt = work_rx.recv();
         idle_time += wait_start.elapsed();
 
         match batch_opt {

@@ -775,6 +775,7 @@ dependencies = [
  "cbindgen",
  "clap",
  "criterion",
+ "crossbeam-channel",
  "csv",
  "ctrlc",
  "dhat",
