@@ -183,7 +183,17 @@ pub fn cmd_match(
     let files_processed: usize;
     let files_failed: usize;
     let actual_workers: usize; // Actual worker count (may differ from num_threads in auto-tune)
+    let actual_readers: usize; // Actual reader count
+                               // Whether any input files are compressed
     let is_auto_tuned = num_threads == 0; // Track if auto-tune was used
+
+    // Check for compressed files
+    let _has_compressed: bool = inputs.iter().any(|p| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("gz") || e.eq_ignore_ascii_case("bz2"))
+            .unwrap_or(false)
+    });
 
     if follow {
         // Follow mode - use parallel or sequential based on thread count
@@ -207,6 +217,7 @@ pub fn cmd_match(
                 extractor_config,
             )?;
             actual_workers = num_threads;
+            actual_readers = 1; // Follow mode uses single reader
         } else {
             if show_stats {
                 eprintln!("[INFO] Using sequential follow (single-threaded)");
@@ -222,12 +233,13 @@ pub fn cmd_match(
                 shutdown,
             )?;
             actual_workers = 1;
+            actual_readers = 1;
         }
         files_processed = inputs.len();
         files_failed = 0;
     } else if num_threads == 0 || num_threads > 1 {
         // Parallel mode (num_threads=0 means auto-tune, >1 means explicit count)
-        let (stats, workers) = process_parallel(
+        let (stats, workers, readers) = process_parallel(
             inputs.clone(),
             &database,
             num_threads,
@@ -242,6 +254,7 @@ pub fn cmd_match(
         )?;
         aggregate_stats = stats;
         actual_workers = workers;
+        actual_readers = readers;
         files_processed = inputs.len();
         files_failed = 0;
     } else {
@@ -298,6 +311,7 @@ pub fn cmd_match(
 
         aggregate_stats = seq_stats;
         actual_workers = 1; // Sequential mode
+        actual_readers = 1;
         files_processed = seq_processed;
         files_failed = seq_failed;
     }
@@ -420,14 +434,15 @@ pub fn cmd_match(
             eprintln!();
             eprintln!("[INFO] === Performance Analysis ===");
 
-            let analysis = analyze_performance(
-                &aggregate_stats,
-                overall_elapsed,
-                actual_workers,
-                inputs.len(),
-                db_stats.cache_hit_rate(),
+            let config = crate::match_processor::AnalysisConfig {
+                num_workers: actual_workers,
+                num_files: inputs.len(),
+                cache_hit_rate: db_stats.cache_hit_rate(),
                 is_auto_tuned,
-            );
+                num_readers: actual_readers,
+            };
+
+            let analysis = analyze_performance(&aggregate_stats, overall_elapsed, config);
 
             // Show bottleneck and recommendations
             eprintln!();

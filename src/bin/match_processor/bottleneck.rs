@@ -51,14 +51,20 @@ pub struct PerformanceAnalysis {
     pub recommendations: Vec<String>,
 }
 
+/// Configuration parameters for performance analysis
+pub struct AnalysisConfig {
+    pub num_workers: usize,
+    pub num_files: usize,
+    pub cache_hit_rate: f64,
+    pub is_auto_tuned: bool,
+    pub num_readers: usize,
+}
+
 /// Analyze processing statistics to identify bottlenecks
 pub fn analyze_performance(
     stats: &ProcessingStats,
     total_time: Duration,
-    num_workers: usize,
-    num_files: usize,
-    cache_hit_rate: f64,
-    is_auto_tuned: bool,
+    config: AnalysisConfig,
 ) -> PerformanceAnalysis {
     // Get available parallelism (more reliable than gdt_cpus, especially on ARM)
     let physical_cores = std::thread::available_parallelism()
@@ -71,8 +77,8 @@ pub fn analyze_performance(
     let worker_busy_secs = stats.worker_busy_time.as_secs_f64();
 
     // Calculate worker idle percentage (average across workers)
-    let worker_idle_pct = if num_workers > 0 && total_secs > 0.0 {
-        (worker_idle_secs / num_workers as f64) / total_secs
+    let worker_idle_pct = if config.num_workers > 0 && total_secs > 0.0 {
+        (worker_idle_secs / config.num_workers as f64) / total_secs
     } else {
         0.0
     };
@@ -83,12 +89,12 @@ pub fn analyze_performance(
     let (bottleneck, explanation, recommendations) = if worker_idle_pct > 0.6 {
         // Workers are mostly idle - I/O bottleneck
         let mut recs = vec![];
-        if !is_auto_tuned && num_files > 1 {
+        if !config.is_auto_tuned && config.num_files > 1 {
             recs.push("Use --threads=0 for auto-tune".to_string());
-        } else if !is_auto_tuned {
+        } else if !config.is_auto_tuned {
             recs.push(format!(
                 "Try --threads={} (reduce workers)",
-                num_workers / 2
+                config.num_workers / 2
             ));
         } else {
             // Already auto-tuned, no obvious fix
@@ -105,21 +111,31 @@ pub fn analyze_performance(
             ),
             recs,
         )
-    } else if worker_idle_pct < 0.1 && worker_busy_secs > total_secs * num_workers as f64 * 0.8 {
+    } else if worker_idle_pct < 0.1
+        && worker_busy_secs > total_secs * config.num_workers as f64 * 0.8
+    {
         // Workers are busy, but check if I/O is already saturated
         let io_time_secs = stats.read_time.as_secs_f64() + stats.decompress_time.as_secs_f64();
+
+        // Calculate I/O utilization per reader (times are accumulated across parallel readers)
+        // Divide by num_readers to get per-reader utilization
+        let io_time_per_reader = if config.num_readers > 0 {
+            io_time_secs / config.num_readers as f64
+        } else {
+            io_time_secs
+        };
 
         // Calculate I/O utilization: how much of wall-clock time is spent in I/O
         // High utilization (>0.8) means I/O is already maxed out
         let io_utilization = if total_secs > 0.0 {
-            io_time_secs / total_secs
+            io_time_per_reader / total_secs
         } else {
             0.0
         };
 
         // Check throughput efficiency: queries per second per worker
-        let qps_per_worker = if num_workers > 0 && total_secs > 0.0 {
-            (stats.candidates_tested as f64 / total_secs) / num_workers as f64
+        let qps_per_worker = if config.num_workers > 0 && total_secs > 0.0 {
+            (stats.candidates_tested as f64 / total_secs) / config.num_workers as f64
         } else {
             0.0
         };
@@ -127,10 +143,36 @@ pub fn analyze_performance(
         // If I/O is saturated (>80% utilization), don't recommend more workers
         // This indicates we're hitting storage/decompression limits
         if io_utilization > 0.8 {
-            let recs = vec![
-                "I/O is saturated (storage/decompression limit)".to_string(),
-                "Consider: pre-decompress files, faster storage, or reduce compression".to_string(),
-            ];
+            // Check if decompression is the bottleneck (vs raw disk I/O)
+            let decompress_per_reader = if config.num_readers > 0 {
+                stats.decompress_time.as_secs_f64() / config.num_readers as f64
+            } else {
+                stats.decompress_time.as_secs_f64()
+            };
+
+            let read_per_reader = if config.num_readers > 0 {
+                stats.read_time.as_secs_f64() / config.num_readers as f64
+            } else {
+                stats.read_time.as_secs_f64()
+            };
+
+            // If decompress time is >60% of I/O time, it's a decompression bottleneck
+            let is_decompress_bottleneck = decompress_per_reader > read_per_reader * 0.6;
+
+            let mut recs = vec![];
+
+            if is_decompress_bottleneck {
+                recs.push("Decompression is the bottleneck".to_string());
+                recs.push(
+                    "Consider: pre-decompress files, or use parallel decompression (pigz)"
+                        .to_string(),
+                );
+            } else {
+                recs.push("Storage I/O is saturated".to_string());
+                recs.push(
+                    "Consider: faster storage (NVMe), RAID striping, or more readers".to_string(),
+                );
+            }
 
             (
                 Bottleneck::DiskRead {
@@ -144,10 +186,10 @@ pub fn analyze_performance(
             )
         } else {
             // I/O has headroom - workers are the bottleneck
-            let recommended_threads = (num_workers * 2).min(physical_cores);
+            let recommended_threads = (config.num_workers * 2).min(physical_cores);
             let mut recs = vec![];
 
-            if recommended_threads > num_workers {
+            if recommended_threads > config.num_workers {
                 recs.push(format!(
                     "Try --threads={} (add more workers)",
                     recommended_threads
@@ -169,18 +211,21 @@ pub fn analyze_performance(
                 recs,
             )
         }
-    } else if cache_hit_rate < 0.5 && stats.lookup_samples > 10000 && stats.total_matches > 100 {
+    } else if config.cache_hit_rate < 0.5
+        && stats.lookup_samples > 10000
+        && stats.total_matches > 100
+    {
         // Only suggest cache improvements if:
         // 1. Hit rate is low (< 50%)
         // 2. Significant lookup volume (> 10k lookups)
         // 3. Actually finding matches (> 100 matches)
         (
             Bottleneck::Lookup {
-                severity: cache_hit_rate,
+                severity: config.cache_hit_rate,
             },
             format!(
                 "Bottleneck: Low cache hit rate ({:.0}% with {} lookups)",
-                cache_hit_rate * 100.0,
+                config.cache_hit_rate * 100.0,
                 stats.lookup_samples
             ),
             vec!["Try --cache-size=100000 to improve hit rate".to_string()],
@@ -208,24 +253,26 @@ mod tests {
     #[test]
     fn test_io_saturation_detected() {
         // Scenario: Workers are busy BUT I/O is saturated (like your orangepi case)
+        // With 4 readers spending 2.5s each on I/O, per-reader time is 2.5s
+        // 2.5 / 3.0 = 83% utilization → I/O saturated
         let mut stats = ProcessingStats::new();
         stats.worker_busy_time = Duration::from_secs_f64(15.0); // 5 workers × 3s
         stats.worker_idle_time = Duration::from_secs_f64(0.3); // Minimal idle time
-        stats.read_time = Duration::from_secs_f64(2.0); // Reading took 2s
-        stats.decompress_time = Duration::from_secs_f64(2.5); // Decompression took 2.5s
+        stats.read_time = Duration::from_secs_f64(4.0); // 4 readers × 1.0s = 4.0s total
+        stats.decompress_time = Duration::from_secs_f64(6.0); // 4 readers × 1.5s = 6.0s total
         stats.candidates_tested = 16_507_256;
 
         let total_time = Duration::from_secs_f64(3.0);
-        let num_workers = 5;
 
-        let analysis = analyze_performance(
-            &stats,
-            total_time,
-            num_workers,
-            15,   // num_files
-            0.0,  // cache_hit_rate
-            true, // is_auto_tuned
-        );
+        let config = AnalysisConfig {
+            num_workers: 5,
+            num_files: 15,
+            cache_hit_rate: 0.0,
+            is_auto_tuned: true,
+            num_readers: 4,
+        };
+
+        let analysis = analyze_performance(&stats, total_time, config);
 
         // Should detect I/O saturation, NOT recommend more workers
         assert!(matches!(analysis.bottleneck, Bottleneck::DiskRead { .. }));
@@ -251,9 +298,16 @@ mod tests {
         stats.candidates_tested = 16_507_256;
 
         let total_time = Duration::from_secs_f64(3.0);
-        let num_workers = 5;
 
-        let analysis = analyze_performance(&stats, total_time, num_workers, 15, 0.0, true);
+        let config = AnalysisConfig {
+            num_workers: 5,
+            num_files: 15,
+            cache_hit_rate: 0.0,
+            is_auto_tuned: true,
+            num_readers: 2,
+        };
+
+        let analysis = analyze_performance(&stats, total_time, config);
 
         // Should detect CPU bottleneck and recommend more workers
         assert!(matches!(
@@ -277,16 +331,16 @@ mod tests {
         stats.candidates_tested = 5_000_000;
 
         let total_time = Duration::from_secs_f64(3.0);
-        let num_workers = 5;
 
-        let analysis = analyze_performance(
-            &stats,
-            total_time,
-            num_workers,
-            15,
-            0.0,
-            false, // not auto-tuned
-        );
+        let config = AnalysisConfig {
+            num_workers: 5,
+            num_files: 15,
+            cache_hit_rate: 0.0,
+            is_auto_tuned: false,
+            num_readers: 2,
+        };
+
+        let analysis = analyze_performance(&stats, total_time, config);
 
         // Should detect reader starvation
         assert!(matches!(

@@ -216,7 +216,7 @@ pub fn process_parallel(
     cache_size: usize,
     overall_start: Instant,
     extractor_config: ExtractorConfig,
-) -> Result<(ProcessingStats, usize)> {
+) -> Result<(ProcessingStats, usize, usize)> {
     // Determine reader and worker counts
     let (num_readers, num_threads) = if let Some(readers) = explicit_readers {
         // Explicit reader count specified
@@ -372,7 +372,7 @@ pub fn process_parallel(
         aggregate.email_count += stats.email_count;
     }
 
-    Ok((aggregate, num_threads))
+    Ok((aggregate, num_threads, num_readers))
 }
 
 /// Message from worker to output thread
