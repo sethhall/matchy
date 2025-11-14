@@ -852,13 +852,17 @@ where
     let worker_factory = Arc::new(create_worker);
     let progress_callback = progress_callback.map(Arc::new);
 
+    // Shared map of per-worker stats for aggregated progress reporting
+    let worker_stats_map = Arc::new(Mutex::new(std::collections::HashMap::<usize, WorkerStats>::new()));
+
     // Spawn worker threads
     let mut worker_handles = Vec::new();
-    for _ in 0..num_workers {
+    for worker_id in 0..num_workers {
         let receiver = Arc::clone(&work_receiver);
         let factory = Arc::clone(&worker_factory);
 
         let progress_cb = progress_callback.clone();
+        let stats_map = Arc::clone(&worker_stats_map);
 
         let handle = thread::spawn(move || -> (Vec<LineMatch>, WorkerStats) {
             // Create worker for this thread
@@ -894,7 +898,32 @@ where
                 if let Some(ref cb) = progress_cb {
                     let now = std::time::Instant::now();
                     if now.duration_since(last_progress) >= progress_interval {
-                        cb(worker.stats());
+                        // Update this worker's stats in the shared map
+                        stats_map.lock().unwrap().insert(worker_id, worker.stats().clone());
+                        
+                        // Aggregate all workers' stats and call progress callback
+                        let aggregated = {
+                            let map = stats_map.lock().unwrap();
+                            let mut agg = WorkerStats::default();
+                            for stats in map.values() {
+                                agg.lines_processed += stats.lines_processed;
+                                agg.candidates_tested += stats.candidates_tested;
+                                agg.matches_found += stats.matches_found;
+                                agg.lines_with_matches += stats.lines_with_matches;
+                                agg.total_bytes += stats.total_bytes;
+                                agg.extraction_time += stats.extraction_time;
+                                agg.extraction_samples += stats.extraction_samples;
+                                agg.lookup_time += stats.lookup_time;
+                                agg.lookup_samples += stats.lookup_samples;
+                                agg.ipv4_count += stats.ipv4_count;
+                                agg.ipv6_count += stats.ipv6_count;
+                                agg.domain_count += stats.domain_count;
+                                agg.email_count += stats.email_count;
+                            }
+                            agg
+                        };
+                        
+                        cb(&aggregated);
                         last_progress = now;
                     }
                 }
