@@ -23,6 +23,7 @@ pub fn cmd_match(
     show_stats: bool,
     show_progress: bool,
     cache_size: usize,
+    extractors_arg: Option<String>,
 ) -> Result<()> {
     use matchy::extractor::Extractor;
     use matchy::Database;
@@ -73,37 +74,96 @@ pub fn cmd_match(
         );
     }
 
-    // Configure extractor based on database capabilities
+    // Configure extractor based on database capabilities and CLI flags
     let has_ip = db.has_ip_data();
     let has_strings = db.has_literal_data() || db.has_glob_data();
 
     // Build extractor optimized for what the database contains
     let mut builder = Extractor::builder();
 
-    if !has_ip {
-        // No IP data - skip IP extraction entirely
-        builder = builder.extract_ipv4(false).extract_ipv6(false);
+    // Parse extractor flags: --extractors=ipv4,ipv6,-domain (enable/disable specific extractors)
+    // Format: comma-separated list, prefix with '-' to disable
+    let mut extractor_overrides: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+    
+    if let Some(ref extractors_str) = extractors_arg {
+        for extractor in extractors_str.split(',') {
+            let extractor = extractor.trim();
+            if let Some(name) = extractor.strip_prefix('-') {
+                // Disable extractor
+                extractor_overrides.insert(name, false);
+            } else {
+                // Enable extractor
+                extractor_overrides.insert(extractor, true);
+            }
+        }
     }
 
-    if !has_strings {
-        // No string data - skip all string extraction
-        builder = builder.extract_domains(false).extract_emails(false);
-    }
+    // Helper to check if extractor should be enabled
+    let should_enable = |name: &str, default: bool| -> bool {
+        extractor_overrides.get(name).copied().unwrap_or(default)
+    };
+
+    // Apply database-based defaults
+    let default_ipv4 = has_ip;
+    let default_ipv6 = has_ip;
+    let default_domains = has_strings;
+    let default_emails = has_strings;
+    let default_hashes = has_strings;
+    let default_bitcoin = has_strings;
+    let default_ethereum = has_strings;
+    let default_monero = has_strings;
+
+    // Configure each extractor
+    builder = builder
+        .extract_ipv4(should_enable("ipv4", default_ipv4))
+        .extract_ipv6(should_enable("ipv6", default_ipv6))
+        .extract_domains(should_enable("domain", default_domains))
+        .extract_emails(should_enable("email", default_emails))
+        .extract_hashes(should_enable("hash", default_hashes))
+        .extract_bitcoin(should_enable("bitcoin", default_bitcoin))
+        .extract_ethereum(should_enable("ethereum", default_ethereum))
+        .extract_monero(should_enable("monero", default_monero));
 
     let extractor = builder
         .build()
         .context("Failed to create pattern extractor")?;
 
     if show_stats {
-        let extracting: Vec<&str> = [
-            if has_ip { Some("IPs") } else { None },
-            if has_strings { Some("strings") } else { None },
-        ]
-        .iter()
-        .filter_map(|&x| x)
-        .collect();
+        // Build list of enabled extractors
+        let mut enabled = Vec::new();
+        if extractor.extract_ipv4() {
+            enabled.push("IPv4");
+        }
+        if extractor.extract_ipv6() {
+            enabled.push("IPv6");
+        }
+        if extractor.extract_domains() {
+            enabled.push("domains");
+        }
+        if extractor.extract_emails() {
+            enabled.push("emails");
+        }
+        if extractor.extract_hashes() {
+            enabled.push("hashes");
+        }
+        if extractor.extract_bitcoin() {
+            enabled.push("Bitcoin");
+        }
+        if extractor.extract_ethereum() {
+            enabled.push("Ethereum");
+        }
+        if extractor.extract_monero() {
+            enabled.push("Monero");
+        }
 
-        eprintln!("[INFO] Extractor configured for: {}", extracting.join(", "));
+        eprintln!(
+            "[INFO] Extractors: {}",
+            if enabled.is_empty() {
+                "none".to_string()
+            } else {
+                enabled.join(", ")
+            }
+        );
     }
 
     // Setup Ctrl+C handler for follow mode

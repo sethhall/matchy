@@ -116,6 +116,11 @@ enum Commands {
         /// LRU cache capacity per worker (default: 10000, use 0 to disable)
         #[arg(long, default_value = "10000")]
         cache_size: usize,
+
+        /// Enable/disable extractors (comma-separated): ipv4,ipv6,domain,email,hash,bitcoin,ethereum,monero
+        /// Prefix with '-' to disable (e.g., -domain,-email). Default: auto-detect from database
+        #[arg(long)]
+        extractors: Option<String>,
     },
 
     /// Query a pattern database
@@ -291,6 +296,7 @@ fn main() -> Result<()> {
             stats,
             progress,
             cache_size,
+            extractors,
         } => cmd_match(
             database,
             inputs,
@@ -301,6 +307,7 @@ fn main() -> Result<()> {
             stats,
             progress,
             cache_size,
+            extractors,
         ),
         Commands::Query {
             database,
