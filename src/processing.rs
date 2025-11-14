@@ -853,7 +853,9 @@ where
     let progress_callback = progress_callback.map(Arc::new);
 
     // Shared map of per-worker stats for aggregated progress reporting
-    let worker_stats_map = Arc::new(Mutex::new(std::collections::HashMap::<usize, WorkerStats>::new()));
+    let worker_stats_map = Arc::new(Mutex::new(
+        std::collections::HashMap::<usize, WorkerStats>::new(),
+    ));
 
     // Spawn worker threads
     let mut worker_handles = Vec::new();
@@ -899,8 +901,11 @@ where
                     let now = std::time::Instant::now();
                     if now.duration_since(last_progress) >= progress_interval {
                         // Update this worker's stats in the shared map
-                        stats_map.lock().unwrap().insert(worker_id, worker.stats().clone());
-                        
+                        stats_map
+                            .lock()
+                            .unwrap()
+                            .insert(worker_id, worker.stats().clone());
+
                         // Aggregate all workers' stats and call progress callback
                         let aggregated = {
                             let map = stats_map.lock().unwrap();
@@ -922,7 +927,7 @@ where
                             }
                             agg
                         };
-                        
+
                         cb(&aggregated);
                         last_progress = now;
                     }
