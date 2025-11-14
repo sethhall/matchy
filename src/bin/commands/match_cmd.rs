@@ -184,7 +184,7 @@ pub fn cmd_match(
     let files_failed: usize;
     let actual_workers: usize; // Actual worker count (may differ from num_threads in auto-tune)
     let actual_readers: usize; // Actual reader count
-                               // Whether any input files are compressed
+    let routing_stats: Option<matchy::processing::RoutingStats>; // Routing decisions (parallel mode only)
     let is_auto_tuned = num_threads == 0; // Track if auto-tune was used
 
     // Check for compressed files
@@ -218,6 +218,7 @@ pub fn cmd_match(
             )?;
             actual_workers = num_threads;
             actual_readers = 1; // Follow mode uses single reader
+            routing_stats = None;
         } else {
             if show_stats {
                 eprintln!("[INFO] Using sequential follow (single-threaded)");
@@ -234,12 +235,13 @@ pub fn cmd_match(
             )?;
             actual_workers = 1;
             actual_readers = 1;
+            routing_stats = None;
         }
         files_processed = inputs.len();
         files_failed = 0;
     } else if num_threads == 0 || num_threads > 1 {
         // Parallel mode (num_threads=0 means auto-tune, >1 means explicit count)
-        let (stats, workers, readers) = process_parallel(
+        let (stats, workers, readers, rstats) = process_parallel(
             inputs.clone(),
             &database,
             num_threads,
@@ -255,6 +257,7 @@ pub fn cmd_match(
         aggregate_stats = stats;
         actual_workers = workers;
         actual_readers = readers;
+        routing_stats = Some(rstats);
         files_processed = inputs.len();
         files_failed = 0;
     } else {
@@ -312,6 +315,7 @@ pub fn cmd_match(
         aggregate_stats = seq_stats;
         actual_workers = 1; // Sequential mode
         actual_readers = 1;
+        routing_stats = None;
         files_processed = seq_processed;
         files_failed = seq_failed;
     }
@@ -427,6 +431,19 @@ pub fn cmd_match(
                 format_number(cache_size),
                 db_stats.cache_hit_rate() * 100.0
             );
+        }
+
+        // Show routing statistics if available (parallel mode only)
+        if let Some(ref rstats) = routing_stats {
+            eprintln!();
+            eprintln!("[INFO] === File Routing ===");
+            eprintln!("[INFO] Files to workers (whole): {}", rstats.files_to_workers);
+            eprintln!("[INFO] Files to readers (chunked): {}", rstats.files_to_readers);
+            if rstats.total_bytes() > 0 {
+                let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+                eprintln!("[INFO] Data: {:.2} MB to workers, {:.2} MB to readers",
+                    mb(rstats.bytes_to_workers), mb(rstats.bytes_to_readers));
+            }
         }
 
         // Bottleneck analysis (only for parallel mode with timing data)

@@ -43,9 +43,36 @@
 
 use crate::extractor::{ExtractedItem, Extractor, HashType};
 use crate::{Database, QueryResult};
+use std::fs;
 use std::io::{self, BufRead, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+// File size thresholds for chunking decisions
+const SMALL_FILE: u64 = 100 * 1024 * 1024; // 100MB
+const LARGE_FILE: u64 = 1024 * 1024 * 1024; // 1GB
+const HUGE_FILE: u64 = 10 * 1024 * 1024 * 1024; // 10GB
+
+/// A unit of work that can be processed independently
+///
+/// Work units can represent either entire files or pre-chunked data.
+/// The parallel processor uses these to distribute work efficiently.
+#[derive(Clone)]
+pub enum WorkUnit {
+    /// Entire file - worker opens, reads, and processes
+    WholeFile {
+        /// Path to the file to process
+        path: PathBuf,
+    },
+
+    /// Pre-chunked data - worker processes directly
+    Chunk {
+        /// Pre-chunked batch ready for processing
+        batch: LineBatch,
+    },
+}
 
 /// Pre-chunked batch of line-oriented data ready for parallel processing
 ///
@@ -628,6 +655,316 @@ impl Default for WorkerBuilder {
     }
 }
 
+// Parallel Processing Implementation
+
+/// Determine appropriate chunk size based on file size
+fn chunk_size_for(file_size: u64) -> usize {
+    match file_size {
+        s if s < LARGE_FILE => 256 * 1024, // 256KB for < 1GB
+        s if s < HUGE_FILE => 1024 * 1024, // 1MB for 1-10GB
+        _ => 4 * 1024 * 1024,              // 4MB for > 10GB
+    }
+}
+
+/// Reader thread: chunks files and sends batches to worker queue
+fn reader_thread(file_path: PathBuf, work_sender: Sender<WorkUnit>) -> Result<(), String> {
+    let file_size = fs::metadata(&file_path)
+        .map_err(|e| format!("Failed to stat {}: {}", file_path.display(), e))?
+        .len();
+
+    let chunk_size = chunk_size_for(file_size);
+    let mut reader = LineFileReader::new(&file_path, chunk_size)
+        .map_err(|e| format!("Failed to open {}: {}", file_path.display(), e))?;
+
+    while let Some(batch) = reader
+        .next_batch()
+        .map_err(|e| format!("Read error in {}: {}", file_path.display(), e))?
+    {
+        work_sender
+            .send(WorkUnit::Chunk { batch })
+            .map_err(|_| "Worker channel closed")?;
+    }
+
+    Ok(())
+}
+
+/// Statistics about file routing decisions made by the main thread
+#[derive(Debug, Clone, Default)]
+pub struct RoutingStats {
+    /// Files sent directly to worker queue (processed as whole files)
+    pub files_to_workers: usize,
+    /// Files sent to reader threads for chunking
+    pub files_to_readers: usize,
+    /// Total bytes in files sent to workers
+    pub bytes_to_workers: u64,
+    /// Total bytes in files sent to readers
+    pub bytes_to_readers: u64,
+}
+
+impl RoutingStats {
+    /// Total number of files processed
+    pub fn total_files(&self) -> usize {
+        self.files_to_workers + self.files_to_readers
+    }
+
+    /// Total bytes across all files
+    pub fn total_bytes(&self) -> u64 {
+        self.bytes_to_workers + self.bytes_to_readers
+    }
+}
+
+/// Result from parallel file processing
+pub struct ParallelProcessingResult {
+    /// Matches found across all files
+    pub matches: Vec<LineMatch>,
+    /// Statistics about how files were routed
+    pub routing_stats: RoutingStats,
+    /// Aggregated worker statistics
+    pub worker_stats: WorkerStats,
+}
+
+/// Process multiple files in parallel using producer/reader/worker architecture
+///
+/// This function uses a three-tier parallelism model:
+/// - **Main thread**: Analyzes files and routes them to appropriate queues
+/// - **Reader threads**: Parallel I/O and chunking for large files  
+/// - **Worker threads**: Pattern extraction and database matching
+///
+/// # Arguments
+///
+/// * `files` - List of file paths to process
+/// * `num_readers` - Number of reader threads for file I/O (default: num_cpus / 2)
+/// * `num_workers` - Number of worker threads for processing (default: num_cpus)
+/// * `create_worker` - Factory function that creates a Worker for each worker thread
+///
+/// # Returns
+///
+/// Returns `ParallelProcessingResult` containing both matches and routing statistics
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use matchy::{Database, processing, extractor::Extractor};
+///
+/// let files = vec!["access.log".into(), "errors.log".into()];
+///
+/// let result = processing::process_files_parallel(
+///     files,
+///     None, // Use default reader count
+///     None, // Use default worker count  
+///     || {
+///         let extractor = Extractor::new()
+///             .map_err(|e| format!("Extractor error: {}", e))?;
+///         let db = Database::from("threats.mxy").open()
+///             .map_err(|e| format!("Database error: {}", e))?;
+///         
+///         let worker = processing::Worker::builder()
+///             .extractor(extractor)
+///             .add_database("threats", db)
+///             .build();
+///         
+///         Ok::<_, String>(worker)
+///     }
+/// )?;
+///
+/// println!("Found {} matches across all files", result.matches.len());
+/// println!("Routing: {} to workers, {} to readers",
+///     result.routing_stats.files_to_workers,
+///     result.routing_stats.files_to_readers);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn process_files_parallel<F, P>(
+    files: Vec<PathBuf>,
+    num_readers: Option<usize>,
+    num_workers: Option<usize>,
+    create_worker: F,
+    progress_callback: Option<P>,
+) -> Result<ParallelProcessingResult, String>
+where
+    F: Fn() -> Result<Worker, String> + Sync + Send + 'static,
+    P: Fn(&WorkerStats) + Sync + Send + 'static,
+{
+    let num_cpus = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let _num_readers = num_readers.unwrap_or(num_cpus / 2).max(1);
+    let num_workers = num_workers.unwrap_or(num_cpus);
+
+    // Work queue: readers and main thread send WorkUnits here
+    let (work_sender, work_receiver) = channel::<WorkUnit>();
+    let work_receiver = Arc::new(Mutex::new(work_receiver));
+
+    // Wrap factory and progress callback in Arc for sharing across threads
+    let worker_factory = Arc::new(create_worker);
+    let progress_callback = progress_callback.map(Arc::new);
+
+    // Spawn worker threads
+    let mut worker_handles = Vec::new();
+    for _ in 0..num_workers {
+        let receiver = Arc::clone(&work_receiver);
+        let factory = Arc::clone(&worker_factory);
+
+        let progress_cb = progress_callback.clone();
+        
+        let handle = thread::spawn(move || -> (Vec<LineMatch>, WorkerStats) {
+            // Create worker for this thread
+            let mut worker = match factory() {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("Worker creation failed: {}", e);
+                    return (Vec::new(), WorkerStats::default());
+                }
+            };
+
+            let mut local_matches = Vec::new();
+            let mut last_progress = std::time::Instant::now();
+            let progress_interval = std::time::Duration::from_millis(100);
+
+            // Process work units until channel closes
+            loop {
+                let unit = match receiver.lock().unwrap().recv() {
+                    Ok(u) => u,
+                    Err(_) => break, // Channel closed
+                };
+
+                match process_work_unit_with_worker(&unit, &mut worker) {
+                    Ok(matches) => {
+                        local_matches.extend(matches);
+                    }
+                    Err(e) => {
+                        eprintln!("Processing error: {}", e);
+                    }
+                }
+                
+                // Call progress callback periodically
+                if let Some(ref cb) = progress_cb {
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_progress) >= progress_interval {
+                        cb(worker.stats());
+                        last_progress = now;
+                    }
+                }
+            }
+
+            // Return matches and stats from this worker
+            let stats = worker.stats().clone();
+            (local_matches, stats)
+        });
+
+        worker_handles.push(handle);
+    }
+
+    // Main thread: analyze files and route to appropriate handling
+    let mut reader_handles = Vec::new();
+    let mut remaining = files.len();
+    let mut routing_stats = RoutingStats::default();
+
+    for file_path in files {
+        let file_size = fs::metadata(&file_path)
+            .map_err(|e| format!("Failed to stat {}: {}", file_path.display(), e))?
+            .len();
+
+        // Apply chunking algorithm
+        let should_chunk = remaining < num_workers && file_size >= SMALL_FILE;
+
+        if should_chunk {
+            // Spawn reader thread to chunk this file
+            routing_stats.files_to_readers += 1;
+            routing_stats.bytes_to_readers += file_size;
+
+            let work_sender_clone = work_sender.clone();
+            let handle = thread::spawn(move || reader_thread(file_path, work_sender_clone));
+            reader_handles.push(handle);
+        } else {
+            // Send whole file directly to worker queue
+            routing_stats.files_to_workers += 1;
+            routing_stats.bytes_to_workers += file_size;
+
+            work_sender
+                .send(WorkUnit::WholeFile { path: file_path })
+                .map_err(|_| "Worker channel closed")?;
+        }
+
+        remaining -= 1;
+    }
+
+    // Drop main thread's sender so workers know when all work is queued
+    drop(work_sender);
+
+    // Wait for all reader threads to finish
+    for handle in reader_handles {
+        if let Err(e) = handle.join() {
+            eprintln!("Reader thread panicked: {:?}", e);
+        }
+    }
+
+    // Wait for all worker threads to finish and collect results
+    let mut all_matches = Vec::new();
+    let mut aggregate_stats = WorkerStats::default();
+
+    for handle in worker_handles {
+        match handle.join() {
+            Ok((matches, stats)) => {
+                all_matches.extend(matches);
+                // Aggregate stats
+                aggregate_stats.lines_processed += stats.lines_processed;
+                aggregate_stats.candidates_tested += stats.candidates_tested;
+                aggregate_stats.matches_found += stats.matches_found;
+                aggregate_stats.lines_with_matches += stats.lines_with_matches;
+                aggregate_stats.total_bytes += stats.total_bytes;
+                aggregate_stats.extraction_time += stats.extraction_time;
+                aggregate_stats.extraction_samples += stats.extraction_samples;
+                aggregate_stats.lookup_time += stats.lookup_time;
+                aggregate_stats.lookup_samples += stats.lookup_samples;
+                aggregate_stats.ipv4_count += stats.ipv4_count;
+                aggregate_stats.ipv6_count += stats.ipv6_count;
+                aggregate_stats.domain_count += stats.domain_count;
+                aggregate_stats.email_count += stats.email_count;
+            }
+            Err(e) => {
+                eprintln!("Worker thread panicked: {:?}", e);
+            }
+        }
+    }
+
+    Ok(ParallelProcessingResult {
+        matches: all_matches,
+        routing_stats,
+        worker_stats: aggregate_stats,
+    })
+}
+
+/// Process a work unit using a Worker instance
+fn process_work_unit_with_worker(
+    unit: &WorkUnit,
+    worker: &mut Worker,
+) -> Result<Vec<LineMatch>, String> {
+    match unit {
+        WorkUnit::WholeFile { path } => {
+            // Open and process entire file
+            let mut reader = LineFileReader::new(path, 128 * 1024)
+                .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+
+            let mut all_matches = Vec::new();
+
+            while let Some(batch) = reader
+                .next_batch()
+                .map_err(|e| format!("Read error in {}: {}", path.display(), e))?
+            {
+                // Use Worker's process_lines method
+                let matches = worker.process_lines(&batch)?;
+                all_matches.extend(matches);
+            }
+
+            Ok(all_matches)
+        }
+        WorkUnit::Chunk { batch } => {
+            // Process pre-chunked data directly using Worker
+            worker.process_lines(batch)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,5 +1000,41 @@ mod tests {
         assert!(!batches.is_empty());
         let total_lines: usize = batches.iter().map(|b| b.line_offsets.len()).sum();
         assert_eq!(total_lines, 10);
+    }
+
+    #[test]
+    fn test_chunk_size_selection() {
+        // Small files: 256KB chunks
+        assert_eq!(chunk_size_for(500 * 1024 * 1024), 256 * 1024);
+
+        // Medium files: 1MB chunks
+        assert_eq!(chunk_size_for(5 * 1024 * 1024 * 1024), 1024 * 1024);
+
+        // Huge files: 4MB chunks
+        assert_eq!(chunk_size_for(50 * 1024 * 1024 * 1024), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_chunking_decision_logic() {
+        // Test the chunking decision logic
+        let num_workers = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8);
+
+        // Simulate scenario: 3 files, each 150MB, with 8+ workers
+        // remaining_files < num_workers && file_size >= SMALL_FILE
+        // should result in chunking
+
+        let should_chunk_few_large = 3 < num_workers && 150 * 1024 * 1024 >= SMALL_FILE;
+        let should_not_chunk_many_large = 20 >= num_workers; // 20 files >= 8 workers
+
+        // With 3 files and 8 workers, should chunk
+        assert!(should_chunk_few_large, "Few large files should be chunked");
+
+        // With 20 files and 8 workers, should NOT chunk (plenty of files)
+        assert!(
+            should_not_chunk_many_large,
+            "Many files should not be chunked even if large"
+        );
     }
 }
