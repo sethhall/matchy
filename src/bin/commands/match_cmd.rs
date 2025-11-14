@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use crate::cli_utils::{format_number, format_qps};
 use crate::match_processor::{
-    analyze_performance, follow_files, follow_files_parallel,
-    process_file_with_aggregate, process_parallel, ProcessingStats,
+    analyze_performance, follow_files, follow_files_parallel, process_file_with_aggregate,
+    process_parallel, ProcessingStats,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -45,7 +45,10 @@ pub fn cmd_match(
         } else {
             // Show reader/worker split
             if let Some(readers) = readers_arg {
-                eprintln!("[INFO] Mode: Parallel ({} readers, {} workers)", readers, num_threads);
+                eprintln!(
+                    "[INFO] Mode: Parallel ({} readers, {} workers)",
+                    readers, num_threads
+                );
             } else {
                 eprintln!("[INFO] Mode: Parallel (1 reader, {} workers)", num_threads);
             }
@@ -92,7 +95,7 @@ pub fn cmd_match(
     // If user says --extractors=ip,domain (positive), ONLY enable those (exclusive mode)
     // If user says --extractors=-crypto (negative), enable all defaults except those
     let use_defaults = !extractor_config.has_explicit_enables();
-    
+
     let default_ipv4 = use_defaults && has_ip;
     let default_ipv6 = use_defaults && has_ip;
     let default_domains = use_defaults && has_strings;
@@ -179,8 +182,8 @@ pub fn cmd_match(
     let aggregate_stats: ProcessingStats;
     let files_processed: usize;
     let files_failed: usize;
-    let actual_workers: usize;  // Actual worker count (may differ from num_threads in auto-tune)
-    let is_auto_tuned = num_threads == 0;  // Track if auto-tune was used
+    let actual_workers: usize; // Actual worker count (may differ from num_threads in auto-tune)
+    let is_auto_tuned = num_threads == 0; // Track if auto-tune was used
 
     if follow {
         // Follow mode - use parallel or sequential based on thread count
@@ -294,7 +297,7 @@ pub fn cmd_match(
         }
 
         aggregate_stats = seq_stats;
-        actual_workers = 1;  // Sequential mode
+        actual_workers = 1; // Sequential mode
         files_processed = seq_processed;
         files_failed = seq_failed;
     }
@@ -394,7 +397,7 @@ pub fn cmd_match(
             },
             format_number(aggregate_stats.lookup_samples)
         );
-        
+
         eprintln!(
             "[INFO] Query rate: {} queries/s",
             format_qps(if overall_elapsed.as_secs_f64() > 0.0 {
@@ -411,12 +414,12 @@ pub fn cmd_match(
                 db_stats.cache_hit_rate() * 100.0
             );
         }
-        
+
         // Bottleneck analysis (only for parallel mode with timing data)
         if actual_workers > 1 && overall_elapsed.as_secs_f64() > 0.1 {
             eprintln!();
             eprintln!("[INFO] === Performance Analysis ===");
-            
+
             let analysis = analyze_performance(
                 &aggregate_stats,
                 overall_elapsed,
@@ -425,7 +428,7 @@ pub fn cmd_match(
                 db_stats.cache_hit_rate(),
                 is_auto_tuned,
             );
-            
+
             // Show bottleneck and recommendations
             eprintln!();
             eprintln!("[INFO] {}", analysis.explanation);

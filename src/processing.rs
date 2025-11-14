@@ -349,18 +349,18 @@ impl Worker {
         self.stats.total_bytes += data.len();
 
         // Sample timing every 1000 operations to avoid overhead
-        let should_sample_extraction = self.stats.extraction_samples < 100_000 
-            && self.stats.candidates_tested % 1000 == 0;
-        
+        let should_sample_extraction = self.stats.extraction_samples < 100_000
+            && self.stats.candidates_tested.is_multiple_of(1000);
+
         // Extract all candidates in one pass
         let extraction_start = if should_sample_extraction {
             Some(std::time::Instant::now())
         } else {
             None
         };
-        
+
         let extracted = self.extractor.extract_from_chunk(data);
-        
+
         if let Some(start) = extraction_start {
             self.stats.extraction_time += start.elapsed();
             self.stats.extraction_samples += 1;
@@ -389,8 +389,8 @@ impl Worker {
 
             // Sample lookup timing every 100 lookups
             let should_sample_lookup = self.stats.lookup_samples < 100_000
-                && self.stats.candidates_tested % 100 == 0;
-            
+                && self.stats.candidates_tested.is_multiple_of(100);
+
             // Lookup in all databases
             for (database_id, database) in &self.databases {
                 let lookup_start = if should_sample_lookup {
@@ -398,7 +398,7 @@ impl Worker {
                 } else {
                     None
                 };
-                
+
                 let (result_opt, matched_text) = match &item.item {
                     ExtractedItem::Ipv4(ip) => {
                         let result = database
@@ -422,7 +422,7 @@ impl Worker {
                         (result, s.to_string())
                     }
                 };
-                
+
                 if let Some(start) = lookup_start {
                     self.stats.lookup_time += start.elapsed();
                     self.stats.lookup_samples += 1;

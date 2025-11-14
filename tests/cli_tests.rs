@@ -724,16 +724,20 @@ fn test_json_output_includes_input_line() {
     assert!(!json_lines.is_empty(), "Expected JSON output");
 
     // Parse the JSON and verify input_line field
-    let json: serde_json::Value = serde_json::from_str(json_lines[0])
-        .expect("Failed to parse JSON output");
+    let json: serde_json::Value =
+        serde_json::from_str(json_lines[0]).expect("Failed to parse JSON output");
 
-    let input_line = json.get("input_line")
+    let input_line = json
+        .get("input_line")
         .expect("JSON missing 'input_line' field")
         .as_str()
         .expect("input_line should be a string");
 
     assert!(!input_line.is_empty(), "input_line should not be empty");
-    assert_eq!(input_line, test_line, "input_line should contain complete line content");
+    assert_eq!(
+        input_line, test_line,
+        "input_line should contain complete line content"
+    );
 }
 
 #[test]
@@ -756,7 +760,14 @@ fn test_json_output_parallel_mode() {
 
     // Create log with multiple lines
     let target_line = "Line 2: Request to bad.malware.com blocked";
-    fs::write(&log_file, format!("Line 1: Normal traffic\n{}\nLine 3: More content\n", target_line)).unwrap();
+    fs::write(
+        &log_file,
+        format!(
+            "Line 1: Normal traffic\n{}\nLine 3: More content\n",
+            target_line
+        ),
+    )
+    .unwrap();
 
     // Run with parallel mode
     let output = matchy_cmd()
@@ -775,12 +786,14 @@ fn test_json_output_parallel_mode() {
 
     let stdout = String::from_utf8(output).unwrap();
     let first_line = stdout.lines().next().unwrap();
-    let json: serde_json::Value = serde_json::from_str(first_line)
-        .expect("Failed to parse JSON");
+    let json: serde_json::Value = serde_json::from_str(first_line).expect("Failed to parse JSON");
 
     let input_line = json["input_line"].as_str().unwrap();
     let line_number = json["line_number"].as_u64().unwrap();
-    
+
     assert_eq!(line_number, 2, "Should be line 2");
-    assert_eq!(input_line, target_line, "Parallel mode should also populate input_line");
+    assert_eq!(
+        input_line, target_line,
+        "Parallel mode should also populate input_line"
+    );
 }

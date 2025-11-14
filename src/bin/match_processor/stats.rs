@@ -18,12 +18,12 @@ pub struct ProcessingStats {
     pub domain_count: usize,
     pub email_count: usize,
     // Pipeline stage timings (parallel mode)
-    pub read_time: Duration,          // Time spent reading from disk
-    pub decompress_time: Duration,    // Time spent decompressing (if .gz)
-    pub batch_prep_time: Duration,    // Time spent preparing batches (line splitting)
-    pub worker_idle_time: Duration,   // Time workers spent waiting for work
-    pub worker_busy_time: Duration,   // Time workers spent processing
-    pub output_time: Duration,        // Time spent in output thread
+    pub read_time: Duration,        // Time spent reading from disk
+    pub decompress_time: Duration,  // Time spent decompressing (if .gz)
+    pub batch_prep_time: Duration,  // Time spent preparing batches (line splitting)
+    pub worker_idle_time: Duration, // Time workers spent waiting for work
+    pub worker_busy_time: Duration, // Time workers spent processing
+    pub output_time: Duration,      // Time spent in output thread
 }
 
 impl ProcessingStats {

@@ -1,7 +1,7 @@
 //! Automatic bottleneck detection and performance tuning recommendations
 
-use std::time::Duration;
 use super::stats::ProcessingStats;
+use std::time::Duration;
 
 /// Identifies the primary bottleneck in the processing pipeline
 #[derive(Debug, Clone, PartialEq)]
@@ -51,7 +51,6 @@ pub struct PerformanceAnalysis {
     pub recommendations: Vec<String>,
 }
 
-
 /// Analyze processing statistics to identify bottlenecks
 pub fn analyze_performance(
     stats: &ProcessingStats,
@@ -61,21 +60,23 @@ pub fn analyze_performance(
     cache_hit_rate: f64,
     is_auto_tuned: bool,
 ) -> PerformanceAnalysis {
-    // Get physical core count for realistic recommendations
-    let physical_cores = gdt_cpus::num_physical_cores().unwrap_or(1);
+    // Get available parallelism (more reliable than gdt_cpus, especially on ARM)
+    let physical_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     let total_secs = total_time.as_secs_f64();
-    
+
     // Simple ratios for bottleneck detection
     let worker_idle_secs = stats.worker_idle_time.as_secs_f64();
     let worker_busy_secs = stats.worker_busy_time.as_secs_f64();
-    
+
     // Calculate worker idle percentage (average across workers)
     let worker_idle_pct = if num_workers > 0 && total_secs > 0.0 {
         (worker_idle_secs / num_workers as f64) / total_secs
     } else {
         0.0
     };
-    
+
     // Bottleneck detection logic
     // Note: decompress/read times can exceed wall clock when parallel readers are used
     // So check worker idle time as primary indicator
@@ -85,27 +86,41 @@ pub fn analyze_performance(
         if !is_auto_tuned && num_files > 1 {
             recs.push("Use --threads=0 for auto-tune".to_string());
         } else if !is_auto_tuned {
-            recs.push(format!("Try --threads={} (reduce workers)", num_workers / 2));
+            recs.push(format!(
+                "Try --threads={} (reduce workers)",
+                num_workers / 2
+            ));
         } else {
             // Already auto-tuned, no obvious fix
             recs.push("I/O is the limiting factor".to_string());
         }
-        
+
         (
-            Bottleneck::ReaderStarved { severity: worker_idle_pct },
-            format!("Bottleneck: Workers idle {:.0}% of time (I/O can't keep up)", worker_idle_pct * 100.0),
+            Bottleneck::ReaderStarved {
+                severity: worker_idle_pct,
+            },
+            format!(
+                "Bottleneck: Workers idle {:.0}% of time (I/O can't keep up)",
+                worker_idle_pct * 100.0
+            ),
             recs,
         )
     } else if worker_idle_pct < 0.1 && worker_busy_secs > total_secs * num_workers as f64 * 0.8 {
         let recommended_threads = (num_workers * 2).min(physical_cores);
         let mut recs = vec![];
-        
+
         if recommended_threads > num_workers {
-            recs.push(format!("Try --threads={} (add more workers)", recommended_threads));
+            recs.push(format!(
+                "Try --threads={} (add more workers)",
+                recommended_threads
+            ));
         } else {
-            recs.push(format!("Already at {} cores (hardware limit)", physical_cores));
+            recs.push(format!(
+                "Already at {} cores (hardware limit)",
+                physical_cores
+            ));
         }
-        
+
         (
             Bottleneck::WorkerSaturated { severity: 0.9 },
             "Bottleneck: Workers fully utilized (CPU-bound)".to_string(),
@@ -117,12 +132,15 @@ pub fn analyze_performance(
         // 2. Significant lookup volume (> 10k lookups)
         // 3. Actually finding matches (> 100 matches)
         (
-            Bottleneck::Lookup { severity: cache_hit_rate },
-            format!("Bottleneck: Low cache hit rate ({:.0}% with {} lookups)", 
-                    cache_hit_rate * 100.0, stats.lookup_samples),
-            vec![
-                "Try --cache-size=100000 to improve hit rate".to_string(),
-            ],
+            Bottleneck::Lookup {
+                severity: cache_hit_rate,
+            },
+            format!(
+                "Bottleneck: Low cache hit rate ({:.0}% with {} lookups)",
+                cache_hit_rate * 100.0,
+                stats.lookup_samples
+            ),
+            vec!["Try --cache-size=100000 to improve hit rate".to_string()],
         )
     } else {
         (
@@ -131,11 +149,10 @@ pub fn analyze_performance(
             vec![],
         )
     };
-    
+
     PerformanceAnalysis {
         bottleneck,
         explanation,
         recommendations,
     }
 }
-

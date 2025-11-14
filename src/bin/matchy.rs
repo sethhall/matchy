@@ -96,7 +96,7 @@ enum Commands {
         /// "auto" or "0" uses all available CPU cores with auto-tuned reader/worker split
         #[arg(short = 'j', long)]
         threads: Option<String>,
-        
+
         /// Number of reader threads for I/O and decompression (default: auto-detect)
         /// Only used with --threads > 1. Explicit value overrides auto-tuning.
         /// Use more readers for compressed files (.gz). Example: --readers=4 --threads=12

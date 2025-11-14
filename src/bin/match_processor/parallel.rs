@@ -25,7 +25,7 @@ impl ExtractorConfig {
     pub fn from_arg(arg: Option<String>) -> Self {
         let mut overrides = HashMap::new();
         let mut has_enables = false;
-        
+
         if let Some(ref extractors_str) = arg {
             for extractor in extractors_str.split(',') {
                 let extractor = extractor.trim();
@@ -34,24 +34,27 @@ impl ExtractorConfig {
                 } else {
                     (false, extractor)
                 };
-                
+
                 // Track if any explicit enables (positive values)
                 if !is_disable {
                     has_enables = true;
                 }
-                
+
                 // Expand group aliases
                 let names = Self::expand_alias(name);
-                
+
                 for n in names {
                     overrides.insert(n.to_string(), !is_disable);
                 }
             }
         }
-        
-        Self { overrides, has_enables }
+
+        Self {
+            overrides,
+            has_enables,
+        }
     }
-    
+
     /// Expand group aliases and normalize names
     fn expand_alias(name: &str) -> Vec<&str> {
         match name {
@@ -67,11 +70,11 @@ impl ExtractorConfig {
             _ => vec![name],
         }
     }
-    
+
     pub fn should_enable(&self, name: &str, default: bool) -> bool {
         self.overrides.get(name).copied().unwrap_or(default)
     }
-    
+
     /// Returns true if any explicit enables were specified
     /// Used to determine if we're in exclusive mode (only enable what was specified)
     pub fn has_explicit_enables(&self) -> bool {
@@ -109,14 +112,19 @@ fn files_remaining(queue: &FileQueue) -> usize {
 /// Auto-tune thread count based on workload characteristics
 /// Returns (num_readers, num_workers)
 fn auto_tune_thread_count(inputs: &[PathBuf], show_stats: bool) -> (usize, usize) {
-    // Get physical CPU cores
-    let physical_cores = gdt_cpus::num_physical_cores().unwrap_or(4).max(1);
-    
+    // Get available parallelism (physical cores or CPU quota)
+    // More reliable than gdt_cpus, especially on ARM systems
+    let physical_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(1);
+
     // Count regular files (exclude stdin)
     let file_count = inputs.iter().filter(|p| p.to_str() != Some("-")).count();
-    
+
     // Count compressed files
-    let compressed_count = inputs.iter()
+    let compressed_count = inputs
+        .iter()
         .filter(|p| {
             p.extension()
                 .and_then(|e| e.to_str())
@@ -124,12 +132,12 @@ fn auto_tune_thread_count(inputs: &[PathBuf], show_stats: bool) -> (usize, usize
                 .unwrap_or(false)
         })
         .count();
-    
+
     // Decision logic:
     // - Single file or stdin: use all cores (single reader, N-1 workers)
     // - Multiple files: balance readers and workers
     // - Compressed files: may benefit from more workers (decompression is CPU-intensive)
-    
+
     let (num_readers, num_workers) = if file_count <= 1 {
         // Single file: 1 reader, rest workers
         (1, physical_cores.saturating_sub(1).max(1))
@@ -145,12 +153,21 @@ fn auto_tune_thread_count(inputs: &[PathBuf], show_stats: bool) -> (usize, usize
         let workers = physical_cores.saturating_sub(readers).max(1);
         (readers, workers)
     };
-    
+
     if show_stats {
-        eprintln!("[INFO] Auto-tuning: {} physical cores detected", physical_cores);
-        eprintln!("[INFO] Workload: {} files ({} compressed)", file_count, compressed_count);
-        eprintln!("[INFO] Configuration: {} reader(s), {} worker(s)", num_readers, num_workers);
-        
+        eprintln!(
+            "[INFO] Auto-tuning: {} physical cores detected",
+            physical_cores
+        );
+        eprintln!(
+            "[INFO] Workload: {} files ({} compressed)",
+            file_count, compressed_count
+        );
+        eprintln!(
+            "[INFO] Configuration: {} reader(s), {} worker(s)",
+            num_readers, num_workers
+        );
+
         if file_count <= 1 {
             eprintln!("[INFO] Strategy: Single file - maximize workers");
         } else if compressed_count > file_count / 2 {
@@ -159,10 +176,9 @@ fn auto_tune_thread_count(inputs: &[PathBuf], show_stats: bool) -> (usize, usize
             eprintln!("[INFO] Strategy: Balanced readers/workers for I/O and processing");
         }
     }
-    
+
     (num_readers, num_workers)
 }
-
 
 /// Match result sent from workers to output thread
 pub struct MatchResult {
@@ -182,7 +198,7 @@ pub struct MatchResult {
 // Use library's WorkerStats directly instead of maintaining a duplicate type
 pub use matchy::processing::WorkerStats;
 /// Process multiple files in parallel using worker pool
-/// 
+///
 /// If num_threads is 0 (auto), determines optimal thread count based on:
 /// - Physical CPU cores
 /// - Number of input files
@@ -206,7 +222,10 @@ pub fn process_parallel(
         // Explicit reader count specified
         let workers = if num_threads == 0 {
             // Auto-detect total cores, subtract readers
-            let physical_cores = gdt_cpus::num_physical_cores().unwrap_or(4).max(1);
+            let physical_cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .max(1);
             physical_cores.saturating_sub(readers).max(1)
         } else {
             num_threads
@@ -267,7 +286,7 @@ pub fn process_parallel(
     drop(result_tx);
 
     // Separate stdin from regular files (stdin cannot be parallelized)
-    let (stdin_inputs, file_inputs): (Vec<_>, Vec<_>) = 
+    let (stdin_inputs, file_inputs): (Vec<_>, Vec<_>) =
         inputs.into_iter().partition(|p| p.to_str() == Some("-"));
 
     // Create shared file queue from regular files
@@ -309,7 +328,7 @@ pub fn process_parallel(
     let mut worker_stats = Vec::new();
     let mut total_idle_time = Duration::ZERO;
     let mut total_busy_time = Duration::ZERO;
-    
+
     for handle in worker_handles {
         match handle.join() {
             Ok((stats, idle, busy)) => {
@@ -326,16 +345,16 @@ pub fn process_parallel(
 
     // Aggregate statistics
     let mut aggregate = ProcessingStats::new();
-    
+
     // Add reader stats (I/O timing)
     aggregate.read_time = reader_stats.read_time;
     aggregate.decompress_time = reader_stats.decompress_time;
     aggregate.batch_prep_time = reader_stats.batch_prep_time;
-    
+
     // Add worker timing (accumulated from all workers)
     aggregate.worker_idle_time = total_idle_time;
     aggregate.worker_busy_time = total_busy_time;
-    
+
     // Aggregate worker stats
     for stats in worker_stats {
         aggregate.lines_processed += stats.lines_processed;
@@ -371,7 +390,7 @@ fn reader_thread(
     file_queue: FileQueue,
     work_tx: SyncSender<Option<LineBatch>>,
     batch_bytes: usize,
-) -> Result<(ProcessingStats, )> {
+) -> Result<(ProcessingStats,)> {
     let mut stats = ProcessingStats::new();
 
     // Pop files from queue and process them
@@ -424,27 +443,27 @@ fn process_file(
         let read_start = Instant::now();
         let batch_opt = batches_iter.next();
         let read_elapsed = read_start.elapsed();
-        
+
         let batch_result = match batch_opt {
             Some(b) => b,
             None => break, // No more batches
         };
-        
-        let batch =
-            batch_result.with_context(|| format!("Failed to read from {}", input_path.display()))?;
-        
+
+        let batch = batch_result
+            .with_context(|| format!("Failed to read from {}", input_path.display()))?;
+
         // Track time by type (read includes decompression time for .gz)
         if is_gzip {
             stats.decompress_time += read_elapsed;
         } else {
             stats.read_time += read_elapsed;
         }
-        
+
         stats.total_bytes += batch.data.len();
-        
+
         // Batch prep time is negligible - line offsets are pre-computed by LineFileReader
         // during the read, so we don't double-count it here
-        
+
         // Send to workers (may block if queue is full - that's a downstream bottleneck, not I/O)
         work_tx
             .send(Some(batch))
@@ -472,7 +491,7 @@ fn process_stdin(
         let read_start = Instant::now();
         let bytes_read = stdin.read(&mut read_buffer)?;
         stats.read_time += read_start.elapsed();
-        
+
         if bytes_read == 0 {
             // EOF - send any leftover data
             if !leftover.is_empty() {
@@ -662,7 +681,7 @@ fn worker_thread(
 
     // Reusable buffers for match result construction
     let mut match_buffers = MatchBuffers::new();
-    
+
     // Track worker timing (separate from library's WorkerStats)
     let mut idle_time = Duration::ZERO;
     let mut busy_time = Duration::ZERO;
@@ -681,15 +700,18 @@ fn worker_thread(
             Ok(Some(batch)) => {
                 // Time processing the batch (busy)
                 let process_start = Instant::now();
-                
+
                 // Process batch using library worker (batch is already LineBatch)
                 match worker.process_lines(&batch) {
                     Ok(matches) => {
                         // Convert library matches to CLI format and send
                         for m in matches {
-                            if let Some(mut match_result) = build_match_result(&m, &mut match_buffers) {
+                            if let Some(mut match_result) =
+                                build_match_result(&m, &mut match_buffers)
+                            {
                                 // Extract the line content from the batch
-                                match_result.input_line = extract_line_from_batch(&batch, m.line_number);
+                                match_result.input_line =
+                                    extract_line_from_batch(&batch, m.line_number);
                                 let _ = result_tx.send(Some(WorkerMessage::Match(match_result)));
                             }
                         }
@@ -701,7 +723,7 @@ fn worker_thread(
                         );
                     }
                 }
-                
+
                 // Track processing time
                 busy_time += process_start.elapsed();
 
@@ -721,12 +743,12 @@ fn worker_thread(
 
     // Send final stats
     let final_stats = worker.stats().clone();
-    
+
     let _ = result_tx.send(Some(WorkerMessage::Stats {
         worker_id,
         stats: final_stats.clone(),
     }));
-    
+
     (final_stats, idle_time, busy_time)
 }
 
@@ -734,24 +756,30 @@ fn worker_thread(
 fn extract_line_from_batch(batch: &LineBatch, line_number: usize) -> String {
     // Calculate which line in this batch (0-indexed within batch)
     let batch_line_index = line_number.saturating_sub(batch.starting_line_number);
-    
+
     // Find the byte range for this line
     let start_offset = if batch_line_index == 0 {
         0
     } else {
         // Start after the previous line's newline
-        batch.line_offsets.get(batch_line_index - 1)
+        batch
+            .line_offsets
+            .get(batch_line_index - 1)
             .map(|&off| off + 1)
             .unwrap_or(0)
     };
-    
-    let end_offset = batch.line_offsets.get(batch_line_index)
+
+    let end_offset = batch
+        .line_offsets
+        .get(batch_line_index)
         .copied()
         .unwrap_or(batch.data.len());
-    
+
     // Extract the line bytes and convert to string
     let line_bytes = &batch.data[start_offset..end_offset];
-    String::from_utf8_lossy(line_bytes).trim_end_matches('\n').to_string()
+    String::from_utf8_lossy(line_bytes)
+        .trim_end_matches('\n')
+        .to_string()
 }
 
 /// Build CLI match result from library match
@@ -811,74 +839,6 @@ pub fn build_match_result(
             })
         }
         QueryResult::NotFound => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-
-    #[test]
-    fn test_file_queue_pop() {
-        let queue: FileQueue = Arc::new(Mutex::new(VecDeque::new()));
-        queue.lock().unwrap().push_back(PathBuf::from("file1.txt"));
-        queue.lock().unwrap().push_back(PathBuf::from("file2.txt"));
-
-        // Pop files in order
-        assert_eq!(pop_file(&queue), Some(PathBuf::from("file1.txt")));
-        assert_eq!(pop_file(&queue), Some(PathBuf::from("file2.txt")));
-        assert_eq!(pop_file(&queue), None);
-    }
-
-    #[test]
-    fn test_files_remaining() {
-        let queue: FileQueue = Arc::new(Mutex::new(VecDeque::new()));
-        assert_eq!(files_remaining(&queue), 0);
-
-        queue.lock().unwrap().push_back(PathBuf::from("file1.txt"));
-        assert_eq!(files_remaining(&queue), 1);
-
-        queue.lock().unwrap().push_back(PathBuf::from("file2.txt"));
-        assert_eq!(files_remaining(&queue), 2);
-
-        pop_file(&queue);
-        assert_eq!(files_remaining(&queue), 1);
-    }
-
-    #[test]
-    fn test_file_queue_concurrent_access() {
-        let queue: FileQueue = Arc::new(Mutex::new(VecDeque::new()));
-        
-        // Simulate multiple readers accessing queue
-        for i in 0..10 {
-            queue.lock().unwrap().push_back(PathBuf::from(format!("file{}.txt", i)));
-        }
-
-        let queue1 = Arc::clone(&queue);
-        let queue2 = Arc::clone(&queue);
-
-        let h1 = std::thread::spawn(move || {
-            let mut popped = Vec::new();
-            while let Some(f) = pop_file(&queue1) {
-                popped.push(f);
-            }
-            popped
-        });
-
-        let h2 = std::thread::spawn(move || {
-            let mut popped = Vec::new();
-            while let Some(f) = pop_file(&queue2) {
-                popped.push(f);
-            }
-            popped
-        });
-
-        let files1 = h1.join().unwrap();
-        let files2 = h2.join().unwrap();
-
-        // Both threads together should have gotten all 10 files, no duplicates
-        assert_eq!(files1.len() + files2.len(), 10);
     }
 }
 
@@ -973,4 +933,74 @@ fn output_thread(
     }
 
     stats
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_file_queue_pop() {
+        let queue: FileQueue = Arc::new(Mutex::new(VecDeque::new()));
+        queue.lock().unwrap().push_back(PathBuf::from("file1.txt"));
+        queue.lock().unwrap().push_back(PathBuf::from("file2.txt"));
+
+        // Pop files in order
+        assert_eq!(pop_file(&queue), Some(PathBuf::from("file1.txt")));
+        assert_eq!(pop_file(&queue), Some(PathBuf::from("file2.txt")));
+        assert_eq!(pop_file(&queue), None);
+    }
+
+    #[test]
+    fn test_files_remaining() {
+        let queue: FileQueue = Arc::new(Mutex::new(VecDeque::new()));
+        assert_eq!(files_remaining(&queue), 0);
+
+        queue.lock().unwrap().push_back(PathBuf::from("file1.txt"));
+        assert_eq!(files_remaining(&queue), 1);
+
+        queue.lock().unwrap().push_back(PathBuf::from("file2.txt"));
+        assert_eq!(files_remaining(&queue), 2);
+
+        pop_file(&queue);
+        assert_eq!(files_remaining(&queue), 1);
+    }
+
+    #[test]
+    fn test_file_queue_concurrent_access() {
+        let queue: FileQueue = Arc::new(Mutex::new(VecDeque::new()));
+
+        // Simulate multiple readers accessing queue
+        for i in 0..10 {
+            queue
+                .lock()
+                .unwrap()
+                .push_back(PathBuf::from(format!("file{}.txt", i)));
+        }
+
+        let queue1 = Arc::clone(&queue);
+        let queue2 = Arc::clone(&queue);
+
+        let h1 = std::thread::spawn(move || {
+            let mut popped = Vec::new();
+            while let Some(f) = pop_file(&queue1) {
+                popped.push(f);
+            }
+            popped
+        });
+
+        let h2 = std::thread::spawn(move || {
+            let mut popped = Vec::new();
+            while let Some(f) = pop_file(&queue2) {
+                popped.push(f);
+            }
+            popped
+        });
+
+        let files1 = h1.join().unwrap();
+        let files2 = h2.join().unwrap();
+
+        // Both threads together should have gotten all 10 files, no duplicates
+        assert_eq!(files1.len() + files2.len(), 10);
+    }
 }
