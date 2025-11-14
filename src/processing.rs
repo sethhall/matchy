@@ -171,6 +171,8 @@ pub struct LineMatch {
     pub source: PathBuf,
     /// Line number in source (1-indexed)
     pub line_number: usize,
+    /// Full line content (for output formatting)
+    pub input_line: String,
 }
 
 /// Reads files in line-oriented chunks with compression support
@@ -551,10 +553,14 @@ impl Worker {
 
                 lines_with_matches.insert(line_number);
 
+                // Extract the line content from batch
+                let input_line = extract_line_from_batch(batch, line_number);
+
                 LineMatch {
                     match_result,
                     source: batch.source.clone(),
                     line_number,
+                    input_line,
                 }
             })
             .collect();
@@ -657,6 +663,45 @@ impl Default for WorkerBuilder {
 
 // Parallel Processing Implementation
 
+/// Extract line content from a batch given a line number
+///
+/// # Arguments
+///
+/// * `batch` - The LineBatch containing the data
+/// * `line_number` - The line number to extract (1-indexed, absolute line number)
+///
+/// # Returns
+///
+/// The line content as a String (without trailing newline)
+fn extract_line_from_batch(batch: &LineBatch, line_number: usize) -> String {
+    // Calculate which line in this batch (0-indexed within batch)
+    let batch_line_index = line_number.saturating_sub(batch.starting_line_number);
+
+    // Find the byte range for this line
+    let start_offset = if batch_line_index == 0 {
+        0
+    } else {
+        // Start after the previous line's newline
+        batch
+            .line_offsets
+            .get(batch_line_index - 1)
+            .map(|&off| off + 1)
+            .unwrap_or(0)
+    };
+
+    let end_offset = batch
+        .line_offsets
+        .get(batch_line_index)
+        .copied()
+        .unwrap_or(batch.data.len());
+
+    // Extract the line bytes and convert to string
+    let line_bytes = &batch.data[start_offset..end_offset];
+    String::from_utf8_lossy(line_bytes)
+        .trim_end_matches('\n')
+        .to_string()
+}
+
 /// Determine appropriate chunk size based on file size
 fn chunk_size_for(file_size: u64) -> usize {
     match file_size {
@@ -668,11 +713,19 @@ fn chunk_size_for(file_size: u64) -> usize {
 
 /// Reader thread: chunks files and sends batches to worker queue
 fn reader_thread(file_path: PathBuf, work_sender: Sender<WorkUnit>) -> Result<(), String> {
-    let file_size = fs::metadata(&file_path)
-        .map_err(|e| format!("Failed to stat {}: {}", file_path.display(), e))?
-        .len();
+    // Special handling for stdin (can't stat it)
+    let is_stdin = file_path.to_str() == Some("-");
 
-    let chunk_size = chunk_size_for(file_size);
+    let chunk_size = if is_stdin {
+        // Use default chunk size for stdin
+        256 * 1024 // 256KB
+    } else {
+        let file_size = fs::metadata(&file_path)
+            .map_err(|e| format!("Failed to stat {}: {}", file_path.display(), e))?
+            .len();
+        chunk_size_for(file_size)
+    };
+
     let mut reader = LineFileReader::new(&file_path, chunk_size)
         .map_err(|e| format!("Failed to open {}: {}", file_path.display(), e))?;
 
@@ -764,7 +817,8 @@ pub struct ParallelProcessingResult {
 ///             .build();
 ///         
 ///         Ok::<_, String>(worker)
-///     }
+///     },
+///     None::<fn(&processing::WorkerStats)>, // No progress callback
 /// )?;
 ///
 /// println!("Found {} matches across all files", result.matches.len());
@@ -805,7 +859,7 @@ where
         let factory = Arc::clone(&worker_factory);
 
         let progress_cb = progress_callback.clone();
-        
+
         let handle = thread::spawn(move || -> (Vec<LineMatch>, WorkerStats) {
             // Create worker for this thread
             let mut worker = match factory() {
@@ -835,7 +889,7 @@ where
                         eprintln!("Processing error: {}", e);
                     }
                 }
-                
+
                 // Call progress callback periodically
                 if let Some(ref cb) = progress_cb {
                     let now = std::time::Instant::now();
@@ -860,29 +914,44 @@ where
     let mut routing_stats = RoutingStats::default();
 
     for file_path in files {
-        let file_size = fs::metadata(&file_path)
-            .map_err(|e| format!("Failed to stat {}: {}", file_path.display(), e))?
-            .len();
+        // Special handling for stdin
+        let is_stdin = file_path.to_str() == Some("-");
 
-        // Apply chunking algorithm
-        let should_chunk = remaining < num_workers && file_size >= SMALL_FILE;
-
-        if should_chunk {
-            // Spawn reader thread to chunk this file
+        if is_stdin {
+            // Always route stdin to a reader thread (can't stat it)
             routing_stats.files_to_readers += 1;
-            routing_stats.bytes_to_readers += file_size;
+            // Size unknown for stdin
+            routing_stats.bytes_to_readers += 0;
 
             let work_sender_clone = work_sender.clone();
             let handle = thread::spawn(move || reader_thread(file_path, work_sender_clone));
             reader_handles.push(handle);
         } else {
-            // Send whole file directly to worker queue
-            routing_stats.files_to_workers += 1;
-            routing_stats.bytes_to_workers += file_size;
+            // Regular file - get size and apply chunking algorithm
+            let file_size = fs::metadata(&file_path)
+                .map_err(|e| format!("Failed to stat {}: {}", file_path.display(), e))?
+                .len();
 
-            work_sender
-                .send(WorkUnit::WholeFile { path: file_path })
-                .map_err(|_| "Worker channel closed")?;
+            // Apply chunking algorithm
+            let should_chunk = remaining < num_workers && file_size >= SMALL_FILE;
+
+            if should_chunk {
+                // Spawn reader thread to chunk this file
+                routing_stats.files_to_readers += 1;
+                routing_stats.bytes_to_readers += file_size;
+
+                let work_sender_clone = work_sender.clone();
+                let handle = thread::spawn(move || reader_thread(file_path, work_sender_clone));
+                reader_handles.push(handle);
+            } else {
+                // Send whole file directly to worker queue
+                routing_stats.files_to_workers += 1;
+                routing_stats.bytes_to_workers += file_size;
+
+                work_sender
+                    .send(WorkUnit::WholeFile { path: file_path })
+                    .map_err(|_| "Worker channel closed")?;
+            }
         }
 
         remaining -= 1;

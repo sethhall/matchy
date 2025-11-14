@@ -111,7 +111,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nWorker Statistics:");
     println!("------------------");
     println!("Lines processed: {}", result.worker_stats.lines_processed);
-    println!("Candidates tested: {}", result.worker_stats.candidates_tested);
+    println!(
+        "Candidates tested: {}",
+        result.worker_stats.candidates_tested
+    );
     println!("Total matches: {}", result.worker_stats.matches_found);
 
     // Display results

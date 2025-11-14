@@ -36,7 +36,7 @@
 
 use flate2::read::GzDecoder;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, stdin, BufRead, BufReader};
 use std::path::Path;
 
 /// Buffer size for file reading (128KB, matches CLI default)
@@ -45,6 +45,7 @@ const BUFFER_SIZE: usize = 128 * 1024;
 /// Open a file with automatic gzip detection based on file extension
 ///
 /// Files ending in `.gz` (case-insensitive) are automatically decompressed.
+/// Special case: path "-" reads from stdin.
 /// Returns a buffered reader ready for line-by-line access.
 ///
 /// # Example
@@ -57,6 +58,9 @@ const BUFFER_SIZE: usize = 128 * 1024;
 ///
 /// // Plain text file
 /// let reader2 = file_reader::open("data.log")?;
+///
+/// // Stdin
+/// let reader3 = file_reader::open("-")?;
 /// # Ok::<(), std::io::Error>(())
 /// ```
 ///
@@ -68,6 +72,12 @@ const BUFFER_SIZE: usize = 128 * 1024;
 /// - Invalid gzip data (for .gz files)
 pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Box<dyn BufRead + Send>> {
     let path = path.as_ref();
+
+    // Special case: "-" means stdin
+    if path.to_str() == Some("-") {
+        return Ok(Box::new(BufReader::with_capacity(BUFFER_SIZE, stdin())));
+    }
+
     let file = File::open(path)?;
 
     // Check if file is gzip-compressed based on extension

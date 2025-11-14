@@ -2,9 +2,8 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::stats::ProcessingStats;
 use crate::cli_utils::{data_value_to_json, format_cidr_into};
@@ -189,7 +188,12 @@ pub fn process_parallel(
     cache_size: usize,
     _overall_start: Instant,
     extractor_config: ExtractorConfig,
-) -> Result<(ProcessingStats, usize, usize, matchy::processing::RoutingStats)> {
+) -> Result<(
+    ProcessingStats,
+    usize,
+    usize,
+    matchy::processing::RoutingStats,
+)> {
     // Determine reader and worker counts using same logic
     let (num_readers, num_workers) = if let Some(readers) = explicit_readers {
         // Explicit reader count specified
@@ -246,7 +250,9 @@ pub fn process_parallel(
 
     // Setup progress reporting if requested
     let progress_reporter = if _show_progress {
-        Some(Arc::new(Mutex::new(crate::match_processor::ProgressReporter::new())))
+        Some(Arc::new(Mutex::new(
+            crate::match_processor::ProgressReporter::new(),
+        )))
     } else {
         None
     };
@@ -255,7 +261,7 @@ pub fn process_parallel(
     // Call library's process_files_parallel with worker factory
     let db_path = database_path.to_owned();
     let ext_config = extractor_config.clone();
-    
+
     let result = matchy::processing::process_files_parallel(
         inputs,
         Some(num_readers),
@@ -264,17 +270,17 @@ pub fn process_parallel(
             // Create database
             let db = init_worker_database(&db_path, cache_size)
                 .map_err(|e| format!("Database init failed: {}", e))?;
-            
+
             // Create extractor
             let extractor = create_extractor_for_db(&db, &ext_config)
                 .map_err(|e| format!("Extractor init failed: {}", e))?;
-            
+
             // Create worker
             let worker = matchy::processing::Worker::builder()
                 .extractor(extractor)
                 .add_database("default", db)
                 .build();
-            
+
             Ok::<_, String>(worker)
         },
         progress_reporter.map(|pr| {
@@ -291,7 +297,8 @@ pub fn process_parallel(
                 }
             }
         }),
-    ).map_err(|e| anyhow::anyhow!("Parallel processing failed: {}", e))?;
+    )
+    .map_err(|e| anyhow::anyhow!("Parallel processing failed: {}", e))?;
 
     // Print newline after progress if it was shown
     if _show_progress {
@@ -320,7 +327,7 @@ pub fn process_parallel(
     aggregate.ipv6_count = result.worker_stats.ipv6_count;
     aggregate.domain_count = result.worker_stats.domain_count;
     aggregate.email_count = result.worker_stats.email_count;
-    
+
     Ok((aggregate, num_workers, num_readers, result.routing_stats))
 }
 
@@ -402,153 +409,6 @@ impl MatchBuffers {
     }
 }
 
-/// Worker thread: receives batches, processes them, sends results
-/// Now uses library's matchy::parallel::Worker infrastructure
-/// Gracefully shuts down when work queue closes
-fn worker_thread(
-    worker_id: usize,
-    work_rx: Arc<Mutex<Receiver<Option<LineBatch>>>>,
-    result_tx: SyncSender<Option<WorkerMessage>>,
-    database_path: PathBuf,
-    cache_size: usize,
-    _show_stats: bool,
-    extractor_config: ExtractorConfig,
-) -> (WorkerStats, Duration, Duration) {
-    // Initialize database
-    let db = match init_worker_database(&database_path, cache_size) {
-        Ok(db) => db,
-        Err(e) => {
-            eprintln!(
-                "[ERROR] Worker {} failed to open database: {}",
-                worker_id, e
-            );
-            return (WorkerStats::default(), Duration::ZERO, Duration::ZERO);
-        }
-    };
-
-    // Create extractor
-    let extractor = match create_extractor_for_db(&db, &extractor_config) {
-        Ok(ext) => ext,
-        Err(e) => {
-            eprintln!(
-                "[ERROR] Worker {} failed to create extractor: {}",
-                worker_id, e
-            );
-            return (WorkerStats::default(), Duration::ZERO, Duration::ZERO);
-        }
-    };
-
-    // Use library's Worker infrastructure
-    let mut worker = matchy::processing::Worker::builder()
-        .extractor(extractor)
-        .add_database("default", db)
-        .build();
-    let mut last_progress_update = Instant::now();
-    let progress_interval = Duration::from_millis(100);
-
-    // Reusable buffers for match result construction
-    let mut match_buffers = MatchBuffers::new();
-
-    // Track worker timing (separate from library's WorkerStats)
-    let mut idle_time = Duration::ZERO;
-    let mut busy_time = Duration::ZERO;
-
-    // Process work batches
-    loop {
-        // Time waiting for work (idle)
-        let wait_start = Instant::now();
-        let batch_opt = {
-            let rx = work_rx.lock().unwrap();
-            rx.recv()
-        };
-        idle_time += wait_start.elapsed();
-
-        match batch_opt {
-            Ok(Some(batch)) => {
-                // Time processing the batch (busy)
-                let process_start = Instant::now();
-
-                // Process batch using library worker (batch is already LineBatch)
-                match worker.process_lines(&batch) {
-                    Ok(matches) => {
-                        // Convert library matches to CLI format and send
-                        for m in matches {
-                            if let Some(mut match_result) =
-                                build_match_result(&m, &mut match_buffers)
-                            {
-                                // Extract the line content from the batch
-                                match_result.input_line =
-                                    extract_line_from_batch(&batch, m.line_number);
-                                let _ = result_tx.send(Some(WorkerMessage::Match(match_result)));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "[ERROR] Worker {} batch processing failed: {}",
-                            worker_id, e
-                        );
-                    }
-                }
-
-                // Track processing time
-                busy_time += process_start.elapsed();
-
-                // Send periodic progress updates
-                let now = Instant::now();
-                if now.duration_since(last_progress_update) >= progress_interval {
-                    let _ = result_tx.send(Some(WorkerMessage::Stats {
-                        worker_id,
-                        stats: worker.stats().clone(),
-                    }));
-                    last_progress_update = now;
-                }
-            }
-            Ok(None) | Err(_) => break,
-        }
-    }
-
-    // Send final stats
-    let final_stats = worker.stats().clone();
-
-    let _ = result_tx.send(Some(WorkerMessage::Stats {
-        worker_id,
-        stats: final_stats.clone(),
-    }));
-
-    (final_stats, idle_time, busy_time)
-}
-
-/// Extract the line content from a batch given a line number
-fn extract_line_from_batch(batch: &LineBatch, line_number: usize) -> String {
-    // Calculate which line in this batch (0-indexed within batch)
-    let batch_line_index = line_number.saturating_sub(batch.starting_line_number);
-
-    // Find the byte range for this line
-    let start_offset = if batch_line_index == 0 {
-        0
-    } else {
-        // Start after the previous line's newline
-        batch
-            .line_offsets
-            .get(batch_line_index - 1)
-            .map(|&off| off + 1)
-            .unwrap_or(0)
-    };
-
-    let end_offset = batch
-        .line_offsets
-        .get(batch_line_index)
-        .copied()
-        .unwrap_or(batch.data.len());
-
-    // Extract the line bytes and convert to string
-    let line_bytes = &batch.data[start_offset..end_offset];
-    String::from_utf8_lossy(line_bytes)
-        .trim_end_matches('\n')
-        .to_string()
-}
-
 /// Convert library LineMatch to CLI MatchResult
 fn library_match_to_cli_match(lib_match: &matchy::processing::LineMatch) -> Option<MatchResult> {
     use matchy::QueryResult;
@@ -565,7 +425,7 @@ fn library_match_to_cli_match(lib_match: &matchy::processing::LineMatch) -> Opti
                 line_number: lib_match.line_number,
                 matched_text: mr.matched_text.clone(),
                 match_type: "ip".to_string(),
-                input_line: String::new(),
+                input_line: lib_match.input_line.clone(),
                 timestamp: 0.0,
                 pattern_count: None,
                 data: Some(data_value_to_json(data)),
@@ -584,7 +444,7 @@ fn library_match_to_cli_match(lib_match: &matchy::processing::LineMatch) -> Opti
                 line_number: lib_match.line_number,
                 matched_text: mr.matched_text.clone(),
                 match_type: "pattern".to_string(),
-                input_line: String::new(),
+                input_line: lib_match.input_line.clone(),
                 timestamp: 0.0,
                 pattern_count: Some(pattern_ids.len()),
                 data: if data_values.is_empty() {
@@ -655,8 +515,8 @@ pub fn build_match_result(
                 line_number: lib_match.line_number,
                 matched_text: mr.matched_text.clone(),
                 match_type: "ip".to_string(),
-                input_line: String::new(), // Will be filled by caller if needed
-                timestamp: 0.0,            // Will be filled by caller
+                input_line: lib_match.input_line.clone(),
+                timestamp: 0.0, // Will be filled by caller
                 pattern_count: None,
                 data: Some(data_value_to_json(data)),
                 prefix_len: Some(*prefix_len),
@@ -674,7 +534,7 @@ pub fn build_match_result(
                 line_number: lib_match.line_number,
                 matched_text: mr.matched_text.clone(),
                 match_type: "pattern".to_string(),
-                input_line: String::new(),
+                input_line: lib_match.input_line.clone(),
                 timestamp: 0.0,
                 pattern_count: Some(pattern_ids.len()),
                 data: if data_values.is_empty() {
@@ -689,97 +549,3 @@ pub fn build_match_result(
         QueryResult::NotFound => None,
     }
 }
-
-/// Output thread: receives results, serializes to stdout
-fn output_thread(
-    result_rx: Receiver<Option<WorkerMessage>>,
-    output_json: bool,
-    show_progress: bool,
-    overall_start: Instant,
-) -> ProcessingStats {
-    let mut stats = ProcessingStats::new();
-    // Track stats per worker to avoid double-counting
-    let mut worker_stats_map: std::collections::HashMap<usize, WorkerStats> =
-        std::collections::HashMap::new();
-    let _worker_counter = 0;
-
-    // Initialize progress reporter
-    let mut progress = if show_progress {
-        Some(super::stats::ProgressReporter::new())
-    } else {
-        None
-    };
-
-    while let Ok(Some(msg)) = result_rx.recv() {
-        match msg {
-            WorkerMessage::Match(result) => {
-                if output_json {
-                    let mut match_obj = json!({
-                        "timestamp": format!("{:.3}", result.timestamp),
-                        "source_file": result.source_file.display().to_string(),
-                        "line_number": result.line_number,
-                        "matched_text": result.matched_text,
-                        "input_line": result.input_line,
-                        "match_type": result.match_type,
-                    });
-
-                    if let Some(pattern_count) = result.pattern_count {
-                        match_obj["pattern_count"] = json!(pattern_count);
-                    }
-                    if let Some(data) = result.data {
-                        match_obj["data"] = data;
-                    }
-                    if let Some(prefix_len) = result.prefix_len {
-                        match_obj["prefix_len"] = json!(prefix_len);
-                    }
-                    if let Some(cidr) = result.cidr {
-                        match_obj["cidr"] = json!(cidr);
-                    }
-
-                    if let Ok(json_str) = serde_json::to_string(&match_obj) {
-                        println!("{}", json_str);
-                    }
-                }
-
-                stats.lines_with_matches += 1;
-                stats.total_bytes += result.input_line.len();
-            }
-            WorkerMessage::Stats {
-                worker_id,
-                stats: worker_stats_msg,
-            } => {
-                // Update this worker's latest stats (replaces previous)
-                worker_stats_map.insert(worker_id, worker_stats_msg);
-
-                // Aggregate all workers' current stats for progress display
-                let mut aggregate = ProcessingStats::new();
-                for stats in worker_stats_map.values() {
-                    aggregate.lines_processed += stats.lines_processed;
-                    aggregate.candidates_tested += stats.candidates_tested;
-                    aggregate.total_matches += stats.matches_found; // Library uses matches_found
-                    aggregate.lines_with_matches += stats.lines_with_matches;
-                    aggregate.total_bytes += stats.total_bytes;
-                    aggregate.ipv4_count += stats.ipv4_count;
-                    aggregate.ipv6_count += stats.ipv6_count;
-                    aggregate.domain_count += stats.domain_count;
-                    aggregate.email_count += stats.email_count;
-                }
-
-                // Show progress with aggregated stats
-                if let Some(ref mut prog) = progress {
-                    if prog.should_update() {
-                        prog.show(&aggregate, overall_start.elapsed());
-                    }
-                }
-            }
-        }
-    }
-
-    // Add final newline if progress was shown
-    if progress.is_some() {
-        eprintln!();
-    }
-
-    stats
-}
-

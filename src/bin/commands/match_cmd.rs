@@ -437,12 +437,21 @@ pub fn cmd_match(
         if let Some(ref rstats) = routing_stats {
             eprintln!();
             eprintln!("[INFO] === File Routing ===");
-            eprintln!("[INFO] Files to workers (whole): {}", rstats.files_to_workers);
-            eprintln!("[INFO] Files to readers (chunked): {}", rstats.files_to_readers);
+            eprintln!(
+                "[INFO] Files to workers (whole): {}",
+                rstats.files_to_workers
+            );
+            eprintln!(
+                "[INFO] Files to readers (chunked): {}",
+                rstats.files_to_readers
+            );
             if rstats.total_bytes() > 0 {
                 let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
-                eprintln!("[INFO] Data: {:.2} MB to workers, {:.2} MB to readers",
-                    mb(rstats.bytes_to_workers), mb(rstats.bytes_to_readers));
+                eprintln!(
+                    "[INFO] Data: {:.2} MB to workers, {:.2} MB to readers",
+                    mb(rstats.bytes_to_workers),
+                    mb(rstats.bytes_to_readers)
+                );
             }
         }
 
