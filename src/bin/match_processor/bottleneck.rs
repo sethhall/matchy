@@ -186,13 +186,18 @@ pub fn analyze_performance(
             )
         } else {
             // I/O has headroom - workers are the bottleneck
-            let recommended_threads = (config.num_workers * 2).min(physical_cores);
+            // Calculate total thread budget and recommended split
+            let current_total = config.num_readers + config.num_workers;
+            let recommended_total = (current_total * 2).min(physical_cores);
             let mut recs = vec![];
 
-            if recommended_threads > config.num_workers {
+            if recommended_total > current_total {
+                // Recommend increasing total threads (will auto-tune reader/worker split)
                 recs.push(format!(
-                    "Try --threads={} (add more workers)",
-                    recommended_threads
+                    "Try --threads={} (will auto-tune to ~{} readers, ~{} workers)",
+                    recommended_total,
+                    recommended_total / 3,       // Approximate reader count
+                    (recommended_total * 2) / 3  // Approximate worker count
                 ));
                 recs.push(format!(
                     "Current: {:.1}M queries/s per worker",
@@ -309,7 +314,7 @@ mod tests {
 
         let analysis = analyze_performance(&stats, total_time, config);
 
-        // Should detect CPU bottleneck and recommend more workers
+        // Should detect CPU bottleneck and recommend more threads
         assert!(matches!(
             analysis.bottleneck,
             Bottleneck::WorkerSaturated { .. }
@@ -317,7 +322,7 @@ mod tests {
         assert!(analysis
             .recommendations
             .iter()
-            .any(|r| r.contains("add more workers")));
+            .any(|r| r.contains("Try --threads=") || r.contains("add more")));
     }
 
     #[test]

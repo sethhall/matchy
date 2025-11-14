@@ -235,8 +235,42 @@ pub fn process_parallel(
         // Full auto-tune
         auto_tune_thread_count(&inputs, show_stats)
     } else {
-        // Explicit thread count only = 1 reader, N workers
-        (1, num_threads)
+        // Explicit thread count only - auto-tune readers based on workload
+        // Use the same logic as full auto-tune, but treat num_threads as total budget
+        let file_count = inputs.iter().filter(|p| p.to_str() != Some("-")).count();
+        let compressed_count = inputs
+            .iter()
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("gz") || e.eq_ignore_ascii_case("bz2"))
+                    .unwrap_or(false)
+            })
+            .count();
+
+        let (readers, workers) = if file_count <= 1 {
+            // Single file: minimal readers, maximize workers
+            (1, num_threads)
+        } else if compressed_count > file_count / 2 {
+            // Mostly compressed: allocate ~40% to readers
+            let readers = (num_threads * 2 / 5).max(2).min(file_count);
+            let workers = num_threads.saturating_sub(readers).max(1);
+            (readers, workers)
+        } else {
+            // Mixed/uncompressed: 1/3 readers, 2/3 workers
+            let readers = (num_threads / 3).max(1).min(file_count);
+            let workers = num_threads.saturating_sub(readers).max(1);
+            (readers, workers)
+        };
+
+        if show_stats {
+            eprintln!(
+                "[INFO] Auto-tuned readers: {} reader(s), {} worker(s) (total: {})",
+                readers, workers, num_threads
+            );
+        }
+
+        (readers, workers)
     };
     let output_json = output_format == "json";
 
