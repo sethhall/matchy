@@ -53,14 +53,14 @@ pub struct PerformanceAnalysis {
 }
 
 /// Time spent in each pipeline stage (as percentage of total)
+/// These are mutually exclusive buckets that should sum to ~100%
 #[derive(Debug)]
 pub struct StageBreakdown {
     pub read_percent: f64,
     pub decompress_percent: f64,
-    pub extraction_percent: f64,
-    pub lookup_percent: f64,
+    pub batch_prep_percent: f64,
     pub worker_idle_percent: f64,
-    pub worker_busy_percent: f64,
+    pub worker_active_percent: f64,  // Everything else (extraction, lookup, result building)
 }
 
 /// Analyze processing statistics to identify bottlenecks
@@ -75,20 +75,33 @@ pub fn analyze_performance(
     let physical_cores = gdt_cpus::num_physical_cores().unwrap_or(1);
     let total_secs = total_time.as_secs_f64();
     
-    // Calculate percentages
+    // Reader activity (sequential, single-threaded)
     let read_pct = stats.read_time.as_secs_f64() / total_secs;
     let decompress_pct = stats.decompress_time.as_secs_f64() / total_secs;
-    let extract_pct = stats.extraction_time.as_secs_f64() / total_secs;
-    let lookup_pct = stats.lookup_time.as_secs_f64() / total_secs;
+    let batch_prep_pct = stats.batch_prep_time.as_secs_f64() / total_secs;
     
-    // Worker time is cumulative across all threads, so divide by num_workers
-    let avg_worker_idle_pct = if num_workers > 0 {
+    // Worker activity (parallel, so normalize by dividing by num_workers)
+    let worker_idle_pct = if num_workers > 0 {
         (stats.worker_idle_time.as_secs_f64() / num_workers as f64) / total_secs
     } else {
         0.0
     };
-    let avg_worker_busy_pct = if num_workers > 0 {
-        (stats.worker_busy_time.as_secs_f64() / num_workers as f64) / total_secs
+    
+    // Worker active time = everything not accounted for by reader or idle
+    // This includes extraction, lookup, result building, and overhead
+    let accounted_for = read_pct + decompress_pct + batch_prep_pct + worker_idle_pct;
+    let worker_active_pct = (1.0 - accounted_for).max(0.0);
+    
+    // For bottleneck detection, use sampled extraction/lookup times
+    // These are NOT shown in the breakdown (too inaccurate) but useful for detecting
+    // whether extraction or lookup is the bottleneck within worker time
+    let extract_pct = if num_workers > 0 {
+        (stats.extraction_time.as_secs_f64() / num_workers as f64) / total_secs
+    } else {
+        0.0
+    };
+    let lookup_pct = if num_workers > 0 {
+        (stats.lookup_time.as_secs_f64() / num_workers as f64) / total_secs
     } else {
         0.0
     };
@@ -96,10 +109,9 @@ pub fn analyze_performance(
     let stage_breakdown = StageBreakdown {
         read_percent: read_pct * 100.0,
         decompress_percent: decompress_pct * 100.0,
-        extraction_percent: extract_pct * 100.0,
-        lookup_percent: lookup_pct * 100.0,
-        worker_idle_percent: avg_worker_idle_pct * 100.0,
-        worker_busy_percent: avg_worker_busy_pct * 100.0,
+        batch_prep_percent: batch_prep_pct * 100.0,
+        worker_idle_percent: worker_idle_pct * 100.0,
+        worker_active_percent: worker_active_pct * 100.0,
     };
     
     // Bottleneck detection logic
@@ -145,12 +157,12 @@ pub fn analyze_performance(
                 },
             ],
         )
-    } else if avg_worker_idle_pct > 0.5 {
+    } else if worker_idle_pct > 0.5 {
         (
-            Bottleneck::ReaderStarved { severity: avg_worker_idle_pct },
+            Bottleneck::ReaderStarved { severity: worker_idle_pct },
             format!(
                 "Workers are idle {:.1}% of the time waiting for data from reader thread.",
-                avg_worker_idle_pct * 100.0
+                worker_idle_pct * 100.0
             ),
             vec![
                 "Reduce worker threads to match available work".to_string(),
@@ -158,7 +170,7 @@ pub fn analyze_performance(
                 "This is normal for very fast matching on slow I/O".to_string(),
             ],
         )
-    } else if avg_worker_busy_pct > 0.9 && avg_worker_idle_pct < 0.1 {
+    } else if worker_active_pct > 0.9 && worker_idle_pct < 0.1 {
         let recommended_threads = (num_workers * 2).min(physical_cores);
         let mut recs = vec![];
         
@@ -174,10 +186,10 @@ pub fn analyze_performance(
         }
         
         (
-            Bottleneck::WorkerSaturated { severity: avg_worker_busy_pct },
+            Bottleneck::WorkerSaturated { severity: worker_active_pct },
             format!(
-                "Workers are busy {:.1}% of the time with minimal idle time.",
-                avg_worker_busy_pct * 100.0
+                "Workers are active {:.1}% of the time with minimal idle time.",
+                worker_active_pct * 100.0
             ),
             recs,
         )
@@ -238,10 +250,14 @@ pub fn format_stage_breakdown(breakdown: &StageBreakdown) -> String {
     output.push_str("Pipeline Stage Breakdown:\n");
     output.push_str(&format_stage_bar("Disk Read", breakdown.read_percent));
     output.push_str(&format_stage_bar("Decompression", breakdown.decompress_percent));
-    output.push_str(&format_stage_bar("Extraction", breakdown.extraction_percent));
-    output.push_str(&format_stage_bar("Lookup", breakdown.lookup_percent));
+    output.push_str(&format_stage_bar("Batch Prep", breakdown.batch_prep_percent));
     output.push_str(&format_stage_bar("Worker Idle", breakdown.worker_idle_percent));
-    output.push_str(&format_stage_bar("Worker Busy", breakdown.worker_busy_percent));
+    output.push_str(&format_stage_bar("Worker Active", breakdown.worker_active_percent));
+    
+    // Calculate and show total to verify math
+    let total = breakdown.read_percent + breakdown.decompress_percent + breakdown.batch_prep_percent
+        + breakdown.worker_idle_percent + breakdown.worker_active_percent;
+    output.push_str(&format!("  {:15} {:7.1}%\n", "Total:", total));
     
     output
 }
