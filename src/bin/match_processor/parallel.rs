@@ -594,15 +594,19 @@ pub fn create_extractor_for_db(
     let has_ip = db.has_ip_data();
     let has_strings = db.has_literal_data() || db.has_glob_data();
 
-    // Apply database-based defaults
-    let default_ipv4 = has_ip;
-    let default_ipv6 = has_ip;
-    let default_domains = has_strings;
-    let default_emails = has_strings;
-    let default_hashes = has_strings;
-    let default_bitcoin = has_strings;
-    let default_ethereum = has_strings;
-    let default_monero = has_strings;
+    // Determine defaults based on whether user specified explicit includes
+    // If user says --extractors=ip,domain (positive), ONLY enable those (exclusive mode)
+    // If user says --extractors=-crypto (negative), enable all defaults except those
+    let use_defaults = !config.has_explicit_enables();
+
+    let default_ipv4 = use_defaults && has_ip;
+    let default_ipv6 = use_defaults && has_ip;
+    let default_domains = use_defaults && has_strings;
+    let default_emails = use_defaults && has_strings;
+    let default_hashes = use_defaults && has_strings;
+    let default_bitcoin = use_defaults && has_strings;
+    let default_ethereum = use_defaults && has_strings;
+    let default_monero = use_defaults && has_strings;
 
     // Build extractor with CLI overrides
     Extractor::builder()
