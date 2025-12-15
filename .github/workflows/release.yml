@@ -99,14 +99,14 @@ jobs:
           cp target/${{ matrix.target }}/release/matchy.dll.lib native-lib/matchy-${{ matrix.target }}.dll.lib
       
       - name: Upload native library artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: native-lib-${{ matrix.target }}
           path: native-lib/*
           if-no-files-found: error
       
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.asset_name }}
           path: |
@@ -141,14 +141,14 @@ jobs:
         run: cargo build -p matchy --target wasm32-wasip1 --release --no-default-features
 
       - name: Upload WASM artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: matchy-wasm-npm
           path: matchy-wasm-npm.tar.gz
           if-no-files-found: error
 
       - name: Upload WASI artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: matchy-wasi
           path: target/wasm32-wasip1/release/matchy.wasm
@@ -179,7 +179,7 @@ jobs:
           sha256sum matchy-native-libs.tar.gz > matchy-native-libs.tar.gz.sha256
       
       - name: Upload consolidated native libraries
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: matchy-native-libs-bundle
           path: |
