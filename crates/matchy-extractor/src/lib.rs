@@ -694,120 +694,6 @@ impl Extractor {
         self.extract_ipv4_chunk_with_dots(line, matches, None);
     }
 
-    /// Old line-based IPv4 extraction (kept for reference, now unused)
-    #[allow(dead_code)]
-    fn extract_ipv4_internal_old<'a>(&self, line: &'a [u8], matches: &mut Vec<Match<'a>>) {
-        use memchr::memchr_iter;
-
-        // Track last parsed end position to skip overlapping candidates
-        let mut last_end = 0;
-
-        // Find all dots using SIMD - much faster than scanning every byte
-        for dot_pos in memchr_iter(b'.', line) {
-            // Quick reject: need space for at least "1.2.3.4" (7 chars)
-            if dot_pos == 0 || dot_pos + 6 > line.len() {
-                continue;
-            }
-
-            // Quick check: is this dot between digits? (digit.digit pattern)
-            if !line[dot_pos - 1].is_ascii_digit() || !line[dot_pos + 1].is_ascii_digit() {
-                continue;
-            }
-
-            // Look for at least 3 dots in a reasonable window around this position
-            // This is a strong signal of an IP address
-            let window_start = dot_pos.saturating_sub(3);
-            let window_end = (dot_pos + 12).min(line.len());
-            let window = &line[window_start..window_end];
-
-            // Count dots in window (we need 3 total for an IPv4)
-            let dot_count = memchr_iter(b'.', window).count();
-            if dot_count < 3 {
-                continue; // Not enough dots for a full IP
-            }
-
-            // High confidence this is near an IP - find start of number sequence
-            let mut start = dot_pos;
-            while start > 0 && (line[start - 1].is_ascii_digit() || line[start - 1] == b'.') {
-                start -= 1;
-            }
-
-            // Skip if we already parsed this area
-            if start < last_end {
-                continue;
-            }
-
-            // Find actual end (only digits and dots)
-            let mut candidate_end = start;
-            while candidate_end < line.len()
-                && (line[candidate_end].is_ascii_digit() || line[candidate_end] == b'.')
-            {
-                candidate_end += 1;
-            }
-
-            let candidate = &line[start..candidate_end];
-
-            // Early validation before expensive parsing:
-
-            // 1. Must have exactly 3 dots (4 octets)
-            let dot_count = memchr::memchr_iter(b'.', candidate).count();
-            if dot_count != 3 {
-                last_end = candidate_end;
-                continue;
-            }
-
-            // 2. Can't have consecutive dots (e.g., "26.0..26.0")
-            if candidate.windows(2).any(|w| w == b"..") {
-                last_end = candidate_end;
-                continue;
-            }
-
-            // 3. Can't start or end with dot
-            if candidate.starts_with(b".") || candidate.ends_with(b".") {
-                last_end = candidate_end;
-                continue;
-            }
-
-            // 4. Each octet must be 1-3 digits
-            // Walk through and count digits between dots
-            // Filters: "2025.36.0.72591908" (4 and 8 digit octets), "460.1.1.2" (3 digits but >255)
-            let mut octet_len = 0;
-            let mut valid_octets = true;
-            for &b in candidate {
-                if b == b'.' {
-                    // End of octet
-                    if octet_len == 0 || octet_len > 3 {
-                        valid_octets = false;
-                        break;
-                    }
-                    octet_len = 0;
-                } else {
-                    octet_len += 1;
-                }
-            }
-            // Check final octet
-            if octet_len == 0 || octet_len > 3 {
-                valid_octets = false;
-            }
-            if !valid_octets {
-                last_end = candidate_end;
-                continue;
-            }
-
-            // Now try full parse from the start of this number sequence
-            if let Some((ip, end)) = self.try_parse_ipv4(line, start) {
-                matches.push(Match {
-                    item: ExtractedItem::Ipv4(ip),
-                    span: (start, end),
-                });
-                last_end = end;
-            } else {
-                // Failed validation - skip dots in this failed region
-                last_end = candidate_end;
-            }
-        }
-    }
-
     /// Try to parse an IPv4 address starting at position
     /// Zero-allocation: parses digits directly from bytes into fixed-size array
     fn try_parse_ipv4(&self, line: &[u8], start: usize) -> Option<(Ipv4Addr, usize)> {
@@ -1456,22 +1342,13 @@ fn is_ipv6_loopback_or_linklocal(candidate: &[u8]) -> bool {
 }
 
 /// Iterator over extracted patterns in a line
-///
-/// Lazily extracts patterns as you iterate, avoiding allocation
-/// when not all matches are needed.
 pub struct ExtractIter<'a> {
-    #[allow(dead_code)]
-    extractor: &'a Extractor,
-    #[allow(dead_code)]
-    line: &'a [u8],
     matches: Vec<Match<'a>>,
     current_idx: usize,
 }
 
 impl<'a> ExtractIter<'a> {
     fn new(extractor: &'a Extractor, line: &'a [u8]) -> Self {
-        // Extract all matches upfront into a Vec
-        // We can optimize this later to be truly lazy if needed
         let mut matches = Vec::new();
 
         // Extract domains if enabled
@@ -1513,8 +1390,6 @@ impl<'a> ExtractIter<'a> {
         }
 
         Self {
-            extractor,
-            line,
             matches,
             current_idx: 0,
         }

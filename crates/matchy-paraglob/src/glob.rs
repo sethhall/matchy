@@ -13,9 +13,6 @@
 //! - `[a-z]` - Matches one character in the range (a through z)
 //! - `\x` - Escapes special character x (literal *)
 
-// Some methods aren't used yet but kept for completeness
-#![allow(dead_code)]
-
 use matchy_match_mode::MatchMode;
 use std::fmt;
 
@@ -70,10 +67,12 @@ pub(crate) enum CharClassItem {
 #[derive(Debug, Clone)]
 pub(crate) struct GlobPattern {
     /// Original pattern string
+    #[allow(dead_code)] // Used in tests via pattern() getter
     pattern: String,
     /// Parsed segments
     segments: Vec<GlobSegment>,
-    /// Match mode
+    /// Match mode (used by matches() in tests)
+    #[allow(dead_code)]
     mode: MatchMode,
 }
 
@@ -98,15 +97,7 @@ impl GlobPattern {
     }
 
     /// Creates a glob pattern from pre-parsed segments (for deserialization).
-    ///
-    /// This is an internal constructor used when loading serialized patterns.
-    /// The segments are assumed to be valid.
-    ///
-    /// # Arguments
-    ///
-    /// * `pattern` - The original pattern string
-    /// * `segments` - Pre-parsed segments
-    /// * `mode` - Case-sensitive or case-insensitive matching
+    #[allow(dead_code)] // Reserved for future deserialization
     pub(crate) fn from_segments(
         pattern: String,
         segments: Vec<GlobSegment>,
@@ -119,12 +110,12 @@ impl GlobPattern {
         }
     }
 
-    /// Returns the original pattern string.
+    #[allow(dead_code)]
     pub(crate) fn pattern(&self) -> &str {
         &self.pattern
     }
 
-    /// Returns the match mode.
+    #[allow(dead_code)]
     pub(crate) fn mode(&self) -> MatchMode {
         self.mode
     }
@@ -134,24 +125,15 @@ impl GlobPattern {
         &self.segments
     }
 
-    /// Checks if the pattern matches the given text.
+    /// Checks if the pattern matches the given text (used in tests).
+    #[allow(dead_code)]
     pub(crate) fn matches(&self, text: &str) -> bool {
-        // Limit backtracking steps to prevent OOM with pathological patterns
-        // This prevents exponential backtracking in patterns like *a*b*c*d*e*
         let mut steps_remaining = 100_000;
         self.matches_impl(text, 0, 0, &mut steps_remaining)
     }
 
-    /// Recursive matching implementation.
-    ///
-    /// This uses a backtracking algorithm to handle wildcards efficiently.
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - The text to match against
-    /// * `text_pos` - Current position in the text (byte offset)
-    /// * `seg_idx` - Current segment index in the pattern
-    /// * `steps_remaining` - Mutable counter to limit backtracking steps
+    /// Recursive matching with backtracking limit to prevent OOM.
+    #[allow(dead_code)]
     fn matches_impl(
         &self,
         text: &str,
