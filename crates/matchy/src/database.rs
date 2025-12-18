@@ -20,6 +20,8 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+#[cfg(not(target_family = "wasm"))]
 use std::time::Duration;
 
 #[cfg(not(target_family = "wasm"))]
@@ -827,6 +829,7 @@ impl Database {
         }
     }
 
+    /// Returns the current database generation (always 0 for WASM).
     #[cfg(target_family = "wasm")]
     pub fn generation(&self) -> u64 {
         0
