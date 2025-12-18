@@ -10,15 +10,13 @@ WebAssembly bindings for [matchy](https://github.com/matchylabs/matchy) - fast I
 
 ## Installation
 
-```bash
-npm install matchy-wasm
-```
-
-Or build from source:
+Build from source using [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/):
 
 ```bash
 wasm-pack build crates/matchy-wasm --target web
 ```
+
+This creates a `pkg/` directory with the WASM module and JavaScript bindings.
 
 ## Usage
 
