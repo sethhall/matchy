@@ -1,6 +1,6 @@
 //! Schema validation for yield values
 //!
-//! Validates that database yield values conform to a JSON Schema during building.
+//! Validates that database yield values conform to built-in schemas during building.
 //! This ensures data consistency and enables consumers to rely on the structure
 //! of yield values without runtime validation.
 //!
@@ -23,8 +23,7 @@
 //! validator.validate(&data)?; // Ok
 //! ```
 
-use crate::schemas::{get_schema, get_schema_info};
-use jsonschema::Validator;
+use crate::schemas::get_schema_info;
 use matchy_data_format::DataValue;
 use matchy_format::EntryValidator;
 use std::collections::HashMap;
@@ -84,27 +83,19 @@ pub enum SchemaError {
     /// Unknown schema name
     #[error("Unknown database type: '{0}'. Known types with validation: {1}")]
     UnknownSchema(String, String),
-
-    /// Failed to parse schema JSON
-    #[error("Failed to parse schema JSON: {0}")]
-    InvalidSchemaJson(#[from] serde_json::Error),
-
-    /// Failed to compile schema
-    #[error("Failed to compile JSON Schema: {0}")]
-    SchemaCompileError(String),
 }
 
-/// Validates yield values against a JSON Schema
+/// Valid threat_level enum values
+const VALID_THREAT_LEVELS: &[&str] = &["critical", "high", "medium", "low", "unknown"];
+
+/// Valid TLP enum values
+const VALID_TLP: &[&str] = &["CLEAR", "GREEN", "AMBER", "AMBER+STRICT", "RED"];
+
+/// Validates yield values against a built-in schema
 ///
-/// The validator stores the parsed schema JSON and creates a compiled validator
-/// on each validation call. This is necessary because `jsonschema::Validator`
-/// uses `Rc` internally and is not `Send + Sync`, but `EntryValidator` requires
-/// thread safety for use with `DatabaseBuilder`.
-///
-/// The schema compilation is fast enough that this approach is acceptable for
-/// build-time validation where correctness matters more than raw performance.
+/// Currently supports the ThreatDB schema for threat intelligence databases.
+/// Validation is performed directly in Rust for speed and simplicity.
 pub struct SchemaValidator {
-    schema: serde_json::Value,
     schema_name: String,
 }
 
@@ -123,45 +114,28 @@ impl SchemaValidator {
     /// * `database_type` - Name of a built-in database type (e.g., "threatdb")
     ///
     /// # Returns
-    /// A compiled validator, or an error if the type is unknown or invalid
+    /// A validator, or an error if the type is unknown
     ///
     /// # Example
     /// ```rust,ignore
     /// let validator = SchemaValidator::new("threatdb")?;
     /// ```
     pub fn new(database_type: &str) -> Result<Self, SchemaError> {
-        let schema_json = get_schema(database_type).ok_or_else(|| {
+        let schema_name = if get_schema_info(database_type).is_some() {
+            database_type.to_string()
+        } else if let Some(short_name) =
+            crate::schemas::detect_schema_from_database_type(database_type)
+        {
+            short_name.to_string()
+        } else {
             let available: Vec<_> = crate::schemas::available_schemas().collect();
-            SchemaError::UnknownSchema(database_type.to_string(), available.join(", "))
-        })?;
+            return Err(SchemaError::UnknownSchema(
+                database_type.to_string(),
+                available.join(", "),
+            ));
+        };
 
-        Self::from_json(database_type, schema_json)
-    }
-
-    /// Create a validator from raw JSON Schema
-    ///
-    /// # Arguments
-    /// * `name` - Name for error messages
-    /// * `schema_json` - Raw JSON Schema string
-    pub fn from_json(name: &str, schema_json: &str) -> Result<Self, SchemaError> {
-        let schema: serde_json::Value = serde_json::from_str(schema_json)?;
-
-        // Validate that the schema compiles successfully
-        Validator::new(&schema).map_err(|e| SchemaError::SchemaCompileError(e.to_string()))?;
-
-        Ok(Self {
-            schema,
-            schema_name: name.to_string(),
-        })
-    }
-
-    /// Create a compiled validator for this schema
-    ///
-    /// This is called internally for each validation. The jsonschema crate's
-    /// Validator is not Send+Sync, so we create it fresh each time.
-    fn create_validator(&self) -> Validator {
-        // This should never fail since we validated the schema in from_json()
-        Validator::new(&self.schema).expect("schema was validated at construction time")
+        Ok(Self { schema_name })
     }
 
     /// Get the schema name
@@ -184,25 +158,10 @@ impl SchemaValidator {
     /// # Returns
     /// Ok(()) if valid, or SchemaValidationError with details
     pub fn validate(&self, data: &HashMap<String, DataValue>) -> Result<(), SchemaValidationError> {
-        // Convert DataValue map to serde_json::Value for validation
-        let json_value = data_map_to_json(data)?;
-
-        let validator = self.create_validator();
-
-        // Run validation
-        let result = validator.validate(&json_value);
-
-        if result.is_ok() {
+        let errors = self.validate_detailed(data);
+        if errors.is_empty() {
             Ok(())
         } else {
-            let errors: Vec<ValidationErrorDetail> = validator
-                .iter_errors(&json_value)
-                .map(|err| ValidationErrorDetail {
-                    path: err.instance_path().to_string(),
-                    message: err.to_string(),
-                })
-                .collect();
-
             Err(SchemaValidationError { errors })
         }
     }
@@ -212,36 +171,219 @@ impl SchemaValidator {
         &self,
         data: &HashMap<String, DataValue>,
     ) -> Vec<ValidationErrorDetail> {
-        match data_map_to_json(data) {
-            Ok(json_value) => {
-                let validator = self.create_validator();
-                validator
-                    .iter_errors(&json_value)
-                    .map(|err| ValidationErrorDetail {
-                        path: err.instance_path().to_string(),
-                        message: err.to_string(),
-                    })
-                    .collect()
-            }
-            Err(e) => vec![ValidationErrorDetail {
-                path: String::new(),
-                message: format!("Failed to convert data: {}", e),
-            }],
-        }
+        // Currently only ThreatDB schema is supported
+        validate_threatdb(data)
     }
 }
 
-/// Convert a DataValue map to serde_json::Value for schema validation
-fn data_map_to_json(
-    data: &HashMap<String, DataValue>,
-) -> Result<serde_json::Value, SchemaValidationError> {
-    // DataValue implements Serialize, so we can use serde_json
-    serde_json::to_value(data).map_err(|e| SchemaValidationError {
-        errors: vec![ValidationErrorDetail {
+/// Hand-rolled ThreatDB schema validation
+///
+/// Validates:
+/// - Required: threat_level (enum), category (non-empty string), source (non-empty string)
+/// - Optional: confidence (integer 0-100), tlp (enum), tags (array of strings),
+///   first_seen, last_seen, description, reference, indicator_type
+/// - Additional properties are allowed
+fn validate_threatdb(data: &HashMap<String, DataValue>) -> Vec<ValidationErrorDetail> {
+    let mut errors = Vec::new();
+
+    // Required: threat_level (enum)
+    match data.get("threat_level") {
+        None => errors.push(ValidationErrorDetail {
             path: String::new(),
-            message: format!("Failed to serialize data for validation: {}", e),
-        }],
-    })
+            message: "\"threat_level\" is a required property".to_string(),
+        }),
+        Some(DataValue::String(s)) => {
+            if !VALID_THREAT_LEVELS.contains(&s.as_str()) {
+                errors.push(ValidationErrorDetail {
+                    path: "/threat_level".to_string(),
+                    message: format!(
+                        "\"{}\" is not one of [\"critical\", \"high\", \"medium\", \"low\", \"unknown\"]",
+                        s
+                    ),
+                });
+            }
+        }
+        Some(_) => {
+            errors.push(ValidationErrorDetail {
+                path: "/threat_level".to_string(),
+                message: "expected string type".to_string(),
+            });
+        }
+    }
+
+    // Required: category (non-empty string)
+    match data.get("category") {
+        None => errors.push(ValidationErrorDetail {
+            path: String::new(),
+            message: "\"category\" is a required property".to_string(),
+        }),
+        Some(DataValue::String(s)) => {
+            if s.is_empty() {
+                errors.push(ValidationErrorDetail {
+                    path: "/category".to_string(),
+                    message: "string length 0 is less than minLength 1".to_string(),
+                });
+            }
+        }
+        Some(_) => {
+            errors.push(ValidationErrorDetail {
+                path: "/category".to_string(),
+                message: "expected string type".to_string(),
+            });
+        }
+    }
+
+    // Required: source (non-empty string)
+    match data.get("source") {
+        None => errors.push(ValidationErrorDetail {
+            path: String::new(),
+            message: "\"source\" is a required property".to_string(),
+        }),
+        Some(DataValue::String(s)) => {
+            if s.is_empty() {
+                errors.push(ValidationErrorDetail {
+                    path: "/source".to_string(),
+                    message: "string length 0 is less than minLength 1".to_string(),
+                });
+            }
+        }
+        Some(_) => {
+            errors.push(ValidationErrorDetail {
+                path: "/source".to_string(),
+                message: "expected string type".to_string(),
+            });
+        }
+    }
+
+    // Optional: confidence (integer 0-100)
+    if let Some(v) = data.get("confidence") {
+        match v {
+            DataValue::Uint32(n) => {
+                if *n > 100 {
+                    errors.push(ValidationErrorDetail {
+                        path: "/confidence".to_string(),
+                        message: format!("{} is greater than the maximum of 100", n),
+                    });
+                }
+            }
+            DataValue::Int32(n) => {
+                if *n < 0 {
+                    errors.push(ValidationErrorDetail {
+                        path: "/confidence".to_string(),
+                        message: format!("{} is less than the minimum of 0", n),
+                    });
+                } else if *n > 100 {
+                    errors.push(ValidationErrorDetail {
+                        path: "/confidence".to_string(),
+                        message: format!("{} is greater than the maximum of 100", n),
+                    });
+                }
+            }
+            DataValue::Uint64(n) => {
+                if *n > 100 {
+                    errors.push(ValidationErrorDetail {
+                        path: "/confidence".to_string(),
+                        message: format!("{} is greater than the maximum of 100", n),
+                    });
+                }
+            }
+            DataValue::Uint16(n) => {
+                if *n > 100 {
+                    errors.push(ValidationErrorDetail {
+                        path: "/confidence".to_string(),
+                        message: format!("{} is greater than the maximum of 100", n),
+                    });
+                }
+            }
+            _ => {
+                errors.push(ValidationErrorDetail {
+                    path: "/confidence".to_string(),
+                    message: "expected integer type".to_string(),
+                });
+            }
+        }
+    }
+
+    // Optional: tlp (enum)
+    if let Some(v) = data.get("tlp") {
+        match v {
+            DataValue::String(s) => {
+                if !VALID_TLP.contains(&s.as_str()) {
+                    errors.push(ValidationErrorDetail {
+                        path: "/tlp".to_string(),
+                        message: format!(
+                            "\"{}\" is not one of [\"CLEAR\", \"GREEN\", \"AMBER\", \"AMBER+STRICT\", \"RED\"]",
+                            s
+                        ),
+                    });
+                }
+            }
+            _ => {
+                errors.push(ValidationErrorDetail {
+                    path: "/tlp".to_string(),
+                    message: "expected string type".to_string(),
+                });
+            }
+        }
+    }
+
+    // Optional: tags (array of strings)
+    if let Some(v) = data.get("tags") {
+        match v {
+            DataValue::Array(arr) => {
+                for (i, item) in arr.iter().enumerate() {
+                    if !matches!(item, DataValue::String(_)) {
+                        errors.push(ValidationErrorDetail {
+                            path: format!("/tags/{}", i),
+                            message: "expected string type".to_string(),
+                        });
+                    }
+                }
+            }
+            _ => {
+                errors.push(ValidationErrorDetail {
+                    path: "/tags".to_string(),
+                    message: "expected array type".to_string(),
+                });
+            }
+        }
+    }
+
+    // Optional: indicator_type (non-empty string if present)
+    if let Some(v) = data.get("indicator_type") {
+        match v {
+            DataValue::String(s) => {
+                if s.is_empty() {
+                    errors.push(ValidationErrorDetail {
+                        path: "/indicator_type".to_string(),
+                        message: "string length 0 is less than minLength 1".to_string(),
+                    });
+                }
+            }
+            _ => {
+                errors.push(ValidationErrorDetail {
+                    path: "/indicator_type".to_string(),
+                    message: "expected string type".to_string(),
+                });
+            }
+        }
+    }
+
+    // Optional string fields (no validation beyond type): description, first_seen, last_seen, reference
+    for field in &["description", "first_seen", "last_seen", "reference"] {
+        if let Some(v) = data.get(*field) {
+            if !matches!(v, DataValue::String(_)) {
+                errors.push(ValidationErrorDetail {
+                    path: format!("/{}", field),
+                    message: "expected string type".to_string(),
+                });
+            }
+        }
+    }
+
+    // Additional properties are allowed - no validation needed
+
+    errors
 }
 
 /// Implement EntryValidator trait for SchemaValidator
@@ -290,6 +432,13 @@ mod tests {
     #[test]
     fn test_validator_creation() {
         let validator = SchemaValidator::new("threatdb").expect("should create validator");
+        assert_eq!(validator.schema_name(), "threatdb");
+        assert_eq!(validator.database_type(), Some("ThreatDB-v1"));
+    }
+
+    #[test]
+    fn test_validator_creation_from_canonical_name() {
+        let validator = SchemaValidator::new("ThreatDB-v1").expect("should create validator");
         assert_eq!(validator.schema_name(), "threatdb");
         assert_eq!(validator.database_type(), Some("ThreatDB-v1"));
     }
@@ -359,7 +508,7 @@ mod tests {
         let err = result.unwrap_err();
         let error_text = format!("{}", err);
         assert!(
-            error_text.contains("threat_level") || error_text.contains("enum"),
+            error_text.contains("threat_level"),
             "Error should mention invalid enum: {}",
             error_text
         );
@@ -412,7 +561,7 @@ mod tests {
     fn test_additional_properties_allowed() {
         let validator = SchemaValidator::new("threatdb").unwrap();
         let mut data = valid_threatdb_data();
-        // Schema has additionalProperties: true
+        // Additional properties are allowed
         data.insert(
             "custom_field".to_string(),
             DataValue::String("custom value".to_string()),

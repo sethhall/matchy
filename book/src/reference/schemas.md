@@ -1,6 +1,6 @@
 # Schemas Reference
 
-Built-in JSON schemas for validating database yield values.
+Built-in schemas for validating database yield values.
 
 ## Overview
 
@@ -243,23 +243,12 @@ assert!(result.is_err());
 
 ```rust
 use matchy::schemas::{
-    get_schema,
     get_schema_info,
     schema_database_type,
     detect_schema_from_database_type,
     available_schemas,
     is_known_database_type,
 };
-```
-
-#### `get_schema(name: &str) -> Option<&'static str>`
-
-Returns the raw JSON schema string for a schema name or database_type.
-
-```rust
-let schema_json = get_schema("threatdb").unwrap();
-// or
-let schema_json = get_schema("ThreatDB-v1").unwrap();
 ```
 
 #### `get_schema_info(name: &str) -> Option<&'static SchemaInfo>`
@@ -316,8 +305,6 @@ pub struct SchemaInfo {
     pub name: &'static str,
     /// Database type string set in metadata (e.g., "ThreatDB-v1")
     pub database_type: &'static str,
-    /// Raw JSON Schema content
-    pub schema_json: &'static str,
     /// Human-readable description
     pub description: &'static str,
 }

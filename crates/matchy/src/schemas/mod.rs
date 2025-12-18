@@ -30,12 +30,6 @@
 //! }
 //! ```
 
-/// ThreatDB v1 schema - threat intelligence yield values
-///
-/// This schema defines the structure for threat intelligence databases,
-/// compatible with MISP and STIX concepts.
-pub const THREATDB_V1_SCHEMA: &str = include_str!("../../../../schemas/threatdb-v1.schema.json");
-
 /// Schema name for ThreatDB
 pub const THREATDB_NAME: &str = "threatdb";
 
@@ -49,8 +43,6 @@ pub struct SchemaInfo {
     pub name: &'static str,
     /// Database type string set in metadata (e.g., "ThreatDB-v1")
     pub database_type: &'static str,
-    /// Raw JSON Schema content
-    pub schema_json: &'static str,
     /// Human-readable description
     pub description: &'static str,
 }
@@ -59,26 +51,8 @@ pub struct SchemaInfo {
 pub static SCHEMAS: &[SchemaInfo] = &[SchemaInfo {
     name: THREATDB_NAME,
     database_type: THREATDB_DATABASE_TYPE,
-    schema_json: THREATDB_V1_SCHEMA,
     description: "Threat intelligence database with MISP/STIX-compatible fields",
 }];
-
-/// Get a schema by name
-///
-/// Accepts either the short name (e.g., "threatdb") or the canonical database_type
-/// (e.g., "ThreatDB-v1").
-///
-/// # Arguments
-/// * `name` - Schema name or database_type
-///
-/// # Returns
-/// The raw JSON schema string, or None if not found
-pub fn get_schema(name: &str) -> Option<&'static str> {
-    SCHEMAS
-        .iter()
-        .find(|s| s.name == name || s.database_type == name)
-        .map(|s| s.schema_json)
-}
 
 /// Get full schema info by name
 ///
@@ -145,15 +119,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_threatdb_schema_embedded() {
-        let schema = get_schema("threatdb").expect("threatdb schema should exist");
-        assert!(schema.contains("ThreatDB Schema"));
-        assert!(schema.contains("threat_level"));
-        assert!(schema.contains("category"));
-        assert!(schema.contains("source"));
-    }
-
-    #[test]
     fn test_schema_database_type() {
         assert_eq!(schema_database_type("threatdb"), Some("ThreatDB-v1"));
         assert_eq!(schema_database_type("nonexistent"), None);
@@ -166,13 +131,6 @@ mod tests {
             Some("threatdb")
         );
         assert_eq!(detect_schema_from_database_type("Unknown-Type"), None);
-    }
-
-    #[test]
-    fn test_get_schema_by_database_type() {
-        // Should be able to get schema by canonical database_type
-        let schema = get_schema("ThreatDB-v1").expect("should find by database_type");
-        assert!(schema.contains("ThreatDB Schema"));
     }
 
     #[test]
@@ -200,13 +158,5 @@ mod tests {
         assert_eq!(info.name, "threatdb");
         assert_eq!(info.database_type, "ThreatDB-v1");
         assert!(info.description.contains("Threat intelligence"));
-    }
-
-    #[test]
-    fn test_schema_is_valid_json() {
-        let schema = get_schema("threatdb").unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_str(schema).expect("schema should be valid JSON");
-        assert_eq!(parsed["title"], "ThreatDB Schema v1");
     }
 }
