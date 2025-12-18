@@ -472,6 +472,7 @@ mod tests {
     fn test_live_database_corrupt_file_keeps_old_version() {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.mxy");
+        let new_path = temp_dir.path().join("test.mxy.new");
 
         fs::write(&db_path, build_test_db("good.com")).unwrap();
 
@@ -494,7 +495,8 @@ mod tests {
 
         thread::sleep(Duration::from_millis(100));
 
-        fs::write(&db_path, b"this is not a valid database file").unwrap();
+        fs::write(&new_path, b"this is not a valid database file").unwrap();
+        fs::rename(&new_path, &db_path).unwrap();
 
         thread::sleep(Duration::from_millis(200));
 
