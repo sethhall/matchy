@@ -33,7 +33,9 @@ use memmap2::Mmap;
 use std::fs::File;
 
 #[cfg(not(target_family = "wasm"))]
-pub use crate::updater::{FallbackCallback, FallbackEvent, ReloadCallback, ReloadEvent, ReloadSource};
+pub use crate::updater::{
+    FallbackCallback, FallbackEvent, ReloadCallback, ReloadEvent, ReloadSource,
+};
 
 // Per-database query cache type
 // Each database has its own cache, stored as thread-local for lock-free access
