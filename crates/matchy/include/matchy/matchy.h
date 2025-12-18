@@ -376,6 +376,28 @@ typedef struct matchy_open_options_t {
    */
   bool auto_reload;
   /*
+   Enable automatic updates from database's embedded URL (requires auto-update feature)
+   false = no network updates (default), true = check for updates periodically
+   Default: false
+
+   When enabled, periodically checks the database's embedded update URL for new versions
+   using HTTP conditional GET (ETag). Database must have an update URL embedded in metadata.
+   Updates are downloaded to cache_dir (or system default), not the original file.
+   */
+  bool auto_update;
+  /*
+   How often to check for remote updates, in seconds
+   Only used when auto_update is true
+   Default: 3600 (1 hour)
+   */
+  uint32_t update_interval_secs;
+  /*
+   Cache directory for downloaded updates (optional)
+   If NULL, uses system default (~/.cache/matchy/ on Unix)
+   Default: NULL
+   */
+  const char *cache_dir;
+  /*
    Reload callback function (optional)
    Called when database reload completes (success or failure)
    Set to NULL to disable callback
@@ -685,6 +707,31 @@ int32_t matchy_builder_add(struct matchy_builder_t *builder, const char *key, co
  * `description` must be a valid null-terminated C string
  */
 int32_t matchy_builder_set_description(struct matchy_builder_t *builder, const char *description);
+
+/*
+ Set the update URL for the database
+
+ When set, this URL is stored in the database metadata. Applications using
+ auto_update will fetch updates from this URL.
+
+ # Parameters
+ * `builder` - Builder handle (must not be NULL)
+ * `url` - Update URL (null-terminated C string, must not be NULL)
+
+ # Returns
+ * MATCHY_SUCCESS (0) on success
+ * MATCHY_ERROR_INVALID_PARAM if parameters invalid
+
+ # Safety
+ * `builder` must be a valid pointer from matchy_builder_new
+ * `url` must be a valid null-terminated C string
+
+ # Example
+ ```c
+ matchy_builder_set_update_url(builder, "https://example.com/threats.mxy");
+ ```
+ */
+int32_t matchy_builder_set_update_url(struct matchy_builder_t *builder, const char *url);
 
 /*
  Build and save database to file
@@ -1289,6 +1336,54 @@ int32_t matchy_get_entry_data_list(const struct matchy_entry_s *entry, struct ma
  * Must not be freed twice
  */
 void matchy_free_entry_data_list(struct matchy_entry_data_list_t *list);
+
+/*
+ Get the update URL from database metadata
+
+ Returns the update URL stored in the database metadata (if any).
+ This is set during database build with matchy_builder_set_update_url().
+
+ # Parameters
+ * `db` - Database handle (must not be NULL)
+
+ # Returns
+ * URL string (caller must free with matchy_free_string)
+ * NULL if no update URL is set or db is NULL
+
+ # Safety
+ * `db` must be a valid pointer from matchy_open
+
+ # Example
+ ```c
+ char *url = matchy_get_update_url(db);
+ if (url) {
+     printf("Update URL: %s\n", url);
+     matchy_free_string(url);
+ }
+ ```
+ */
+char *matchy_get_update_url(const struct matchy_t *db);
+
+/*
+ Check if auto-update feature is available
+
+ Returns whether the library was compiled with auto-update support.
+ When auto-update is available, you can set auto_update=true in
+ matchy_open_options_t to enable automatic background updates.
+
+ # Returns
+ * true if auto-update feature is compiled in
+ * false if not available (updates from URL will not work)
+
+ # Example
+ ```c
+ if (matchy_has_auto_update()) {
+     opts.auto_update = true;
+     opts.update_interval_secs = 3600;  // Check hourly
+ }
+ ```
+ */
+bool matchy_has_auto_update(void);
 
 /*
  Convert query result data to JSON string

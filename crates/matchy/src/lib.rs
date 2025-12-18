@@ -134,12 +134,9 @@ pub mod simd_utils;
 /// - **Strict**: Deep graph analysis, cycles, redundancy checks
 pub mod validation;
 
-/// Auto-reloading database wrapper (native platforms only)
-///
-/// Provides automatic file watching and hot-reload capability for production
-/// deployments where database files may be updated while the application runs.
+/// Live database with automatic file watching and optional network updates (native only)
 #[cfg(not(target_family = "wasm"))]
-pub mod watching_database;
+pub mod updater;
 
 // Public C API (native platforms only - FFI not available on WASM)
 #[cfg(not(target_family = "wasm"))]
@@ -152,6 +149,9 @@ pub use crate::database::{
     Database, DatabaseError, DatabaseOpener, DatabaseOptions, DatabaseStats, QueryResult,
 };
 
+#[cfg(not(target_family = "wasm"))]
+pub use crate::database::{ReloadEvent, ReloadSource};
+
 /// Data value type for database entries
 pub use matchy_data_format::DataValue;
 
@@ -162,13 +162,6 @@ pub use matchy_match_mode::MatchMode;
 
 // Re-export component error types for advanced users
 pub use crate::error::{FormatError, ParaglobError};
-
-/// Auto-reloading database wrapper (native platforms only)
-///
-/// Provides [`WatchingDatabase`] which wraps a [`Database`] and automatically
-/// reloads it when the file changes. Available on all platforms except WASM.
-#[cfg(not(target_family = "wasm"))]
-pub use crate::watching_database::{ReloadCallback, ReloadEvent, WatchingDatabase};
 
 /// Unified database builder for creating databases with IP addresses and patterns
 ///

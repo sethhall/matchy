@@ -328,12 +328,12 @@ For zero-downtime updates with automatic reloading:
 ```rust
 // Rust API - automatic reload with ~1-2ns overhead per query
 let db = Database::from("threats.mxy")
-    .auto_reload()  // Enable automatic reloading
+    .watch()  // Enable automatic reloading
     .open()?;
 
 // Optional: Get notified when reloads happen
 let db = Database::from("threats.mxy")
-    .auto_reload()
+    .watch()
     .on_reload(|event| {
         if event.success {
             println!("Database reloaded: generation {}", event.generation);

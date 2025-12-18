@@ -184,6 +184,10 @@ pub fn cmd_match(
     cache_size: usize,
     extractors_arg: Option<String>,
     debug_routing: bool,
+    watch: bool,
+    #[cfg(feature = "auto-update")] auto_update: bool,
+    #[cfg(feature = "auto-update")] update_interval: u64,
+    #[cfg(feature = "auto-update")] cache_dir: Option<PathBuf>,
 ) -> Result<()> {
     use matchy::extractor::Extractor;
     use matchy::Database;
@@ -245,6 +249,21 @@ pub fn cmd_match(
         } else {
             opener = opener.cache_capacity(cache_size);
         }
+
+        if watch {
+            opener = opener.watch();
+        }
+
+        #[cfg(feature = "auto-update")]
+        if auto_update {
+            opener = opener
+                .auto_update()
+                .update_interval(std::time::Duration::from_secs(update_interval));
+            if let Some(ref dir) = cache_dir {
+                opener = opener.cache_dir(dir);
+            }
+        }
+
         opener
             .open()
             .with_context(|| format!("Failed to load database: {}", database.display()))?

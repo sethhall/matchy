@@ -45,6 +45,7 @@ pub fn cmd_build(
     verbose: bool,
     debug: bool,
     case_insensitive: bool,
+    update_url: Option<String>,
 ) -> Result<()> {
     let match_mode = if case_insensitive {
         MatchMode::CaseInsensitive
@@ -97,6 +98,13 @@ pub fn cmd_build(
 
     if let Some(desc) = description {
         builder = builder.with_description(desc_lang, desc);
+    }
+
+    if let Some(ref url) = update_url {
+        builder = builder.with_update_url(url);
+        if verbose || debug {
+            println!("Update URL: {}", url);
+        }
     }
 
     match format.as_str() {

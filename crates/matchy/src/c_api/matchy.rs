@@ -3,7 +3,7 @@
 //! This module provides a modern, clean C API for building and querying databases
 //! containing IP addresses and patterns. This is the primary public API.
 
-use crate::database::{Database, DatabaseError, DatabaseStatsSnapshot, QueryResult};
+use crate::database::{Database, QueryResult, ReloadEvent};
 use crate::schema_validation::SchemaValidator;
 use crate::schemas::{get_schema_info, is_known_database_type};
 use crate::DatabaseBuilder;
@@ -15,8 +15,36 @@ use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
 
-#[cfg(not(target_family = "wasm"))]
-use crate::watching_database::{ReloadEvent, WatchingDatabase};
+struct CCallbackAdapter {
+    callback: unsafe extern "C" fn(event: *const matchy_reload_event_t, user_data: *mut c_void),
+    user_data: *mut c_void,
+}
+
+unsafe impl Send for CCallbackAdapter {}
+unsafe impl Sync for CCallbackAdapter {}
+
+impl CCallbackAdapter {
+    fn invoke(&self, event: &ReloadEvent) {
+        let path_cstring =
+            std::ffi::CString::new(event.path.to_string_lossy().as_ref()).unwrap_or_default();
+        let error_cstring = event
+            .error
+            .as_ref()
+            .and_then(|e| std::ffi::CString::new(e.as_str()).ok());
+
+        let c_event = matchy_reload_event_t {
+            path: path_cstring.as_ptr(),
+            success: event.success,
+            error: error_cstring
+                .as_ref()
+                .map(|s| s.as_ptr())
+                .unwrap_or(ptr::null()),
+            generation: event.generation,
+        };
+
+        unsafe { (self.callback)(&c_event, self.user_data) };
+    }
+}
 
 // ============================================================================
 // ERROR CODES
@@ -80,125 +108,8 @@ struct MatchyBuilderInternal {
     validator: Option<SchemaValidator>,
 }
 
-/// Internal database variant - either static or watching
-enum MatchyDatabaseVariant {
-    /// Static database (no auto-reload)
-    /// Boxed to reduce enum size disparity (clippy::large_enum_variant)
-    Static(Box<Database>),
-    /// Watching database with auto-reload (not available on WASM)
-    #[cfg(not(target_family = "wasm"))]
-    Watching(WatchingDatabase),
-}
-
-impl MatchyDatabaseVariant {
-    fn lookup(&self, query: &str) -> Result<Option<QueryResult>, DatabaseError> {
-        match self {
-            MatchyDatabaseVariant::Static(db) => db.as_ref().lookup(query),
-            #[cfg(not(target_family = "wasm"))]
-            MatchyDatabaseVariant::Watching(db) => db.lookup(query),
-        }
-    }
-
-    fn stats(&self) -> DatabaseStatsSnapshot {
-        match self {
-            MatchyDatabaseVariant::Static(db) => db.as_ref().stats(),
-            #[cfg(not(target_family = "wasm"))]
-            MatchyDatabaseVariant::Watching(db) => db.snapshot().stats(),
-        }
-    }
-
-    fn clear_cache(&self) {
-        match self {
-            MatchyDatabaseVariant::Static(db) => db.as_ref().clear_cache(),
-            #[cfg(not(target_family = "wasm"))]
-            MatchyDatabaseVariant::Watching(db) => db.snapshot().clear_cache(),
-        }
-    }
-
-    fn format(&self) -> &'static str {
-        match self {
-            MatchyDatabaseVariant::Static(db) => {
-                // Map to static str (db.format() returns one of these static strings)
-                match db.as_ref().format() {
-                    "IP database" => "IP database",
-                    "Pattern database" => "Pattern database",
-                    "Combined IP+Pattern database" => "Combined IP+Pattern database",
-                    _ => "Unknown format",
-                }
-            }
-            #[cfg(not(target_family = "wasm"))]
-            MatchyDatabaseVariant::Watching(db) => {
-                let snapshot = db.snapshot();
-                // Map to static str (format() returns one of these strings)
-                match snapshot.format() {
-                    "IP database" => "IP database",
-                    "Pattern database" => "Pattern database",
-                    "Combined IP+Pattern database" => "Combined IP+Pattern database",
-                    _ => "Unknown format",
-                }
-            }
-        }
-    }
-
-    fn has_ip_data(&self) -> bool {
-        match self {
-            MatchyDatabaseVariant::Static(db) => db.as_ref().has_ip_data(),
-            #[cfg(not(target_family = "wasm"))]
-            MatchyDatabaseVariant::Watching(db) => db.snapshot().has_ip_data(),
-        }
-    }
-
-    fn has_string_data(&self) -> bool {
-        match self {
-            MatchyDatabaseVariant::Static(db) => db.as_ref().has_string_data(),
-            #[cfg(not(target_family = "wasm"))]
-            MatchyDatabaseVariant::Watching(db) => db.snapshot().has_string_data(),
-        }
-    }
-
-    fn has_literal_data(&self) -> bool {
-        match self {
-            MatchyDatabaseVariant::Static(db) => db.as_ref().has_literal_data(),
-            #[cfg(not(target_family = "wasm"))]
-            MatchyDatabaseVariant::Watching(db) => db.snapshot().has_literal_data(),
-        }
-    }
-
-    fn has_glob_data(&self) -> bool {
-        match self {
-            MatchyDatabaseVariant::Static(db) => db.as_ref().has_glob_data(),
-            #[cfg(not(target_family = "wasm"))]
-            MatchyDatabaseVariant::Watching(db) => db.snapshot().has_glob_data(),
-        }
-    }
-
-    fn metadata(&self) -> Option<DataValue> {
-        match self {
-            MatchyDatabaseVariant::Static(db) => db.as_ref().metadata(),
-            #[cfg(not(target_family = "wasm"))]
-            MatchyDatabaseVariant::Watching(db) => db.snapshot().metadata(),
-        }
-    }
-
-    fn get_pattern_string(&self, pattern_id: u32) -> Option<String> {
-        match self {
-            MatchyDatabaseVariant::Static(db) => db.as_ref().get_pattern_string(pattern_id),
-            #[cfg(not(target_family = "wasm"))]
-            MatchyDatabaseVariant::Watching(db) => db.snapshot().get_pattern_string(pattern_id),
-        }
-    }
-
-    fn pattern_count(&self) -> usize {
-        match self {
-            MatchyDatabaseVariant::Static(db) => db.as_ref().pattern_count(),
-            #[cfg(not(target_family = "wasm"))]
-            MatchyDatabaseVariant::Watching(db) => db.snapshot().pattern_count(),
-        }
-    }
-}
-
 struct MatchyInternal {
-    database: MatchyDatabaseVariant,
+    database: Database,
 }
 
 // Conversion helpers for opaque types
@@ -487,6 +398,51 @@ pub unsafe extern "C" fn matchy_builder_set_description(
     MATCHY_SUCCESS
 }
 
+/// Set the update URL for the database
+///
+/// When set, this URL is stored in the database metadata. Applications using
+/// auto_update will fetch updates from this URL.
+///
+/// # Parameters
+/// * `builder` - Builder handle (must not be NULL)
+/// * `url` - Update URL (null-terminated C string, must not be NULL)
+///
+/// # Returns
+/// * MATCHY_SUCCESS (0) on success
+/// * MATCHY_ERROR_INVALID_PARAM if parameters invalid
+///
+/// # Safety
+/// * `builder` must be a valid pointer from matchy_builder_new
+/// * `url` must be a valid null-terminated C string
+///
+/// # Example
+/// ```c
+/// matchy_builder_set_update_url(builder, "https://example.com/threats.mxy");
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_builder_set_update_url(
+    builder: *mut matchy_builder_t,
+    url: *const c_char,
+) -> i32 {
+    if builder.is_null() || url.is_null() {
+        return MATCHY_ERROR_INVALID_PARAM;
+    }
+
+    let url_str = match CStr::from_ptr(url).to_str() {
+        Ok(s) => s,
+        Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+    };
+
+    let internal = matchy_builder_t::as_internal_mut(builder);
+    let old_builder = std::mem::replace(
+        &mut internal.builder,
+        DatabaseBuilder::new(MatchMode::CaseSensitive),
+    );
+    internal.builder = old_builder.with_update_url(url_str);
+
+    MATCHY_SUCCESS
+}
+
 /// Build and save database to file
 ///
 /// # Parameters
@@ -692,6 +648,25 @@ pub struct matchy_open_options_t {
     /// latest version. Adds ~10-20ns overhead per query due to read lock.
     pub auto_reload: bool,
 
+    /// Enable automatic updates from database's embedded URL (requires auto-update feature)
+    /// false = no network updates (default), true = check for updates periodically
+    /// Default: false
+    ///
+    /// When enabled, periodically checks the database's embedded update URL for new versions
+    /// using HTTP conditional GET (ETag). Database must have an update URL embedded in metadata.
+    /// Updates are downloaded to cache_dir (or system default), not the original file.
+    pub auto_update: bool,
+
+    /// How often to check for remote updates, in seconds
+    /// Only used when auto_update is true
+    /// Default: 3600 (1 hour)
+    pub update_interval_secs: u32,
+
+    /// Cache directory for downloaded updates (optional)
+    /// If NULL, uses system default (~/.cache/matchy/ on Unix)
+    /// Default: NULL
+    pub cache_dir: *const c_char,
+
     /// Reload callback function (optional)
     /// Called when database reload completes (success or failure)
     /// Set to NULL to disable callback
@@ -709,7 +684,10 @@ impl Default for matchy_open_options_t {
         Self {
             cache_capacity: 10000,
             auto_reload: false,
-            reload_callback: None, // None represents NULL function pointer
+            auto_update: false,
+            update_interval_secs: 3600,
+            cache_dir: ptr::null(),
+            reload_callback: None,
             reload_callback_user_data: ptr::null_mut(),
         }
     }
@@ -793,13 +771,6 @@ pub unsafe extern "C" fn matchy_open_with_options(
 
     let opts = &*options;
 
-    // Use WatchingDatabase if auto_reload is enabled (native platforms only)
-    #[cfg(not(target_family = "wasm"))]
-    if opts.auto_reload {
-        return open_watching_database(path, opts);
-    }
-
-    // Fall back to static Database (or always on WASM)
     let mut opener = Database::from(path);
 
     if opts.cache_capacity == 0 {
@@ -808,65 +779,38 @@ pub unsafe extern "C" fn matchy_open_with_options(
         opener = opener.cache_capacity(opts.cache_capacity as usize);
     }
 
-    match opener.open() {
-        Ok(db) => {
-            let internal = Box::new(MatchyInternal {
-                database: MatchyDatabaseVariant::Static(Box::new(db)),
-            });
-            matchy_t::from_internal(internal)
-        }
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-/// Helper to open a WatchingDatabase
-#[cfg(not(target_family = "wasm"))]
-unsafe fn open_watching_database(path: &str, opts: &matchy_open_options_t) -> *mut matchy_t {
-    let mut opener = WatchingDatabase::from(path);
-
-    if opts.cache_capacity == 0 {
-        opener = opener.no_cache();
-    } else {
-        opener = opener.cache_capacity(opts.cache_capacity as usize);
+    if opts.auto_reload {
+        opener = opener.watch();
     }
 
-    // Set up reload callback if provided
-    if let Some(callback_fn) = opts.reload_callback {
-        // Safety: We trust that the C callback is thread-safe (documented requirement)
-        // Cast pointer to usize for Send+Sync (usize is Copy and thread-safe)
-        let user_data = opts.reload_callback_user_data as usize;
-        opener = opener.on_reload(move |event: ReloadEvent| {
-            // Convert Rust ReloadEvent to C matchy_reload_event_t
-            let c_path = std::ffi::CString::new(event.path.to_string_lossy().as_ref())
-                .unwrap_or_else(|_| std::ffi::CString::new("<invalid path>").unwrap());
+    #[cfg(feature = "auto-update")]
+    if opts.auto_update {
+        opener = opener
+            .auto_update()
+            .update_interval(std::time::Duration::from_secs(
+                opts.update_interval_secs as u64,
+            ));
 
-            let c_error = event.error.as_ref().map(|e| {
-                std::ffi::CString::new(e.as_str())
-                    .unwrap_or_else(|_| std::ffi::CString::new("<invalid error>").unwrap())
-            });
-
-            let c_event = matchy_reload_event_t {
-                path: c_path.as_ptr(),
-                success: event.success,
-                error: c_error.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
-                generation: event.generation,
-            };
-
-            // Call C callback
-            // Safety: callback came from C and must be thread-safe (documented requirement)
-            unsafe {
-                callback_fn(&c_event as *const _, user_data as *mut c_void);
+        if !opts.cache_dir.is_null() {
+            if let Ok(dir) = CStr::from_ptr(opts.cache_dir).to_str() {
+                opener = opener.cache_dir(dir);
             }
+        }
+    }
 
-            // c_path and c_error dropped here, so C callback must not retain pointers
+    if let Some(callback) = opts.reload_callback {
+        let adapter = CCallbackAdapter {
+            callback,
+            user_data: opts.reload_callback_user_data,
+        };
+        opener = opener.on_reload(move |event: ReloadEvent| {
+            adapter.invoke(&event);
         });
     }
 
     match opener.open() {
         Ok(db) => {
-            let internal = Box::new(MatchyInternal {
-                database: MatchyDatabaseVariant::Watching(db),
-            });
+            let internal = Box::new(MatchyInternal { database: db });
             matchy_t::from_internal(internal)
         }
         Err(_) => ptr::null_mut(),
@@ -929,9 +873,7 @@ pub unsafe extern "C" fn matchy_open_buffer(buffer: *const u8, size: usize) -> *
     let slice = slice::from_raw_parts(buffer, size);
     match Database::from_bytes(slice.to_vec()) {
         Ok(db) => {
-            let internal = Box::new(MatchyInternal {
-                database: MatchyDatabaseVariant::Static(Box::new(db)),
-            });
+            let internal = Box::new(MatchyInternal { database: db });
             matchy_t::from_internal(internal)
         }
         Err(_) => ptr::null_mut(),
@@ -1978,6 +1920,74 @@ pub unsafe extern "C" fn matchy_free_entry_data_list(list: *mut matchy_entry_dat
 // ============================================================================
 // CONVENIENCE FUNCTIONS
 // ============================================================================
+
+/// Get the update URL from database metadata
+///
+/// Returns the update URL stored in the database metadata (if any).
+/// This is set during database build with matchy_builder_set_update_url().
+///
+/// # Parameters
+/// * `db` - Database handle (must not be NULL)
+///
+/// # Returns
+/// * URL string (caller must free with matchy_free_string)
+/// * NULL if no update URL is set or db is NULL
+///
+/// # Safety
+/// * `db` must be a valid pointer from matchy_open
+///
+/// # Example
+/// ```c
+/// char *url = matchy_get_update_url(db);
+/// if (url) {
+///     printf("Update URL: %s\n", url);
+///     matchy_free_string(url);
+/// }
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn matchy_get_update_url(db: *const matchy_t) -> *mut c_char {
+    if db.is_null() {
+        return ptr::null_mut();
+    }
+
+    let internal = matchy_t::as_internal(db);
+    match internal.database.update_url() {
+        Some(url) => match CString::new(url) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null_mut(),
+        },
+        None => ptr::null_mut(),
+    }
+}
+
+/// Check if auto-update feature is available
+///
+/// Returns whether the library was compiled with auto-update support.
+/// When auto-update is available, you can set auto_update=true in
+/// matchy_open_options_t to enable automatic background updates.
+///
+/// # Returns
+/// * true if auto-update feature is compiled in
+/// * false if not available (updates from URL will not work)
+///
+/// # Example
+/// ```c
+/// if (matchy_has_auto_update()) {
+///     opts.auto_update = true;
+///     opts.update_interval_secs = 3600;  // Check hourly
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn matchy_has_auto_update() -> bool {
+    #[cfg(feature = "auto-update")]
+    {
+        true
+    }
+    #[cfg(not(feature = "auto-update"))]
+    {
+        false
+    }
+}
 
 /// Convert query result data to JSON string
 ///

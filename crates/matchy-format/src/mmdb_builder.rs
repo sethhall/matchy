@@ -41,23 +41,17 @@ struct EntryRef {
 
 /// Unified database builder
 pub struct DatabaseBuilder {
-    /// Lightweight entry references (key + offset only)
     entries: Vec<EntryRef>,
-    /// Data encoder for streaming data encoding
     data_encoder: DataEncoder,
-    /// Deduplication cache (data hash -> offset)
     data_cache: HashMap<u64, u32>,
     match_mode: MatchMode,
-    /// Optional custom database type name
     database_type: Option<String>,
-    /// Optional custom description (language -> text)
     description: HashMap<String, String>,
-    /// Optional entry validator for schema validation
     validator: Option<Box<dyn EntryValidator>>,
+    update_url: Option<String>,
 }
 
 impl DatabaseBuilder {
-    /// Create a new builder
     pub fn new(match_mode: MatchMode) -> Self {
         Self {
             entries: Vec::new(),
@@ -67,6 +61,7 @@ impl DatabaseBuilder {
             database_type: None,
             description: HashMap::new(),
             validator: None,
+            update_url: None,
         }
     }
 
@@ -111,27 +106,26 @@ impl DatabaseBuilder {
     }
 
     /// Set an entry validator for schema validation
-    ///
-    /// When a validator is set, all entries added via `add_entry()`, `add_ip()`,
-    /// `add_literal()`, or `add_glob()` will be validated before insertion.
-    /// If validation fails, the add method will return an error.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// use matchy_format::{DatabaseBuilder, EntryValidator};
-    /// use matchy_match_mode::MatchMode;
-    ///
-    /// // Assuming you have a validator that implements EntryValidator
-    /// let validator: Box<dyn EntryValidator> = create_my_validator();
-    ///
-    /// let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive)
-    ///     .with_validator(validator);
-    ///
-    /// // Entries will be validated before insertion
-    /// builder.add_entry("1.2.3.4", data)?;
-    /// ```
     pub fn with_validator(mut self, validator: Box<dyn EntryValidator>) -> Self {
         self.validator = Some(validator);
+        self
+    }
+
+    /// Set the URL where updates to this database can be downloaded
+    ///
+    /// When set, this URL is stored in the database metadata. Applications can use
+    /// `Database::update_url()` to retrieve it and implement auto-update functionality.
+    ///
+    /// # Example
+    /// ```
+    /// use matchy_format::DatabaseBuilder;
+    /// use matchy_match_mode::MatchMode;
+    ///
+    /// let builder = DatabaseBuilder::new(MatchMode::CaseSensitive)
+    ///     .with_update_url("https://example.com/threats.mxy");
+    /// ```
+    pub fn with_update_url(mut self, url: impl Into<String>) -> Self {
+        self.update_url = Some(url.into());
         self
     }
 
@@ -682,6 +676,10 @@ impl DatabaseBuilder {
                 "match_mode".to_string(),
                 DataValue::Uint16(match_mode_value),
             );
+
+            if let Some(ref url) = self.update_url {
+                metadata.insert("update_url".to_string(), DataValue::String(url.clone()));
+            }
 
             // ALWAYS write section offset fields for fast loading (0 = not present)
             // This eliminates the need to scan the entire file for separators

@@ -133,6 +133,30 @@ enum Commands {
         /// Outputs workload stats and per-file routing decisions to stderr
         #[arg(long)]
         debug_routing: bool,
+
+        /// Enable automatic reload when database file changes on disk
+        /// Database will be atomically swapped when changes are detected
+        #[arg(long)]
+        watch: bool,
+
+        /// Enable automatic updates from database's embedded URL (requires auto-update feature)
+        /// Database must have been built with --update-url to use this feature.
+        /// Downloads are stored in cache-dir (or ~/.cache/matchy/ by default).
+        #[cfg(feature = "auto-update")]
+        #[arg(long)]
+        auto_update: bool,
+
+        /// How often to check for remote updates, in seconds (default: 3600 = 1 hour)
+        /// Only used with --auto-update
+        #[cfg(feature = "auto-update")]
+        #[arg(long, default_value = "3600")]
+        update_interval: u64,
+
+        /// Cache directory for downloaded database updates
+        /// Only used with --auto-update. Default: ~/.cache/matchy/
+        #[cfg(feature = "auto-update")]
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
     },
 
     /// Query a pattern database
@@ -207,6 +231,11 @@ enum Commands {
         /// Use case-insensitive matching for patterns (default: case-sensitive)
         #[arg(short = 'i', long)]
         case_insensitive: bool,
+
+        /// URL where updates to this database can be downloaded
+        /// Stored in metadata for use with auto-update functionality
+        #[arg(long, value_name = "URL")]
+        update_url: Option<String>,
     },
 
     /// Validate a database file for safety and correctness
@@ -309,6 +338,13 @@ fn main() -> Result<()> {
             cache_size,
             extractors,
             debug_routing,
+            watch,
+            #[cfg(feature = "auto-update")]
+            auto_update,
+            #[cfg(feature = "auto-update")]
+            update_interval,
+            #[cfg(feature = "auto-update")]
+            cache_dir,
         } => cmd_match(
             database,
             inputs,
@@ -322,6 +358,13 @@ fn main() -> Result<()> {
             cache_size,
             extractors,
             debug_routing,
+            watch,
+            #[cfg(feature = "auto-update")]
+            auto_update,
+            #[cfg(feature = "auto-update")]
+            update_interval,
+            #[cfg(feature = "auto-update")]
+            cache_dir,
         ),
         Commands::Query {
             database,
@@ -349,6 +392,7 @@ fn main() -> Result<()> {
             verbose,
             debug,
             case_insensitive,
+            update_url,
         } => cmd_build(
             inputs,
             output,
@@ -359,6 +403,7 @@ fn main() -> Result<()> {
             verbose,
             debug,
             case_insensitive,
+            update_url,
         ),
         Commands::Bench {
             db_type,

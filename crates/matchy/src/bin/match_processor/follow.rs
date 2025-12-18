@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -17,7 +15,8 @@ use super::sequential::process_line_matches;
 use super::stats::ProcessingStats;
 use super::thread_utils::set_thread_name;
 
-/// Watch files and process new lines as they appear
+const POLL_INTERVAL_MS: u64 = 100;
+
 #[allow(clippy::too_many_arguments)]
 pub fn follow_files(
     inputs: Vec<PathBuf>,
@@ -35,14 +34,12 @@ pub fn follow_files(
 
     let mut aggregate_stats = ProcessingStats::new();
 
-    // Initialize progress reporter
     let mut progress = if show_progress {
         Some(super::stats::ProgressReporter::new())
     } else {
         None
     };
 
-    // Process existing content first
     if show_stats {
         eprintln!("[INFO] Processing existing file content...");
     }
@@ -54,83 +51,83 @@ pub fn follow_files(
             extractor,
             output_format,
             show_stats,
-            false, // Disable per-file progress, we'll show aggregate progress
+            false,
             overall_start,
         )?;
         aggregate_stats.add(&stats);
-
-        // Show aggregate progress after each file
-        if let Some(ref mut prog) = progress {
-            if prog.should_update() {
-                prog.show(&aggregate_stats, overall_start.elapsed());
-            }
-        }
     }
 
     if show_stats {
         eprintln!("[INFO] Watching for new content (Ctrl+C to stop)...");
     }
 
-    // Setup file watcher
-    let (tx, rx) = mpsc::channel();
-    let mut watcher: RecommendedWatcher =
-        Watcher::new(tx, Config::default()).context("Failed to create file watcher")?;
-
-    // Track file positions and watch each file
-    let mut file_positions = Vec::new();
+    let mut file_positions: Vec<(PathBuf, u64)> = Vec::new();
     for input_path in &inputs {
         let file = File::open(input_path)
             .with_context(|| format!("Failed to open {}", input_path.display()))?;
         let pos = file.metadata()?.len();
-
-        watcher
-            .watch(input_path, RecursiveMode::NonRecursive)
-            .with_context(|| format!("Failed to watch {}", input_path.display()))?;
-
         file_positions.push((input_path.clone(), pos));
     }
 
-    // Process events until shutdown signal
     while !shutdown.load(Ordering::Relaxed) {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(event)) => {
-                if let Some(stats) = handle_file_event(
-                    event,
-                    &mut file_positions,
-                    db,
-                    extractor,
-                    output_format,
-                    show_stats,
-                    overall_start,
-                )? {
-                    aggregate_stats.add(&stats);
+        let mut had_changes = false;
 
-                    // Show progress after processing new content
-                    if let Some(ref mut prog) = progress {
-                        if prog.should_update() {
-                            prog.show(&aggregate_stats, overall_start.elapsed());
+        for (path, last_pos) in &mut file_positions {
+            match std::fs::metadata(path.as_path()) {
+                Ok(meta) => {
+                    let current_size = meta.len();
+                    if current_size > *last_pos {
+                        let stats = process_new_content(
+                            path.as_path(),
+                            last_pos,
+                            db,
+                            extractor,
+                            output_format,
+                            show_stats,
+                            overall_start,
+                        )?;
+                        aggregate_stats.add(&stats);
+                        had_changes = true;
+                    } else if current_size < *last_pos {
+                        if show_stats {
+                            eprintln!(
+                                "[INFO] File truncated, resetting position: {}",
+                                path.display()
+                            );
                         }
+                        *last_pos = 0;
                     }
                 }
-            }
-            Ok(Err(e)) => {
-                eprintln!("[WARN] File watcher error: {}", e);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Normal timeout, check shutdown flag
-                continue;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break;
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if show_stats {
+                        eprintln!(
+                            "[WARN] File not found (deleted/rotated?): {}",
+                            path.display()
+                        );
+                    }
+                    *last_pos = 0;
+                }
+                Err(e) => {
+                    eprintln!("[WARN] Error checking file {}: {}", path.display(), e);
+                }
             }
         }
+
+        if had_changes {
+            if let Some(ref mut prog) = progress {
+                if prog.should_update() {
+                    prog.show(&aggregate_stats, overall_start.elapsed());
+                }
+            }
+        }
+
+        thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
     }
 
     if show_stats {
         eprintln!("[INFO] Follow mode stopped");
     }
 
-    // Add final newline if progress was shown
     if progress.is_some() {
         eprintln!();
     }
@@ -138,7 +135,6 @@ pub fn follow_files(
     Ok(aggregate_stats)
 }
 
-/// Process existing file content up to current position
 fn process_existing_content(
     input_path: &Path,
     db: &matchy::Database,
@@ -148,7 +144,6 @@ fn process_existing_content(
     show_progress: bool,
     overall_start: Instant,
 ) -> Result<ProcessingStats> {
-    // Reuse the sequential processing logic
     super::sequential::process_file(
         input_path,
         db,
@@ -160,52 +155,6 @@ fn process_existing_content(
     )
 }
 
-/// Handle a file system event
-fn handle_file_event(
-    event: Event,
-    file_positions: &mut [(PathBuf, u64)],
-    db: &matchy::Database,
-    extractor: &matchy::extractor::Extractor,
-    output_format: &str,
-    show_stats: bool,
-    overall_start: Instant,
-) -> Result<Option<ProcessingStats>> {
-    match event.kind {
-        EventKind::Modify(_) | EventKind::Create(_) => {
-            // Find which file was modified
-            for path in &event.paths {
-                if let Some((_, last_pos)) = file_positions.iter_mut().find(|(p, _)| p == path) {
-                    // Process new content
-                    let stats = process_new_content(
-                        path,
-                        last_pos,
-                        db,
-                        extractor,
-                        output_format,
-                        show_stats,
-                        overall_start,
-                    )?;
-                    return Ok(Some(stats));
-                }
-            }
-        }
-        EventKind::Remove(_) => {
-            // File was deleted/rotated
-            for path in &event.paths {
-                if file_positions.iter().any(|(p, _)| p == path) && show_stats {
-                    eprintln!("[WARN] File deleted/rotated: {}", path.display());
-                }
-                // In a production system, we might try to reopen or handle rotation
-                // For now, just continue watching other files
-            }
-        }
-        _ => {}
-    }
-
-    Ok(None)
-}
-
-/// Process new content added to a file since last read
 fn process_new_content(
     input_path: &Path,
     last_pos: &mut u64,
@@ -220,18 +169,15 @@ fn process_new_content(
 
     let current_size = file.metadata()?.len();
 
-    // Check if file was truncated (e.g., log rotation)
     if current_size < *last_pos {
         *last_pos = 0;
     }
 
-    // Seek to last known position
     file.seek(SeekFrom::Start(*last_pos))?;
 
     let mut stats = ProcessingStats::new();
     let output_json = output_format == "json";
 
-    // Read new lines
     let reader = BufReader::new(file);
     for line_result in reader.lines() {
         let line = line_result?;
@@ -240,7 +186,6 @@ fn process_new_content(
         stats.lines_processed += 1;
         stats.total_bytes += line_bytes.len();
 
-        // Calculate timestamp
         let timestamp = if output_json {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -250,7 +195,6 @@ fn process_new_content(
             0.0
         };
 
-        // Process this line
         process_line_matches(
             line_bytes,
             input_path,
@@ -262,14 +206,12 @@ fn process_new_content(
         )?;
     }
 
-    // Update position
     let new_file = File::open(input_path)?;
     *last_pos = new_file.metadata()?.len();
 
     Ok(stats)
 }
 
-/// Parallel follow mode: watch files and process with worker pool
 #[allow(clippy::too_many_arguments)]
 pub fn follow_files_parallel(
     inputs: Vec<PathBuf>,
@@ -288,8 +230,6 @@ pub fn follow_files_parallel(
 
     let output_json = output_format == "json";
 
-    // Create channels for pipeline
-    // Using crossbeam-channel for lock-free MPMC (receivers are clonable)
     let work_queue_capacity = num_threads * 4;
     let result_queue_capacity = 1000;
 
@@ -297,7 +237,6 @@ pub fn follow_files_parallel(
     let (result_tx, result_rx) =
         bounded::<Option<super::parallel::WorkerMessage>>(result_queue_capacity);
 
-    // Spawn output thread - just use the existing parallel one
     let shutdown_output = Arc::clone(&shutdown);
     let output_handle = {
         thread::spawn(move || {
@@ -312,13 +251,11 @@ pub fn follow_files_parallel(
         })
     };
 
-    // Spawn worker pool - same as parallel but checks shutdown signal
-    // crossbeam-channel receivers are clonable, no mutex needed
     let mut worker_handles = Vec::new();
     for worker_id in 0..num_threads {
         let work_rx = work_rx.clone();
         let result_tx = result_tx.clone();
-        let db_clone = Arc::clone(&db); // Clone the Arc, not the Database
+        let db_clone = Arc::clone(&db);
         let extractor_config = extractor_config.clone();
 
         let handle = thread::spawn(move || {
@@ -335,10 +272,8 @@ pub fn follow_files_parallel(
         worker_handles.push(handle);
     }
 
-    // Drop original result sender so output can detect completion
     drop(result_tx);
 
-    // Spawn reader/watcher thread
     let reader_handle = {
         let inputs = inputs.clone();
         let shutdown_reader = Arc::clone(&shutdown);
@@ -348,10 +283,8 @@ pub fn follow_files_parallel(
         })
     };
 
-    // Wait for reader to finish (on shutdown signal)
     let reader_result = reader_handle.join().expect("Reader thread panicked");
 
-    // Wait for all workers to finish
     let mut worker_stats = Vec::new();
     for handle in worker_handles {
         match handle.join() {
@@ -360,15 +293,13 @@ pub fn follow_files_parallel(
         }
     }
 
-    // Wait for output thread to finish
     let _output_stats = output_handle.join().expect("Output thread panicked");
 
-    // Aggregate statistics
     let mut aggregate = ProcessingStats::new();
     for stats in worker_stats {
         aggregate.lines_processed += stats.lines_processed;
         aggregate.candidates_tested += stats.candidates_tested;
-        aggregate.total_matches += stats.matches_found; // Library uses matches_found
+        aggregate.total_matches += stats.matches_found;
         aggregate.total_bytes += stats.total_bytes;
         aggregate.ipv4_count += stats.ipv4_count;
         aggregate.ipv6_count += stats.ipv6_count;
@@ -381,7 +312,6 @@ pub fn follow_files_parallel(
     Ok(aggregate)
 }
 
-/// Reader/watcher thread: watches files, reads new content, batches and sends to workers
 fn reader_watcher_thread(
     inputs: Vec<PathBuf>,
     work_tx: Sender<Option<super::parallel::DataBatch>>,
@@ -389,7 +319,6 @@ fn reader_watcher_thread(
     shutdown: Arc<AtomicBool>,
     show_stats: bool,
 ) -> Result<()> {
-    // Process existing content first
     if show_stats {
         eprintln!("[INFO] Processing existing file content...");
     }
@@ -397,12 +326,10 @@ fn reader_watcher_thread(
     let mut file_positions: HashMap<PathBuf, u64> = HashMap::new();
 
     for input_path in &inputs {
-        // Read existing content and send as initial batch
         if let Ok(file) = File::open(input_path) {
             if let Ok(metadata) = file.metadata() {
                 let size = metadata.len();
                 if size > 0 {
-                    // Read entire existing file as initial batch
                     let mut content = Vec::new();
                     if let Ok(mut f) = File::open(input_path) {
                         if f.read_to_end(&mut content).is_ok() {
@@ -423,48 +350,67 @@ fn reader_watcher_thread(
         eprintln!("[INFO] Watching for new content (Ctrl+C to stop)...");
     }
 
-    // Setup file watcher
-    let (tx, rx) = mpsc::channel();
-    let mut watcher: RecommendedWatcher =
-        Watcher::new(tx, Config::default()).context("Failed to create file watcher")?;
-
-    for input_path in &inputs {
-        watcher
-            .watch(input_path, RecursiveMode::NonRecursive)
-            .with_context(|| format!("Failed to watch {}", input_path.display()))?;
-    }
-
-    // Process file modification events
     while !shutdown.load(Ordering::Relaxed) {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(event)) => {
-                handle_file_event_parallel(event, &mut file_positions, &work_tx)?;
-            }
-            Ok(Err(e)) => {
-                eprintln!("[WARN] File watcher error: {}", e);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Normal timeout, check shutdown flag
-                continue;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break;
+        for (path, last_pos) in &mut file_positions {
+            match std::fs::metadata(path) {
+                Ok(meta) => {
+                    let current_size = meta.len();
+                    if current_size < *last_pos {
+                        if show_stats {
+                            eprintln!(
+                                "[INFO] File truncated, resetting position: {}",
+                                path.display()
+                            );
+                        }
+                        *last_pos = 0;
+                    }
+
+                    if current_size > *last_pos {
+                        if let Ok(mut file) = File::open(path) {
+                            if file.seek(SeekFrom::Start(*last_pos)).is_ok() {
+                                let mut new_content = Vec::new();
+                                if file.read_to_end(&mut new_content).is_ok()
+                                    && !new_content.is_empty()
+                                {
+                                    let batch = super::parallel::DataBatch {
+                                        source: path.clone(),
+                                        data: Arc::new(new_content),
+                                    };
+                                    let _ = work_tx.send(Some(batch));
+                                    *last_pos = current_size;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if show_stats {
+                        eprintln!(
+                            "[WARN] File not found (deleted/rotated?): {}",
+                            path.display()
+                        );
+                    }
+                    *last_pos = 0;
+                }
+                Err(e) => {
+                    eprintln!("[WARN] Error checking file {}: {}", path.display(), e);
+                }
             }
         }
+
+        thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
     }
 
-    // Send termination signal to workers
     drop(work_tx);
 
     Ok(())
 }
 
-/// Worker thread for follow mode - same as parallel but can be interrupted
 fn worker_thread_follow(
     worker_id: usize,
     work_rx: Receiver<Option<super::parallel::DataBatch>>,
     result_tx: Sender<Option<super::parallel::WorkerMessage>>,
-    db: Arc<matchy::Database>, // Receive shared Database wrapped in Arc
+    db: Arc<matchy::Database>,
     _show_stats: bool,
     extractor_config: super::parallel::ExtractorConfig,
 ) -> super::parallel::WorkerStats {
@@ -472,7 +418,6 @@ fn worker_thread_follow(
         build_match_result, create_extractor_for_db, MatchBuffers, WorkerMessage, WorkerStats,
     };
 
-    // Create extractor
     let extractor = match create_extractor_for_db(&db, &extractor_config) {
         Ok(ext) => ext,
         Err(e) => {
@@ -484,28 +429,22 @@ fn worker_thread_follow(
         }
     };
 
-    // Use library's Worker infrastructure with shared database
     let mut worker = matchy::processing::Worker::builder()
         .extractor(extractor)
-        .add_database("default", db) // Already wrapped in Arc
+        .add_database("default", db)
         .build();
     let mut last_progress_update = Instant::now();
     let progress_interval = Duration::from_millis(100);
 
-    // Reusable buffers for match result construction
     let mut match_buffers = MatchBuffers::new();
 
-    // Process work batches
-    // crossbeam-channel receivers are clonable, no mutex needed
     loop {
         let batch_opt = work_rx.recv();
 
         match batch_opt {
             Ok(Some(batch)) => {
-                // Process batch using library worker
                 match worker.process_batch(&batch) {
                     Ok(matches) => {
-                        // Convert library matches to CLI format and send
                         for m in matches {
                             if let Some(match_result) = build_match_result(&m, &mut match_buffers) {
                                 let _ = result_tx.send(Some(WorkerMessage::Match(match_result)));
@@ -520,7 +459,6 @@ fn worker_thread_follow(
                     }
                 }
 
-                // Send periodic progress updates
                 let now = Instant::now();
                 if now.duration_since(last_progress_update) >= progress_interval {
                     let _ = result_tx.send(Some(WorkerMessage::Stats {
@@ -534,7 +472,6 @@ fn worker_thread_follow(
         }
     }
 
-    // Send final stats
     let final_stats = worker.stats().clone();
     let _ = result_tx.send(Some(WorkerMessage::Stats {
         worker_id,
@@ -543,7 +480,6 @@ fn worker_thread_follow(
     final_stats
 }
 
-/// Output thread for follow mode - includes shutdown signal awareness
 fn output_thread_follow(
     result_rx: crossbeam_channel::Receiver<Option<super::parallel::WorkerMessage>>,
     output_json: bool,
@@ -557,155 +493,88 @@ fn output_thread_follow(
     let mut stats = ProcessingStats::new();
     let mut worker_stats_map: HashMap<usize, super::parallel::WorkerStats> = HashMap::new();
 
-    // Initialize progress reporter
     let mut progress = if show_progress {
         Some(super::stats::ProgressReporter::new())
     } else {
         None
     };
 
-    // Use recv_timeout to periodically check shutdown signal
     loop {
-        // Check shutdown signal
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
 
         match result_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Some(msg)) => {
-                match msg {
-                    WorkerMessage::Match(result) => {
-                        if output_json {
-                            let mut match_obj = json!({
-                                "timestamp": format!("{:.3}", result.timestamp),
-                                "source": result.source_file.display().to_string(),
-                                "matched_text": result.matched_text,
-                                "match_type": result.match_type,
-                            });
+            Ok(Some(msg)) => match msg {
+                WorkerMessage::Match(result) => {
+                    if output_json {
+                        let mut match_obj = json!({
+                            "timestamp": format!("{:.3}", result.timestamp),
+                            "source": result.source_file.display().to_string(),
+                            "matched_text": result.matched_text,
+                            "match_type": result.match_type,
+                        });
 
-                            if let Some(pattern_count) = result.pattern_count {
-                                match_obj["pattern_count"] = json!(pattern_count);
-                            }
-                            if let Some(data) = result.data {
-                                match_obj["data"] = data;
-                            }
-                            if let Some(prefix_len) = result.prefix_len {
-                                match_obj["prefix_len"] = json!(prefix_len);
-                            }
-                            if let Some(cidr) = result.cidr {
-                                match_obj["cidr"] = json!(cidr);
-                            }
-
-                            if let Ok(json_str) = serde_json::to_string(&match_obj) {
-                                println!("{}", json_str);
-                            }
+                        if let Some(pattern_count) = result.pattern_count {
+                            match_obj["pattern_count"] = json!(pattern_count);
+                        }
+                        if let Some(data) = result.data {
+                            match_obj["data"] = data;
+                        }
+                        if let Some(prefix_len) = result.prefix_len {
+                            match_obj["prefix_len"] = json!(prefix_len);
+                        }
+                        if let Some(cidr) = result.cidr {
+                            match_obj["cidr"] = json!(cidr);
                         }
 
-                        stats.total_matches += 1;
+                        if let Ok(json_str) = serde_json::to_string(&match_obj) {
+                            println!("{}", json_str);
+                        }
                     }
-                    WorkerMessage::Stats {
-                        worker_id,
-                        stats: worker_stats_msg,
-                    } => {
-                        // Update this worker's latest stats (replaces previous)
-                        worker_stats_map.insert(worker_id, worker_stats_msg);
 
-                        // Aggregate all workers' current stats for progress display
-                        let mut aggregate = ProcessingStats::new();
-                        for stats in worker_stats_map.values() {
-                            aggregate.lines_processed += stats.lines_processed;
-                            aggregate.candidates_tested += stats.candidates_tested;
-                            aggregate.total_matches += stats.matches_found; // Library uses matches_found
-                            aggregate.total_bytes += stats.total_bytes;
-                            aggregate.ipv4_count += stats.ipv4_count;
-                            aggregate.ipv6_count += stats.ipv6_count;
-                            aggregate.domain_count += stats.domain_count;
-                            aggregate.email_count += stats.email_count;
-                        }
+                    stats.total_matches += 1;
+                }
+                WorkerMessage::Stats {
+                    worker_id,
+                    stats: worker_stats_msg,
+                } => {
+                    worker_stats_map.insert(worker_id, worker_stats_msg);
 
-                        // Show progress with aggregated stats
-                        if let Some(ref mut prog) = progress {
-                            if prog.should_update() {
-                                prog.show(&aggregate, overall_start.elapsed());
-                            }
+                    let mut aggregate = ProcessingStats::new();
+                    for stats in worker_stats_map.values() {
+                        aggregate.lines_processed += stats.lines_processed;
+                        aggregate.candidates_tested += stats.candidates_tested;
+                        aggregate.total_matches += stats.matches_found;
+                        aggregate.total_bytes += stats.total_bytes;
+                        aggregate.ipv4_count += stats.ipv4_count;
+                        aggregate.ipv6_count += stats.ipv6_count;
+                        aggregate.domain_count += stats.domain_count;
+                        aggregate.email_count += stats.email_count;
+                    }
+
+                    if let Some(ref mut prog) = progress {
+                        if prog.should_update() {
+                            prog.show(&aggregate, overall_start.elapsed());
                         }
                     }
                 }
-            }
+            },
             Ok(None) => {
-                // Channel closed normally (all workers finished)
                 break;
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                // Normal timeout - continue loop to check shutdown again
                 continue;
             }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                // Channel disconnected - all workers done
                 break;
             }
         }
     }
 
-    // Add final newline if progress was shown
     if progress.is_some() {
         eprintln!();
     }
 
     stats
-}
-
-/// Handle file modification event - read new content and send as batch
-fn handle_file_event_parallel(
-    event: Event,
-    file_positions: &mut HashMap<PathBuf, u64>,
-    work_tx: &Sender<Option<super::parallel::DataBatch>>,
-) -> Result<()> {
-    match event.kind {
-        EventKind::Modify(_) | EventKind::Create(_) => {
-            for path in &event.paths {
-                if let Some(last_pos) = file_positions.get_mut(path) {
-                    // Read new content since last position
-                    if let Ok(mut file) = File::open(path) {
-                        if let Ok(current_size) = file.metadata().map(|m| m.len()) {
-                            // Check for truncation (log rotation)
-                            if current_size < *last_pos {
-                                *last_pos = 0;
-                            }
-
-                            if current_size > *last_pos {
-                                // Seek and read new content
-                                if file.seek(SeekFrom::Start(*last_pos)).is_ok() {
-                                    let mut new_content = Vec::new();
-                                    if file.read_to_end(&mut new_content).is_ok()
-                                        && !new_content.is_empty()
-                                    {
-                                        let batch = super::parallel::DataBatch {
-                                            source: path.clone(),
-                                            data: Arc::new(new_content),
-                                        };
-                                        let _ = work_tx.send(Some(batch));
-
-                                        // Update position
-                                        *last_pos = current_size;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        EventKind::Remove(_) => {
-            for path in &event.paths {
-                if file_positions.contains_key(path) {
-                    eprintln!("[WARN] File deleted/rotated: {}", path.display());
-                    // Could implement log rotation handling here
-                }
-            }
-        }
-        _ => {}
-    }
-
-    Ok(())
 }

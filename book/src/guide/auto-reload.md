@@ -11,7 +11,7 @@ use matchy::Database;
 
 // Enable auto-reload
 let db = Database::from("threats.mxy")
-    .auto_reload()
+    .watch()
     .open()?;
 
 // Queries automatically use the latest database version
@@ -100,7 +100,7 @@ Get notified when database reloads occur:
 use matchy::{Database, ReloadEvent};
 
 let db = Database::from("threats.mxy")
-    .auto_reload()
+    .watch()
     .on_reload(|event: ReloadEvent| {
         if event.success {
             println!("✅ Database reloaded successfully");
@@ -123,6 +123,7 @@ pub struct ReloadEvent {
     pub success: bool,            // Whether reload succeeded
     pub error: Option<String>,    // Error message (if failed)
     pub generation: u64,          // Generation counter
+    pub source: ReloadSource,     // What triggered the reload
 }
 ```
 
@@ -177,7 +178,7 @@ int main() {
 ```rust
 // Threat database updated hourly from feed
 let db = Database::from("/data/threats.mxy")
-    .auto_reload()
+    .watch()
     .on_reload(|event| {
         if event.success {
             // Log to monitoring system
@@ -204,7 +205,7 @@ for log_entry in log_stream {
 ```rust
 // GeoIP database refreshed weekly
 let geoip = Database::from("/data/GeoLite2-City.mmdb")
-    .auto_reload()
+    .watch()
     .on_reload(|event| {
         println!("GeoIP database updated: {}", event.path.display());
     })
@@ -220,7 +221,7 @@ let location = geoip.lookup("8.8.8.8")?;
 // Worker process
 let db = Arc::new(
     Database::from("threats.mxy")
-        .auto_reload()
+        .watch()
         .open()?
 );
 
@@ -236,6 +237,48 @@ for i in 0..num_cpus::get() {
         }
     });
 }
+```
+
+## HTTP Auto-Update
+
+Matchy supports automatic updates for databases that include an embedded update URL. The database uses this internal metadata to periodically check for updates and download them if changed.
+
+### Rust API
+
+```rust
+// Database must have embedded update URL (from DatabaseBuilder::with_update_url())
+let db = Database::from("threats.mxy")
+    .auto_update() // No URL parameter - uses embedded metadata
+    .update_interval(Duration::from_secs(3600))
+    .cache_dir("/var/cache/myapp") // Optional: defaults to ~/.cache/matchy/
+    .on_reload(|event| {
+        match event.source {
+            ReloadSource::FileChange => println!("Local file changed"),
+            ReloadSource::NetworkUpdate => println!("Downloaded new version"),
+        }
+    })
+    .open()?; // Returns error if database has no embedded URL
+```
+
+The auto-update feature:
+- **Self-describing**: Uses URL embedded in the database file (set during build)
+- **Safe updates**: Downloads to a cache directory (`~/.cache/matchy/` by default), never overwriting the original file
+- **Composable**: Can be combined with `watch()` to handle both local replacements and network updates
+- **Efficient**: Uses **ETag** and **Last-Modified** headers to avoid unnecessary downloads
+- **Robust**: Validates the database before swapping
+
+### C API
+
+```c
+matchy_open_options_t opts;
+matchy_init_open_options(&opts);
+
+// Enable auto-update (requires embedded URL in database)
+opts.auto_update = true;
+// Optional: set custom download location (formerly update_url)
+opts.cache_dir = "/var/cache/myapp"; 
+
+matchy_t *db = matchy_open_with_options("threats.mxy", &opts);
 ```
 
 ## Database Update Best Practices
@@ -291,7 +334,7 @@ let reload_count = Arc::new(AtomicU64::new(0));
 let reload_count_clone = Arc::clone(&reload_count);
 
 let db = Database::from("threats.mxy")
-    .auto_reload()
+    .watch()
     .on_reload(move |event| {
         if event.success {
             reload_count_clone.fetch_add(1, Ordering::Relaxed);
@@ -353,12 +396,12 @@ Ensure callback is set before database changes:
 
 ```rust
 // ❌ Wrong: callback set after database loaded
-let db = Database::from("threats.mxy").auto_reload().open()?;
+let db = Database::from("threats.mxy").watch().open()?;
 // Database changes here won't trigger callback yet
 
 // ✅ Correct: callback set during open
 let db = Database::from("threats.mxy")
-    .auto_reload()
+    .watch()
     .on_reload(|e| println!("Reloaded!"))
     .open()?;
 ```

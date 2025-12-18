@@ -70,8 +70,12 @@ c-api = []
 
 # cargo-c requires a capi feature to identify C-compatible libraries
 capi = []
+
 # Enable dhat heap profiling in benchmarks (dhat is always available as dev-dep)
 dhat-heap = []
+
+# Enable automatic database updates from remote URLs (native only, adds HTTP client)
+auto-update = ["ureq", "dirs"]
 
 [[bin]]
 name = "matchy"
@@ -116,9 +120,22 @@ ctrlc = { version = "3.5", optional = true }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 libc = "0.2"
 memmap2 = "0.9.9"  # Memory-mapped file access
-notify = "8.2"  # File watching for database auto-reload
 arc-swap = "1.7"  # Lock-free Arc swapping for zero-overhead database reloading
 crossbeam-channel = "0.5"  # Lock-free MPMC channels for parallel processing
+
+# WASI has filesystem support, so arc-swap works there too
+[target.'cfg(target_os = "wasi")'.dependencies]
+arc-swap = "1.7"
+
+# HTTP client for auto-update feature (native only)
+[target.'cfg(not(target_family = "wasm"))'.dependencies.ureq]
+version = "2.10"
+optional = true
+
+# Platform-specific cache directory detection (for auto-update)
+[target.'cfg(not(target_family = "wasm"))'.dependencies.dirs]
+version = "5.0"
+optional = true
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef"] }
 
@@ -131,6 +148,7 @@ rand = "0.9"
 dhat = "0.3"  # Heap profiling for benchmarks
 assert_cmd = "2.1"  # CLI integration testing
 predicates = "3.0"  # Assertions for command output
+mockito = "1.6"  # HTTP mock server for auto-update tests
 
 [build-dependencies]
 cbindgen = "0.29"
@@ -150,7 +168,4 @@ name = "query_profile"
 path = "benches/query_profile.rs"
 harness = false
 
-# Auto-reload overhead benchmark (lock-free Arc vs RwLock)
-[[bench]]
-name = "reload_overhead_bench"
-harness = false
+

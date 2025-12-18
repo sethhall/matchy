@@ -20,12 +20,18 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-// Platform-specific imports (not available on WASM)
+#[cfg(not(target_family = "wasm"))]
+use crate::updater::{LiveOptions, LiveState};
+
 #[cfg(not(target_family = "wasm"))]
 use memmap2::Mmap;
 #[cfg(not(target_family = "wasm"))]
 use std::fs::File;
+
+#[cfg(not(target_family = "wasm"))]
+pub use crate::updater::{ReloadCallback, ReloadEvent, ReloadSource};
 
 // Per-database query cache type
 // Each database has its own cache, stored as thread-local for lock-free access
@@ -252,125 +258,183 @@ pub struct DatabaseOptions {
 ///
 /// Created via `Database::from(path)`. Use the fluent API to configure
 /// options like caching and validation, then call `.open()` to load the database.
-///
-/// # Examples
-///
-/// ```no_run
-/// use matchy::Database;
-///
-/// // Simple case with defaults
-/// let db = Database::from("threats.mxy").open()?;
-///
-/// // Custom configuration
-/// let db = Database::from("threats.mxy")
-///     .cache_capacity(100_000)
-///     .open()?;
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
 pub struct DatabaseOpener {
     options: DatabaseOptions,
+    #[cfg(not(target_family = "wasm"))]
+    live: LiveOptions,
 }
 
 impl DatabaseOpener {
-    /// Create a new database opener for the given path
     fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             options: DatabaseOptions {
                 path: path.into(),
                 ..Default::default()
             },
+            #[cfg(not(target_family = "wasm"))]
+            live: LiveOptions::default(),
         }
     }
 
-    /// Set LRU cache capacity
-    ///
-    /// The cache dramatically improves performance for workloads with
-    /// repeated queries (80-95% hit rates typical in log analysis).
-    ///
-    /// Default: 10,000 entries (~1-5 MB memory)
+    /// Set LRU cache capacity. Default: 10,000 entries.
     pub fn cache_capacity(mut self, capacity: usize) -> Self {
         self.options.cache_capacity = Some(capacity);
         self
     }
 
-    /// Disable caching entirely
-    ///
-    /// Use this for workloads where queries are never repeated
-    /// (e.g., sequential IP scans). Saves memory at cost of performance.
+    /// Disable caching entirely.
     pub fn no_cache(mut self) -> Self {
         self.options.cache_capacity = Some(0);
         self
     }
 
-    /// Open the database with configured options
-    pub fn open(self) -> Result<Database, DatabaseError> {
-        Database::open_with_options(self.options)
-    }
-
-    /// Create a database opener from bytes (for testing/benchmarking)
+    /// Enable automatic file watching and hot-reload.
+    /// Database will reload when file changes are detected.
     ///
-    /// This allows you to configure cache settings before loading.
-    ///
-    /// # Examples
+    /// # Example
     ///
     /// ```no_run
     /// use matchy::Database;
     ///
-    /// let db_bytes = vec![/* ... */];
-    ///
-    /// // With cache disabled
-    /// let db = Database::from_bytes_builder(db_bytes.clone())
-    ///     .no_cache()
-    ///     .open()?;
-    ///
-    /// // With custom cache
-    /// let db = Database::from_bytes_builder(db_bytes)
-    ///     .cache_capacity(50000)
+    /// let db = Database::from("threats.mxy")
+    ///     .watch()
+    ///     .on_reload(|event| {
+    ///         println!("Database reloaded: {:?}", event.path);
+    ///     })
     ///     .open()?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
+    #[cfg(not(target_family = "wasm"))]
+    pub fn watch(mut self) -> Self {
+        self.live.enabled = true;
+        self
+    }
+
+    /// Enable automatic updates from the database's embedded update URL.
+    ///
+    /// The database must have an update URL embedded in its metadata (set during build
+    /// with `DatabaseBuilder::with_update_url()`). If the database has no embedded URL,
+    /// `open()` will return an error.
+    ///
+    /// Updates are downloaded to a cache directory (configurable via `cache_dir()`),
+    /// leaving the original file untouched.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use matchy::Database;
+    /// use std::time::Duration;
+    ///
+    /// let db = Database::from("threats.mxy")
+    ///     .auto_update()
+    ///     .update_interval(Duration::from_secs(3600))
+    ///     .open()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[cfg(all(not(target_family = "wasm"), feature = "auto-update"))]
+    pub fn auto_update(mut self) -> Self {
+        self.live.enabled = true;
+        self.live.auto_update_enabled = true;
+        if self.live.update_interval.is_none() {
+            self.live.update_interval = Some(Duration::from_secs(
+                crate::updater::DEFAULT_UPDATE_INTERVAL_SECS,
+            ));
+        }
+        self
+    }
+
+    /// Set how often to check for remote updates. Default: 1 hour.
+    #[cfg(all(not(target_family = "wasm"), feature = "auto-update"))]
+    pub fn update_interval(mut self, interval: Duration) -> Self {
+        self.live.update_interval = Some(interval);
+        self
+    }
+
+    /// Set the cache directory for downloaded updates.
+    ///
+    /// Default: `~/.cache/matchy/` on Unix, `%LOCALAPPDATA%\matchy\` on Windows,
+    /// or system temp directory as fallback.
+    #[cfg(all(not(target_family = "wasm"), feature = "auto-update"))]
+    pub fn cache_dir(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.live.cache_dir = Some(path.into());
+        self
+    }
+
+    /// Set how often to check for local file changes. Default: 1 second.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn poll_interval(mut self, interval: Duration) -> Self {
+        self.live.poll_interval = Some(interval);
+        self
+    }
+
+    /// Set callback for reload notifications.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn on_reload<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(ReloadEvent) + Send + Sync + 'static,
+    {
+        self.live.reload_callback = Some(Arc::new(callback));
+        self
+    }
+
+    /// Open the database with configured options.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn open(self) -> Result<Database, DatabaseError> {
+        let db = Database::open_with_options(self.options.clone())?;
+
+        #[cfg(feature = "auto-update")]
+        if self.live.auto_update_enabled && db.update_url().is_none() {
+            return Err(DatabaseError::Config(
+                "auto_update() requires database with embedded update URL".to_string(),
+            ));
+        }
+
+        if self.live.enabled {
+            let live_state =
+                self.live
+                    .start_updater(self.options.path, db, self.options.cache_capacity)?;
+            Ok(Database::with_live_state(live_state))
+        } else {
+            Ok(db)
+        }
+    }
+
+    /// Open the database with configured options.
+    #[cfg(target_family = "wasm")]
+    pub fn open(self) -> Result<Database, DatabaseError> {
+        Database::open_with_options(self.options)
+    }
+
+    /// Create a `DatabaseOpener` from raw bytes.
     pub fn from_bytes_builder(bytes: Vec<u8>) -> DatabaseOpener {
         DatabaseOpener {
             options: DatabaseOptions {
                 bytes: Some(bytes),
                 ..Default::default()
             },
+            #[cfg(not(target_family = "wasm"))]
+            live: LiveOptions::default(),
         }
     }
 }
 
-/// Unified database for IP and pattern lookups
-///
-/// This struct is Send + Sync and can be wrapped in Arc to share across threads.
-/// Each thread maintains its own query cache for zero-contention access.
+/// Unified database for IP and pattern lookups.
+/// Supports optional live-reloading when opened with `.watch()` or `.auto_update()`.
 pub struct Database {
     data: DatabaseStorage,
     format: DatabaseFormat,
     ip_header: Option<MmdbHeader>,
-    /// Literal hash table for O(1) exact string lookups
     literal_hash: Option<LiteralHash<'static>>,
-    /// Pattern matcher for glob patterns (Combined or PatternOnly databases)
-    /// Thread-safe: uses thread-local buffers internally
     pattern_matcher: Option<Paraglob>,
-    /// For combined databases: lazy mapping from pattern_id -> data offset in MMDB data section
-    /// None for pattern-only databases (which use Paraglob's internal data)
     pattern_data_mappings: Option<PatternDataMappings>,
-    /// Cache configuration (capacity)
     cache_capacity: usize,
-    /// Whether caching is enabled
     cache_enabled: bool,
-    /// Query statistics (thread-safe atomic counters, shared across clones)
     stats: Arc<DatabaseStats>,
-    /// Cache generation counter (for cache invalidation)
     cache_generation: u64,
+    #[cfg(not(target_family = "wasm"))]
+    live: Option<Box<LiveState>>,
 }
 
-// Safety: Database is Send + Sync because:
-// 1. All data is either owned (DatabaseStorage) or 'static references to mmap
-// 2. All components (pattern_matcher, literal_hash, ip_tree) are read-only references to mmap
-// 3. Scratch buffers (for pattern matching) use thread-local storage, not shared state
-// 4. Caching uses thread-local storage (each thread has its own cache)
-// 5. No interior mutability after initialization
 unsafe impl Send for Database {}
 unsafe impl Sync for Database {}
 
@@ -645,20 +709,61 @@ impl Database {
         Self::from_storage(DatabaseStorage::Owned(data))
     }
 
-    /// Internal: Create database from storage
+    #[cfg(not(target_family = "wasm"))]
+    fn with_live_state(live_state: LiveState) -> Self {
+        let snapshot = live_state.current.load_full();
+        Self {
+            data: DatabaseStorage::Owned(vec![]),
+            format: snapshot.format,
+            ip_header: None,
+            literal_hash: None,
+            pattern_matcher: None,
+            pattern_data_mappings: None,
+            cache_capacity: snapshot.cache_capacity,
+            cache_enabled: snapshot.cache_enabled,
+            stats: snapshot.stats.clone(),
+            cache_generation: live_state.generation.load(Ordering::Acquire),
+            live: Some(Box::new(live_state)),
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn lookup_live(
+        &self,
+        query: &str,
+        live: &LiveState,
+    ) -> Result<Option<QueryResult>, DatabaseError> {
+        use crate::updater::LOCAL_DB;
+
+        let current_gen = live.generation.load(Ordering::Acquire);
+        let db = LOCAL_DB.with(|local| {
+            let mut local_ref = local.borrow_mut();
+            match &*local_ref {
+                Some((gen, db)) if *gen == current_gen => db.clone(),
+                _ => {
+                    let new_db = live.current.load_full();
+                    *local_ref = Some((current_gen, new_db.clone()));
+                    new_db
+                }
+            }
+        });
+        db.lookup(query)
+    }
+
     fn from_storage(storage: DatabaseStorage) -> Result<Self, DatabaseError> {
-        // First, create the struct with minimal initialization
         let mut db = Self {
             data: storage,
-            format: DatabaseFormat::IpOnly, // Temporary, will be set below
+            format: DatabaseFormat::IpOnly,
             ip_header: None,
             literal_hash: None,
             pattern_matcher: None,
             pattern_data_mappings: None,
             cache_capacity: DEFAULT_QUERY_CACHE_SIZE,
-            cache_enabled: true, // Default: cache enabled
+            cache_enabled: true,
             stats: Arc::new(DatabaseStats::default()),
             cache_generation: next_cache_generation(),
+            #[cfg(not(target_family = "wasm"))]
+            live: None,
         };
 
         // Now we can safely get 'static reference since db owns the data
@@ -712,18 +817,29 @@ impl Database {
         Ok(db)
     }
 
-    /// Look up a query string (IP address or string pattern)
-    ///
-    /// Automatically determines if the query is an IP address or string
-    /// and uses the appropriate lookup method.
-    ///
-    /// Queries are cached in thread-local storage. Each thread maintains
-    /// its own LRU cache for zero-contention access. Cache hit rates
-    /// of 80-95% are typical in log processing workloads.
-    ///
+    /// Get the current generation counter. Increments on each reload.
+    /// Returns 0 for static (non-watching) databases.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn generation(&self) -> u64 {
+        match &self.live {
+            Some(live) => live.generation.load(Ordering::Acquire),
+            None => 0,
+        }
+    }
+
+    #[cfg(target_family = "wasm")]
+    pub fn generation(&self) -> u64 {
+        0
+    }
+
+    /// Look up a query string (IP address or string pattern).
     /// Returns `Ok(Some(result))` if found, `Ok(None)` if not found.
     pub fn lookup(&self, query: &str) -> Result<Option<QueryResult>, DatabaseError> {
-        // Check thread-local cache first
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(ref live) = self.live {
+            return self.lookup_live(query, live);
+        }
+
         if let Some(Some(result)) = self.with_cache(|cache| cache.get(query).cloned()) {
             self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
             self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
@@ -1111,6 +1227,11 @@ impl Database {
     /// Returns the full metadata as a DataValue map, or None if this is not
     /// an MMDB-format database or if metadata cannot be parsed.
     pub fn metadata(&self) -> Option<DataValue> {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(live) = &self.live {
+            return live.current.load().metadata();
+        }
+
         if !self.has_ip_data() {
             return None;
         }
@@ -1118,6 +1239,18 @@ impl Database {
         use crate::mmdb::MmdbMetadata;
         let metadata = MmdbMetadata::from_file(self.data.as_slice()).ok()?;
         metadata.as_value().ok()
+    }
+
+    /// Get the update URL from database metadata, if set during build.
+    ///
+    /// Returns `None` if no update URL was set or if metadata is unavailable.
+    pub fn update_url(&self) -> Option<String> {
+        if let Some(DataValue::Map(map)) = self.metadata() {
+            if let Some(DataValue::String(url)) = map.get("update_url") {
+                return Some(url.clone());
+            }
+        }
+        None
     }
 
     /// Get pattern string by ID
@@ -1424,6 +1557,8 @@ pub enum DatabaseError {
     Format(MmdbError),
     /// Unsupported operation
     Unsupported(String),
+    /// Configuration error
+    Config(String),
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -1432,6 +1567,7 @@ impl std::fmt::Display for DatabaseError {
             DatabaseError::Io(msg) => write!(f, "I/O error: {}", msg),
             DatabaseError::Format(err) => write!(f, "Format error: {}", err),
             DatabaseError::Unsupported(msg) => write!(f, "Unsupported: {}", msg),
+            DatabaseError::Config(msg) => write!(f, "Configuration error: {}", msg),
         }
     }
 }
