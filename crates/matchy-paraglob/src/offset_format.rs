@@ -68,7 +68,7 @@ pub const MATCHY_FORMAT_VERSION_V1: u32 = 1;
 /// - v1 (72 bytes): Original format, patterns only
 /// - v2 (96 bytes): Adds data section support for pattern-associated data
 /// - v3 (104 bytes): Adds AC literal mapping for O(1) zero-copy loading
-/// - v4 (104 bytes): Uses ACNodeHot (16-byte) instead of ACNode (32-byte) - BREAKING
+/// - v4 (104 bytes): Uses ACNodeHot (20-byte) instead of ACNode (32-byte) - BREAKING
 /// - v5 (112 bytes): Adds serialized glob segments for zero-copy loading
 #[repr(C)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
