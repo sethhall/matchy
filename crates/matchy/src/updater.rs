@@ -57,6 +57,14 @@ pub struct ReloadEvent {
     pub source: ReloadSource,
 }
 
+/// Event fired when falling back to previous database version.
+pub struct FallbackEvent {
+    /// The error that triggered the fallback.
+    pub error: String,
+    /// Generation of the database we fell back to.
+    pub generation: u64,
+}
+
 /// What triggered a database reload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReloadSource {
@@ -69,6 +77,9 @@ pub enum ReloadSource {
 
 /// Callback type for reload notifications.
 pub type ReloadCallback = Arc<dyn Fn(ReloadEvent) + Send + Sync>;
+
+/// Callback type for fallback notifications.
+pub type FallbackCallback = Arc<dyn Fn(FallbackEvent) + Send + Sync>;
 
 pub(crate) struct UpdaterThread {
     shutdown: Arc<AtomicBool>,
@@ -87,7 +98,9 @@ impl Drop for UpdaterThread {
 /// Internal live database state.
 pub(crate) struct LiveState {
     pub(crate) current: Arc<ArcSwap<Database>>,
+    pub(crate) previous: Arc<ArcSwap<Option<Arc<Database>>>>,
     pub(crate) generation: Arc<AtomicU64>,
+    pub(crate) fallback_callback: Option<FallbackCallback>,
     pub(crate) _updater: UpdaterThread,
 }
 
@@ -101,6 +114,7 @@ pub(crate) struct LiveOptions {
     pub(crate) enabled: bool,
     pub(crate) poll_interval: Option<Duration>,
     pub(crate) reload_callback: Option<ReloadCallback>,
+    pub(crate) fallback_callback: Option<FallbackCallback>,
     #[cfg(feature = "auto-update")]
     pub(crate) auto_update_enabled: bool,
     #[cfg(feature = "auto-update")]
@@ -129,10 +143,12 @@ impl LiveOptions {
         let cache_dir = self.cache_dir.clone().unwrap_or_else(default_cache_dir);
 
         let current = Arc::new(ArcSwap::from_pointee(initial_db));
+        let previous: Arc<ArcSwap<Option<Arc<Database>>>> = Arc::new(ArcSwap::from_pointee(None));
         let generation = Arc::new(AtomicU64::new(initial_gen));
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let thread_current = Arc::clone(&current);
+        let thread_previous = Arc::clone(&previous);
         let thread_generation = Arc::clone(&generation);
         let thread_shutdown = Arc::clone(&shutdown);
         let thread_path = path.clone();
@@ -233,6 +249,8 @@ impl LiveOptions {
 
                     match Database::open_with_options(reload_options) {
                         Ok(new_db) => {
+                            let old_db = thread_current.load_full();
+                            thread_previous.store(Arc::new(Some(old_db)));
                             let old_gen = thread_generation.swap(new_gen, Ordering::Release);
                             thread_current.store(Arc::new(new_db));
                             Database::clear_cache_generation(old_gen);
@@ -265,7 +283,9 @@ impl LiveOptions {
 
         Ok(LiveState {
             current,
+            previous,
             generation,
+            fallback_callback: self.fallback_callback.clone(),
             _updater: UpdaterThread {
                 shutdown,
                 handle: Some(handle),
@@ -531,6 +551,76 @@ mod tests {
             db.update_url(),
             Some("https://example.com/db.mxy".to_string())
         );
+    }
+
+    #[test]
+    fn test_previous_database_stored_after_reload() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.mxy");
+
+        fs::write(&db_path, build_test_db("version1.com")).unwrap();
+
+        let reload_count = Arc::new(AtomicUsize::new(0));
+        let reload_count_clone = Arc::clone(&reload_count);
+
+        let db = Database::from(&db_path)
+            .watch()
+            .poll_interval(Duration::from_millis(50))
+            .on_reload(move |event| {
+                if event.success {
+                    reload_count_clone.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .open()
+            .unwrap();
+
+        assert!(db.lookup("version1.com").unwrap().is_some());
+        let initial_gen = db.generation();
+
+        thread::sleep(Duration::from_millis(100));
+
+        let temp_path = db_path.with_extension("tmp");
+        fs::write(&temp_path, build_test_db("version2.com")).unwrap();
+        fs::rename(&temp_path, &db_path).unwrap();
+
+        thread::sleep(Duration::from_millis(200));
+
+        assert!(
+            db.generation() > initial_gen,
+            "Generation should increase after reload"
+        );
+        assert!(
+            reload_count.load(Ordering::SeqCst) >= 1,
+            "Reload callback should have been called"
+        );
+
+        assert!(
+            db.lookup("version2.com").unwrap().is_some(),
+            "New data should be accessible after reload"
+        );
+    }
+
+    #[test]
+    fn test_fallback_callback_can_be_set() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.mxy");
+
+        fs::write(&db_path, build_test_db("test.com")).unwrap();
+
+        let fallback_count = Arc::new(AtomicUsize::new(0));
+        let fallback_count_clone = Arc::clone(&fallback_count);
+
+        let db = Database::from(&db_path)
+            .watch()
+            .poll_interval(Duration::from_millis(50))
+            .on_fallback(move |_event| {
+                fallback_count_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .open()
+            .unwrap();
+
+        assert!(db.lookup("test.com").unwrap().is_some());
+        assert_eq!(fallback_count.load(Ordering::SeqCst), 0);
     }
 }
 

@@ -33,7 +33,7 @@ use memmap2::Mmap;
 use std::fs::File;
 
 #[cfg(not(target_family = "wasm"))]
-pub use crate::updater::{ReloadCallback, ReloadEvent, ReloadSource};
+pub use crate::updater::{FallbackCallback, FallbackEvent, ReloadCallback, ReloadEvent, ReloadSource};
 
 // Per-database query cache type
 // Each database has its own cache, stored as thread-local for lock-free access
@@ -376,6 +376,17 @@ impl DatabaseOpener {
         F: Fn(ReloadEvent) + Send + Sync + 'static,
     {
         self.live.reload_callback = Some(Arc::new(callback));
+        self
+    }
+
+    /// Set callback for fallback notifications (when current database has errors
+    /// and we fall back to the previous version).
+    #[cfg(not(target_family = "wasm"))]
+    pub fn on_fallback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(FallbackEvent) + Send + Sync + 'static,
+    {
+        self.live.fallback_callback = Some(Arc::new(callback));
         self
     }
 
@@ -735,7 +746,7 @@ impl Database {
         query: &str,
         live: &LiveState,
     ) -> Result<Option<QueryResult>, DatabaseError> {
-        use crate::updater::LOCAL_DB;
+        use crate::updater::{FallbackEvent, LOCAL_DB};
 
         let current_gen = live.generation.load(Ordering::Acquire);
         let db = LOCAL_DB.with(|local| {
@@ -749,7 +760,37 @@ impl Database {
                 }
             }
         });
-        db.lookup(query)
+
+        match db.lookup(query) {
+            Ok(result) => Ok(result),
+            Err(e) if e.is_data_error() => {
+                if let Some(prev_db) = live.previous.load_full().as_ref() {
+                    match prev_db.lookup(query) {
+                        Ok(result) => {
+                            live.current.store(prev_db.clone());
+                            live.previous.store(Arc::new(None));
+
+                            LOCAL_DB.with(|local| {
+                                *local.borrow_mut() = None;
+                            });
+
+                            if let Some(ref callback) = live.fallback_callback {
+                                callback(FallbackEvent {
+                                    error: e.to_string(),
+                                    generation: live.generation.load(Ordering::Acquire),
+                                });
+                            }
+
+                            Ok(result)
+                        }
+                        Err(_) => Err(e),
+                    }
+                } else {
+                    Err(e)
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn from_storage(storage: DatabaseStorage) -> Result<Self, DatabaseError> {
@@ -1576,6 +1617,13 @@ impl std::fmt::Display for DatabaseError {
 }
 
 impl std::error::Error for DatabaseError {}
+
+impl DatabaseError {
+    /// Returns true if this error indicates data corruption that should trigger fallback.
+    pub fn is_data_error(&self) -> bool {
+        matches!(self, DatabaseError::Format(_))
+    }
+}
 
 #[cfg(test)]
 mod tests {
