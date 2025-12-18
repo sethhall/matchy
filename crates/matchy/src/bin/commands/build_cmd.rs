@@ -6,33 +6,7 @@ use std::fs;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
 use crate::cli_utils::json_to_data_map;
-
-/// Set file permissions to read-only (0444 on Unix, read-only attribute on Windows)
-fn set_readonly(path: &PathBuf) -> Result<()> {
-    let mut perms = fs::metadata(path)
-        .with_context(|| format!("Failed to get metadata for: {}", path.display()))?
-        .permissions();
-
-    #[cfg(unix)]
-    {
-        perms.set_mode(0o444); // r--r--r--
-    }
-
-    #[cfg(not(unix))]
-    {
-        // On Windows and other platforms, use the cross-platform read-only API
-        perms.set_readonly(true);
-    }
-
-    fs::set_permissions(path, perms)
-        .with_context(|| format!("Failed to set read-only permissions: {}", path.display()))?;
-
-    Ok(())
-}
 
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_build(
@@ -369,16 +343,11 @@ pub fn cmd_build(
         println!("Writing to disk...");
     }
 
-    fs::write(&output, &database_bytes)
-        .with_context(|| format!("Failed to save database: {}", output.display()))?;
-
-    // Set file to read-only to protect mmap integrity
-    set_readonly(&output).with_context(|| {
-        format!(
-            "Failed to set read-only permissions on: {}",
-            output.display()
-        )
-    })?;
+    let temp_path = output.with_extension("tmp");
+    fs::write(&temp_path, &database_bytes)
+        .with_context(|| format!("Failed to write temp file: {}", temp_path.display()))?;
+    fs::rename(&temp_path, &output)
+        .with_context(|| format!("Failed to rename to: {}", output.display()))?;
 
     // Always show success message (always displayed)
     if verbose || debug {
