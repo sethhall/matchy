@@ -13,6 +13,10 @@ env:
   # contention when multiple jobs share the same cached ~/.cargo directory
   CARGO_GC_AUTO: 0
 
+# Default to minimal permissions for all jobs
+permissions:
+  contents: read
+
 jobs:
   preflight:
     name: Preflight Checks

@@ -15,6 +15,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Default to minimal permissions for all jobs
+permissions:
+  contents: read
+
 jobs:
   build-release:
     name: Build Release
