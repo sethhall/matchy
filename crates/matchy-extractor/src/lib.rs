@@ -1419,8 +1419,8 @@ impl<'a> ExactSizeIterator for ExtractIter<'a> {}
 
 /// Public Suffix List hash table - compiled at build time, zero heap allocation.
 ///
-/// Format: [magic:4][version:4][count:4][table_size:4][hash_table][string_pool]
-/// Each hash entry: [hash:8][string_offset:4][string_len:4]
+/// Format: `[magic:4][version:4][count:4][table_size:4][hash_table][string_pool]`
+/// Each hash entry: `[hash:8][string_offset:4][string_len:4]`
 ///
 /// This enables O(1) TLD lookups without any runtime heap allocation.
 /// The data lives in the binary's read-only section and is shared across processes.
