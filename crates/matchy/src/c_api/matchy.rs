@@ -3,7 +3,7 @@
 //! This module provides a modern, clean C API for building and querying databases
 //! containing IP addresses and patterns. This is the primary public API.
 
-use crate::database::{Database, QueryResult, ReloadEvent};
+use crate::database::{Database, ReloadEvent};
 use crate::schema_validation::SchemaValidator;
 use crate::schemas::{get_schema_info, is_known_database_type};
 use crate::DatabaseBuilder;
@@ -85,16 +85,18 @@ pub struct matchy_t {
     _private: [u8; 0],
 }
 
-/// Query result
+/// Query result (zero-allocation)
 #[repr(C)]
 pub struct matchy_result_t {
     /// Whether a match was found
     pub found: bool,
     /// Network prefix length (for IP results)
     pub prefix_len: u8,
-    /// Internal pointer to cached DataValue (opaque, for structured data access)
-    pub _data_cache: *mut (),
-    /// Internal database reference (for entry.db population)
+    /// Result type: 0=not found, 1=ip, 2=pattern
+    pub _result_type: u8,
+    /// Data offset into mmap'd data section (use matchy_aget_value to decode)
+    pub _data_offset: u32,
+    /// Internal database reference (for decoding)
     pub _db_ref: *const matchy_t,
 }
 
@@ -1043,70 +1045,33 @@ pub unsafe extern "C" fn matchy_query(
     db: *const matchy_t,
     query: *const c_char,
 ) -> matchy_result_t {
+    let empty_result = matchy_result_t {
+        found: false,
+        prefix_len: 0,
+        _result_type: 0,
+        _data_offset: 0,
+        _db_ref: ptr::null(),
+    };
+
     if db.is_null() || query.is_null() {
-        return matchy_result_t {
-            found: false,
-            prefix_len: 0,
-            _data_cache: ptr::null_mut(),
-            _db_ref: ptr::null(),
-        };
+        return empty_result;
     }
 
     let query_str = match CStr::from_ptr(query).to_str() {
         Ok(s) => s,
-        Err(_) => {
-            return matchy_result_t {
-                found: false,
-                prefix_len: 0,
-                _data_cache: ptr::null_mut(),
-                _db_ref: ptr::null(),
-            }
-        }
+        Err(_) => return empty_result,
     };
 
     let internal = matchy_t::as_internal(db);
-    match internal.database.lookup(query_str) {
-        Ok(Some(QueryResult::Ip { data, prefix_len })) => {
-            // Cache the DataValue for structured access
-            let data_cache = Box::new(data);
-            let data_cache_ptr = Box::into_raw(data_cache) as *mut ();
-
-            matchy_result_t {
-                found: true,
-                prefix_len,
-                _data_cache: data_cache_ptr,
-                _db_ref: db,
-            }
-        }
-        Ok(Some(QueryResult::Pattern {
-            pattern_ids: _,
-            data,
-        })) => {
-            // For patterns, return the first match's data
-            if let Some(Some(first_data)) = data.first() {
-                let data_cache = Box::new(first_data.clone());
-                let data_cache_ptr = Box::into_raw(data_cache) as *mut ();
-
-                return matchy_result_t {
-                    found: true,
-                    prefix_len: 0,
-                    _data_cache: data_cache_ptr,
-                    _db_ref: db,
-                };
-            }
-            matchy_result_t {
-                found: false,
-                prefix_len: 0,
-                _data_cache: ptr::null_mut(),
-                _db_ref: ptr::null(),
-            }
-        }
-        _ => matchy_result_t {
-            found: false,
-            prefix_len: 0,
-            _data_cache: ptr::null_mut(),
-            _db_ref: ptr::null(),
+    match internal.database.lookup_ref(query_str) {
+        Ok(lookup_ref) if lookup_ref.found => matchy_result_t {
+            found: true,
+            prefix_len: lookup_ref.prefix_len,
+            _result_type: lookup_ref.result_type,
+            _data_offset: lookup_ref.data_offset,
+            _db_ref: db,
         },
+        _ => empty_result,
     }
 }
 
@@ -1146,23 +1111,19 @@ pub unsafe extern "C" fn matchy_query_into(
     *result = matchy_query(db, query);
 }
 
-/// Free query result
+/// Free query result (no-op in zero-allocation API)
 ///
-/// Frees the memory allocated for a query result.
+/// This function exists for ABI compatibility but does nothing since
+/// matchy_result_t now uses offsets instead of heap-allocated data.
 ///
 /// # Parameters
-/// * `result` - Pointer to result from matchy_query (must not be NULL)
+/// * `result` - Pointer to result from matchy_query (may be NULL)
 ///
 /// # Safety
-/// * `result` must be a valid pointer to a result from matchy_query
-/// * Must not be called twice on the same result
+/// * Safe to call with any pointer including NULL
 #[no_mangle]
-pub unsafe extern "C" fn matchy_free_result(result: *mut matchy_result_t) {
-    if !result.is_null() && !(*result)._data_cache.is_null() {
-        // Free the cached DataValue
-        let _ = Box::from_raw((*result)._data_cache as *mut DataValue);
-        (*result)._data_cache = ptr::null_mut();
-    }
+pub unsafe extern "C" fn matchy_free_result(_result: *mut matchy_result_t) {
+    // No-op: matchy_result_t now stores offsets, not heap pointers
 }
 
 /// Free a string returned by matchy
@@ -1511,8 +1472,8 @@ pub struct matchy_entry_data_t {
 pub struct matchy_entry_s {
     /// Database handle
     pub db: *const matchy_t,
-    /// Cached data pointer (internal)
-    pub data_ptr: *const (),
+    /// Data offset into MMDB data section
+    pub _data_offset: u32,
 }
 
 /// Entry data list node (like MMDB_entry_data_list_s)
@@ -1686,9 +1647,8 @@ pub unsafe extern "C" fn matchy_result_get_entry(
         return MATCHY_ERROR_NO_DATA;
     }
 
-    // Populate entry with database reference and result pointer
     (*entry).db = res._db_ref;
-    (*entry).data_ptr = result as *const ();
+    (*entry)._data_offset = res._data_offset;
 
     MATCHY_SUCCESS
 }
@@ -1728,7 +1688,6 @@ pub unsafe extern "C" fn matchy_aget_value(
         return MATCHY_ERROR_INVALID_PARAM;
     }
 
-    // Convert path array to Vec
     let mut path_vec = Vec::new();
     let mut i = 0;
     loop {
@@ -1743,24 +1702,22 @@ pub unsafe extern "C" fn matchy_aget_value(
         i += 1;
     }
 
-    // Get result and access cached DataValue directly
-    let result_ptr = (*entry).data_ptr as *const matchy_result_t;
-    if result_ptr.is_null() {
+    let db = (*entry).db;
+    if db.is_null() {
         (*entry_data) = matchy_entry_data_t::empty();
         return MATCHY_ERROR_NO_DATA;
     }
 
-    let result = &*result_ptr;
-    if result._data_cache.is_null() {
-        (*entry_data) = matchy_entry_data_t::empty();
-        return MATCHY_ERROR_NO_DATA;
-    }
+    let internal = matchy_t::as_internal(db);
+    let data = match internal.database.decode_at_offset((*entry)._data_offset) {
+        Ok(d) => d,
+        Err(_) => {
+            (*entry_data) = matchy_entry_data_t::empty();
+            return MATCHY_ERROR_DATA_PARSE;
+        }
+    };
 
-    // Access the cached DataValue directly - no JSON parsing!
-    let data = &*(result._data_cache as *const DataValue);
-
-    // Navigate
-    let target = match navigate_path(data, &path_vec) {
+    let target = match navigate_path(&data, &path_vec) {
         Some(v) => v,
         None => {
             (*entry_data) = matchy_entry_data_t::empty();
@@ -1768,11 +1725,10 @@ pub unsafe extern "C" fn matchy_aget_value(
         }
     };
 
-    // Convert
     let mut string_cache = Vec::new();
     match matchy_entry_data_t::from_data_value(target, &mut string_cache) {
-        Some(data) => {
-            (*entry_data) = data;
+        Some(d) => {
+            (*entry_data) = d;
             std::mem::forget(string_cache);
             MATCHY_SUCCESS
         }
@@ -1820,20 +1776,16 @@ pub unsafe extern "C" fn matchy_get_entry_data_list(
         return MATCHY_ERROR_INVALID_PARAM;
     }
 
-    // Get result and access cached DataValue (same as aget_value)
-    let result_ptr = (*entry).data_ptr as *const matchy_result_t;
-    if result_ptr.is_null() {
+    let db = (*entry).db;
+    if db.is_null() {
         return MATCHY_ERROR_NO_DATA;
     }
 
-    let result = &*result_ptr;
-    if result._data_cache.is_null() {
-        return MATCHY_ERROR_NO_DATA;
-    }
-
-    let data = &*(result._data_cache as *const DataValue);
-
-    // Build a flat list by traversing the data structure
+    let internal = matchy_t::as_internal(db);
+    let data = match internal.database.decode_at_offset((*entry)._data_offset) {
+        Ok(d) => d,
+        Err(_) => return MATCHY_ERROR_DATA_PARSE,
+    };
     let mut string_cache = Vec::new();
     let mut list_head: *mut matchy_entry_data_list_t = ptr::null_mut();
     let mut list_tail: *mut matchy_entry_data_list_t = ptr::null_mut();
@@ -1884,7 +1836,7 @@ pub unsafe extern "C" fn matchy_get_entry_data_list(
         }
     }
 
-    flatten_data(data, &mut string_cache, &mut add_node);
+    flatten_data(&data, &mut string_cache, &mut add_node);
 
     // Leak the string cache so pointers remain valid
     std::mem::forget(string_cache);
@@ -2019,20 +1971,21 @@ pub extern "C" fn matchy_has_auto_update() -> bool {
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_result_to_json(result: *const matchy_result_t) -> *mut c_char {
-    if result.is_null() || !(*result).found || (*result)._data_cache.is_null() {
+    if result.is_null() || !(*result).found || (*result)._db_ref.is_null() {
         return ptr::null_mut();
     }
 
-    // Get the cached DataValue
-    let data = &*((*result)._data_cache as *const DataValue);
+    let internal = matchy_t::as_internal((*result)._db_ref);
+    let data = match internal.database.decode_at_offset((*result)._data_offset) {
+        Ok(d) => d,
+        Err(_) => return ptr::null_mut(),
+    };
 
-    // Convert to JSON
-    let json_str = match serde_json::to_string(data) {
+    let json_str = match serde_json::to_string(&data) {
         Ok(s) => s,
         Err(_) => return ptr::null_mut(),
     };
 
-    // Convert to C string
     match CString::new(json_str) {
         Ok(c_str) => c_str.into_raw(),
         Err(_) => ptr::null_mut(),

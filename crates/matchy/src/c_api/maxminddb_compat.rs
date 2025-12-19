@@ -156,7 +156,6 @@ pub unsafe extern "C" fn MMDB_lookup_string(
     gai_error: *mut c_int,
     mmdb_error: *mut c_int,
 ) -> MMDB_lookup_result_s {
-    // Helper to set errors and return empty result
     let set_error = |gai: c_int, mmdb_err: c_int| {
         if !gai_error.is_null() {
             *gai_error = gai;
@@ -183,35 +182,24 @@ pub unsafe extern "C" fn MMDB_lookup_string(
         return set_error(0, MMDB_INVALID_DATA_ERROR);
     }
 
-    // Query using matchy
     let result = matchy_query(db, ipstr);
 
     if !result.found {
         return set_error(0, MMDB_SUCCESS);
     }
 
-    // Box the result to keep it alive - matchy_aget_value expects
-    // data_ptr to point to a matchy_result_t, not directly to the DataValue.
-    // This is a deliberate memory leak that matches libmaxminddb behavior
-    // (data persists until db is closed).
-    let result_box = Box::new(result);
-    let result_ptr = Box::into_raw(result_box);
-
-    let mmdb_entry = MMDB_entry_s {
-        mmdb,
-        _matchy_entry: matchy_entry_s {
-            db,
-            data_ptr: result_ptr as *const (),
-        },
-    };
-
     let lookup_result = MMDB_lookup_result_s {
         found_entry: true,
-        entry: mmdb_entry,
-        netmask: (*result_ptr).prefix_len as u16,
+        entry: MMDB_entry_s {
+            mmdb,
+            _matchy_entry: matchy_entry_s {
+                db,
+                _data_offset: result._data_offset,
+            },
+        },
+        netmask: result.prefix_len as u16,
     };
 
-    // Set success
     if !gai_error.is_null() {
         *gai_error = 0;
     }

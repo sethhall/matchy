@@ -143,6 +143,8 @@ pub enum QueryResult {
         data: DataValue,
         /// Network prefix length (CIDR)
         prefix_len: u8,
+        /// Offset to data in MMDB data section (for C API)
+        data_offset: u32,
     },
     /// Pattern match result
     Pattern {
@@ -150,9 +152,60 @@ pub enum QueryResult {
         pattern_ids: Vec<u32>,
         /// Optional data for matched patterns
         data: Vec<Option<DataValue>>,
+        /// Offsets to data in MMDB data section (for C API)
+        data_offsets: Vec<u32>,
     },
     /// Not found
     NotFound,
+}
+
+/// Zero-allocation lookup result for C API.
+/// Stores offsets into mmap'd data instead of owned values.
+#[derive(Debug, Clone, Copy)]
+pub struct LookupRef {
+    /// Whether a match was found
+    pub found: bool,
+    /// Offset to data in the MMDB data section (0 if not found or no data)
+    pub data_offset: u32,
+    /// Network prefix length (for IP results, 0 for patterns)
+    pub prefix_len: u8,
+    /// Result type: 0=not found, 1=ip, 2=pattern
+    pub result_type: u8,
+}
+
+impl LookupRef {
+    /// Create a not-found result
+    #[inline]
+    pub const fn not_found() -> Self {
+        Self {
+            found: false,
+            data_offset: 0,
+            prefix_len: 0,
+            result_type: 0,
+        }
+    }
+
+    /// Create an IP lookup result
+    #[inline]
+    pub const fn ip(data_offset: u32, prefix_len: u8) -> Self {
+        Self {
+            found: true,
+            data_offset,
+            prefix_len,
+            result_type: 1,
+        }
+    }
+
+    /// Create a pattern lookup result
+    #[inline]
+    pub const fn pattern(data_offset: u32) -> Self {
+        Self {
+            found: true,
+            data_offset,
+            prefix_len: 0,
+            result_type: 2,
+        }
+    }
 }
 
 /// Database format type
@@ -811,7 +864,22 @@ impl Database {
             live: None,
         };
 
-        // Now we can safely get 'static reference since db owns the data
+        // SAFETY: This transmute extends the lifetime of `db.data.as_slice()` to 'static.
+        //
+        // This is a "self-referential struct" pattern and is sound because:
+        // 1. `db.data` is owned by this Database instance (either Vec<u8> or Mmap)
+        // 2. The resulting 'static references are stored in fields also owned by Database
+        //    (ip_header, literal_hash, pattern_matcher, pattern_data_mappings)
+        // 3. Database ensures `data` cannot be dropped while any references exist
+        // 4. All references become invalid when Database drops, and Rust's ownership
+        //    prevents them from escaping (they're private fields)
+        //
+        // The key invariant: Database owns BOTH the backing data AND all structures
+        // that reference it. They are created and destroyed together.
+        //
+        // Alternative approaches (ouroboros, self_cell crates) were considered but
+        // add dependency complexity. This pattern is well-contained within Database
+        // initialization and the invariant is straightforward to maintain.
         let data: &'static [u8] = unsafe { std::mem::transmute(db.data.as_slice()) };
 
         // Detect format
@@ -984,12 +1052,12 @@ impl Database {
             None => return Ok(Some(QueryResult::NotFound)),
         };
 
-        // Decode data
         let data = self.decode_ip_data(header, tree_result.data_offset)?;
 
         Ok(Some(QueryResult::Ip {
             data,
             prefix_len: tree_result.prefix_len,
+            data_offset: tree_result.data_offset,
         }))
     }
 
@@ -1073,11 +1141,11 @@ impl Database {
     fn lookup_string_uncached(&self, pattern: &str) -> Result<Option<QueryResult>, DatabaseError> {
         let mut all_pattern_ids = Vec::new();
         let mut all_data_values = Vec::new();
+        let mut all_data_offsets = Vec::new();
 
         // 1. Try literal hash table first (O(1) lookup)
         if let Some(literal_hash) = &self.literal_hash {
             if let Some(pattern_id) = literal_hash.lookup(pattern) {
-                // Found an exact match!
                 if let Some(data_offset) = literal_hash.get_data_offset(pattern_id) {
                     let header = self.ip_header.as_ref().ok_or_else(|| {
                         DatabaseError::Format(MmdbError::InvalidFormat(
@@ -1087,6 +1155,7 @@ impl Database {
                     let data = self.decode_ip_data(header, data_offset)?;
                     all_pattern_ids.push(pattern_id);
                     all_data_values.push(Some(data));
+                    all_data_offsets.push(data_offset);
                 }
             }
         }
@@ -1095,49 +1164,44 @@ impl Database {
         if let Some(ref pg) = self.pattern_matcher {
             let glob_pattern_ids = pg.find_all(pattern);
 
-            // Add glob matches
             for &pattern_id in &glob_pattern_ids {
-                // For combined databases, use mappings to decode from MMDB data section
-                // For pattern-only databases, use Paraglob's internal data cache
-                let data = match (&self.pattern_data_mappings, &self.ip_header) {
+                let (data, offset) = match (&self.pattern_data_mappings, &self.ip_header) {
                     (Some(mappings), Some(header)) => {
-                        // Combined database: decode from MMDB data section using lazy lookup
                         if let Some(data_offset) =
                             mappings.get_offset(pattern_id, self.data.as_slice())
                         {
-                            Some(self.decode_ip_data(header, data_offset)?)
+                            (Some(self.decode_ip_data(header, data_offset)?), data_offset)
                         } else {
-                            None
+                            (None, 0)
                         }
                     }
                     (Some(_), None) => {
-                        // Invalid state: pattern_data_mappings requires ip_header to be set
                         unreachable!(
                             "pattern_data_mappings present without ip_header - invalid database state"
                         )
                     }
                     (None, _) => {
-                        // Pattern-only database: use Paraglob's lazy data lookup
-                        pg.get_pattern_data(pattern_id)
+                        // Pattern-only database: no MMDB offsets available
+                        (pg.get_pattern_data(pattern_id), 0)
                     }
                 };
                 all_pattern_ids.push(pattern_id);
                 all_data_values.push(data);
+                all_data_offsets.push(offset);
             }
         }
 
-        // Return results
         if all_pattern_ids.is_empty() {
-            // Only return NotFound if we actually have some pattern data
             if self.literal_hash.is_some() || self.pattern_matcher.is_some() {
                 Ok(Some(QueryResult::NotFound))
             } else {
-                Ok(None) // No pattern data in this database
+                Ok(None)
             }
         } else {
             Ok(Some(QueryResult::Pattern {
                 pattern_ids: all_pattern_ids,
                 data: all_data_values,
+                data_offsets: all_data_offsets,
             }))
         }
     }
@@ -1179,6 +1243,123 @@ impl Database {
         decoder
             .decode(offset)
             .map_err(|e| DatabaseError::Format(MmdbError::DecodeError(e.to_string())))
+    }
+
+    /// Zero-allocation lookup that returns offsets instead of decoded data.
+    ///
+    /// This is designed for the C API where queries that just check `found`
+    /// should not allocate. Data can be decoded on-demand via `decode_at_offset()`.
+    ///
+    /// # Arguments
+    /// * `query` - IP address or string to look up
+    ///
+    /// # Returns
+    /// `LookupRef` containing:
+    /// - `found`: whether a match was found
+    /// - `data_offset`: offset into the MMDB data section (use with `decode_at_offset()`)
+    /// - `prefix_len`: network prefix length (for IP results)
+    /// - `result_type`: 0=not found, 1=ip, 2=pattern
+    pub fn lookup_ref(&self, query: &str) -> Result<LookupRef, DatabaseError> {
+        // Check cache first - if hit, derive LookupRef from cached QueryResult
+        if let Some(Some(result)) = self.with_cache(|cache| cache.get(query).cloned()) {
+            return Ok(match result {
+                QueryResult::Ip {
+                    prefix_len,
+                    data_offset,
+                    ..
+                } => LookupRef::ip(data_offset, prefix_len),
+                QueryResult::Pattern { data_offsets, .. } => {
+                    LookupRef::pattern(*data_offsets.first().unwrap_or(&0))
+                }
+                QueryResult::NotFound => LookupRef::not_found(),
+            });
+        }
+
+        // Cache miss - do uncached lookup
+        if let Ok(addr) = query.parse::<IpAddr>() {
+            self.lookup_ip_ref(addr)
+        } else {
+            self.lookup_string_ref(query)
+        }
+    }
+
+    /// Zero-allocation IP lookup that returns offset instead of decoded data.
+    fn lookup_ip_ref(&self, addr: IpAddr) -> Result<LookupRef, DatabaseError> {
+        let header = match &self.ip_header {
+            Some(h) => h,
+            None => return Ok(LookupRef::not_found()),
+        };
+
+        let tree = SearchTree::new(self.data.as_slice(), header);
+        let tree_result = tree.lookup(addr).map_err(DatabaseError::Format)?;
+
+        match tree_result {
+            Some(r) => Ok(LookupRef::ip(r.data_offset, r.prefix_len)),
+            None => Ok(LookupRef::not_found()),
+        }
+    }
+
+    /// Zero-allocation string lookup that returns offset instead of decoded data.
+    fn lookup_string_ref(&self, pattern: &str) -> Result<LookupRef, DatabaseError> {
+        // 1. Try literal hash table first (O(1) lookup)
+        if let Some(literal_hash) = &self.literal_hash {
+            if let Some(pattern_id) = literal_hash.lookup(pattern) {
+                if let Some(data_offset) = literal_hash.get_data_offset(pattern_id) {
+                    return Ok(LookupRef::pattern(data_offset));
+                }
+            }
+        }
+
+        // 2. Check glob patterns (for wildcard matches)
+        if let Some(ref pg) = self.pattern_matcher {
+            let glob_pattern_ids = pg.find_all(pattern);
+
+            // Return the first match's offset
+            if let Some(&pattern_id) = glob_pattern_ids.first() {
+                // For combined databases, use mappings to get offset
+                if let Some(mappings) = &self.pattern_data_mappings {
+                    if let Some(data_offset) = mappings.get_offset(pattern_id, self.data.as_slice())
+                    {
+                        return Ok(LookupRef::pattern(data_offset));
+                    }
+                }
+            }
+        }
+
+        Ok(LookupRef::not_found())
+    }
+
+    /// Decode data at a given offset in the MMDB data section.
+    ///
+    /// This is the companion to `lookup_ref()` - use it to decode data on-demand
+    /// after getting an offset from a zero-allocation lookup.
+    ///
+    /// # Arguments
+    /// * `offset` - Offset into the MMDB data section (from `LookupRef.data_offset`)
+    ///
+    /// # Returns
+    /// The decoded `DataValue` or an error if the offset is invalid.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use matchy::Database;
+    ///
+    /// let db = Database::from("threats.mxy").open()?;
+    /// let lookup = db.lookup_ref("1.2.3.4")?;
+    /// if lookup.found {
+    ///     let data = db.decode_at_offset(lookup.data_offset)?;
+    ///     println!("Data: {:?}", data);
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn decode_at_offset(&self, offset: u32) -> Result<DataValue, DatabaseError> {
+        let header = self.ip_header.as_ref().ok_or_else(|| {
+            DatabaseError::Format(MmdbError::InvalidFormat(
+                "No IP header - cannot decode data".to_string(),
+            ))
+        })?;
+
+        self.decode_ip_data(header, offset)
     }
 
     /// Detect database format (optimized to avoid full file scan)
@@ -1651,7 +1832,7 @@ mod tests {
         let result = db.lookup("1.1.1.1").unwrap();
         assert!(result.is_some());
 
-        if let Some(QueryResult::Ip { data, prefix_len }) = result {
+        if let Some(QueryResult::Ip { data, prefix_len, .. }) = result {
             assert!(prefix_len > 0);
             assert!(prefix_len <= 32);
 

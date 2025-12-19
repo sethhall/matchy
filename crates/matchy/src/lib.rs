@@ -146,7 +146,8 @@ pub mod c_api;
 
 /// Unified database for IP and pattern lookups
 pub use crate::database::{
-    Database, DatabaseError, DatabaseOpener, DatabaseOptions, DatabaseStats, QueryResult,
+    Database, DatabaseError, DatabaseOpener, DatabaseOptions, DatabaseStats, LookupRef,
+    QueryResult,
 };
 
 #[cfg(not(target_family = "wasm"))]

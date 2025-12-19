@@ -454,7 +454,7 @@ typedef struct matchy_stats_t {
 } matchy_stats_t;
 
 /*
- Query result
+ Query result (zero-allocation)
  */
 typedef struct matchy_result_t {
   /*
@@ -466,11 +466,15 @@ typedef struct matchy_result_t {
    */
   uint8_t prefix_len;
   /*
-   Internal pointer to cached DataValue (opaque, for structured data access)
+   Result type: 0=not found, 1=ip, 2=pattern
    */
-  void *_data_cache;
+  uint8_t _result_type;
   /*
-   Internal database reference (for entry.db population)
+   Data offset into mmap'd data section (use matchy_aget_value to decode)
+   */
+  uint32_t _data_offset;
+  /*
+   Internal database reference (for decoding)
    */
   const struct matchy_t *_db_ref;
 } matchy_result_t;
@@ -484,9 +488,9 @@ typedef struct matchy_entry_s {
    */
   const struct matchy_t *db;
   /*
-   Cached data pointer (internal)
+   Data offset into MMDB data section
    */
-  const void *data_ptr;
+  uint32_t _data_offset;
 } matchy_entry_s;
 
 /*
@@ -1055,18 +1059,18 @@ struct matchy_result_t matchy_query(const struct matchy_t *db, const char *query
 void matchy_query_into(const struct matchy_t *db, const char *query, struct matchy_result_t *result);
 
 /*
- Free query result
+ Free query result (no-op in zero-allocation API)
 
- Frees the memory allocated for a query result.
+ This function exists for ABI compatibility but does nothing since
+ matchy_result_t now uses offsets instead of heap-allocated data.
 
  # Parameters
- * `result` - Pointer to result from matchy_query (must not be NULL)
+ * `result` - Pointer to result from matchy_query (may be NULL)
 
  # Safety
- * `result` must be a valid pointer to a result from matchy_query
- * Must not be called twice on the same result
+ * Safe to call with any pointer including NULL
  */
-void matchy_free_result(struct matchy_result_t *result);
+void matchy_free_result(struct matchy_result_t *_result);
 
 /*
  Free a string returned by matchy
