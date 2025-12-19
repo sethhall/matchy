@@ -27,7 +27,7 @@ pub fn cmd_query(database: PathBuf, query: String, quiet: bool) -> Result<()> {
 
     // Default: JSON output with data - always return array for consistency
     match result {
-        Some(QueryResult::Pattern { pattern_ids, data }) => {
+        Some(QueryResult::Pattern { pattern_ids, data, .. }) => {
             if pattern_ids.is_empty() {
                 // No matches - return empty array
                 println!("[]");
@@ -45,7 +45,7 @@ pub fn cmd_query(database: PathBuf, query: String, quiet: bool) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&json!(results))?);
             }
         }
-        Some(QueryResult::Ip { data, prefix_len }) => {
+        Some(QueryResult::Ip { data, prefix_len, .. }) => {
             let cidr = format_cidr(&query, prefix_len);
             let mut result = data_value_to_json(&data);
 

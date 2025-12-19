@@ -31,7 +31,7 @@ fn test_literal_exact_match() {
     // Test exact match
     let result = db.lookup("evil.com").unwrap().unwrap();
     match result {
-        QueryResult::Pattern { pattern_ids, data } => {
+        QueryResult::Pattern { pattern_ids, data, .. } => {
             assert_eq!(pattern_ids.len(), 1);
             assert!(data[0].is_some());
             if let Some(DataValue::Map(map)) = &data[0] {
@@ -90,7 +90,7 @@ fn test_literal_and_glob_both_match() {
     // Query should match BOTH the literal AND the glob
     let result = db.lookup("evil.com").unwrap().unwrap();
     match result {
-        QueryResult::Pattern { pattern_ids, data } => {
+        QueryResult::Pattern { pattern_ids, data, .. } => {
             // Should have 2 matches: one from literal, one from glob
             assert_eq!(pattern_ids.len(), 2, "Should match both literal and glob");
 

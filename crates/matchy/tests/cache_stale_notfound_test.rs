@@ -121,7 +121,7 @@ fn test_stale_notfound_does_not_persist() {
         );
 
         // Verify we got the right data
-        if let Some(QueryResult::Ip { data, prefix_len }) = result_b {
+        if let Some(QueryResult::Ip { data, prefix_len, .. }) = result_b {
             println!("  Matched with prefix_len={}, data={:?}", prefix_len, data);
         }
     }

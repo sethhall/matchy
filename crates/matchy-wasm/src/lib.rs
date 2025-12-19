@@ -103,7 +103,7 @@ impl Database {
             .map_err(|e| JsError::new(&format!("Lookup error: {}", e)))?;
 
         match result {
-            Some(QueryResult::Ip { data, prefix_len }) => {
+            Some(QueryResult::Ip { data, prefix_len, .. }) => {
                 let js_data = query_result_to_js(&data, Some(prefix_len))?;
                 Ok(js_data)
             }
@@ -138,7 +138,7 @@ impl Database {
             .map_err(|e| JsError::new(&format!("Lookup error: {}", e)))?;
 
         match result {
-            Some(QueryResult::Ip { data, prefix_len }) => {
+            Some(QueryResult::Ip { data, prefix_len, .. }) => {
                 let js_data = query_result_to_js(&data, Some(prefix_len))?;
                 Ok(js_data)
             }

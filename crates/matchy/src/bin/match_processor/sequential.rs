@@ -160,7 +160,7 @@ pub fn process_file(
 
                     // Add match-specific fields
                     match &result {
-                        Some(matchy::QueryResult::Pattern { pattern_ids, data }) => {
+                        Some(matchy::QueryResult::Pattern { pattern_ids, data, .. }) => {
                             match_obj["match_type"] = json!("pattern");
                             match_obj["pattern_count"] = json!(pattern_ids.len());
                             if !data.is_empty() {
@@ -173,7 +173,7 @@ pub fn process_file(
                                 }
                             }
                         }
-                        Some(matchy::QueryResult::Ip { data, prefix_len }) => {
+                        Some(matchy::QueryResult::Ip { data, prefix_len, .. }) => {
                             match_obj["match_type"] = json!("ip");
                             match_obj["prefix_len"] = json!(prefix_len);
                             match_obj["cidr"] = json!(format_cidr(&candidate_str, *prefix_len));
@@ -345,7 +345,7 @@ pub fn process_file_with_aggregate(
 
                     // Add match-specific fields
                     match &result {
-                        Some(matchy::QueryResult::Pattern { pattern_ids, data }) => {
+                        Some(matchy::QueryResult::Pattern { pattern_ids, data, .. }) => {
                             match_obj["match_type"] = json!("pattern");
                             match_obj["pattern_count"] = json!(pattern_ids.len());
                             if !data.is_empty() {
@@ -358,7 +358,7 @@ pub fn process_file_with_aggregate(
                                 }
                             }
                         }
-                        Some(matchy::QueryResult::Ip { data, prefix_len }) => {
+                        Some(matchy::QueryResult::Ip { data, prefix_len, .. }) => {
                             match_obj["match_type"] = json!("ip");
                             match_obj["prefix_len"] = json!(prefix_len);
                             match_obj["cidr"] = json!(format_cidr(&candidate_str, *prefix_len));
@@ -444,7 +444,7 @@ pub fn process_line_matches(
 
                 // Add match-specific fields
                 match &result {
-                    Some(matchy::QueryResult::Pattern { pattern_ids, data }) => {
+                    Some(matchy::QueryResult::Pattern { pattern_ids, data, .. }) => {
                         match_obj["match_type"] = json!("pattern");
                         match_obj["pattern_count"] = json!(pattern_ids.len());
                         if !data.is_empty() {
@@ -457,7 +457,7 @@ pub fn process_line_matches(
                             }
                         }
                     }
-                    Some(matchy::QueryResult::Ip { data, prefix_len }) => {
+                    Some(matchy::QueryResult::Ip { data, prefix_len, .. }) => {
                         match_obj["match_type"] = json!("ip");
                         match_obj["prefix_len"] = json!(prefix_len);
                         match_obj["cidr"] = json!(format_cidr(&candidate_str, *prefix_len));

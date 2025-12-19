@@ -300,7 +300,7 @@ fn library_match_to_cli_match(
     use matchy::QueryResult;
 
     match &lib_match.result {
-        QueryResult::Ip { data, prefix_len } => {
+        QueryResult::Ip { data, prefix_len, .. } => {
             let mut cidr = String::new();
             format_cidr_into(&lib_match.matched_text, *prefix_len, &mut cidr);
 
@@ -315,7 +315,7 @@ fn library_match_to_cli_match(
                 cidr: Some(cidr),
             })
         }
-        QueryResult::Pattern { pattern_ids, data } => {
+        QueryResult::Pattern { pattern_ids, data, .. } => {
             let data_values: Vec<_> = data
                 .iter()
                 .filter_map(|opt_dv| opt_dv.as_ref().map(data_value_to_json))
@@ -382,7 +382,7 @@ pub fn build_match_result(
 
     // Build match result based on query result type
     match &lib_match.result {
-        QueryResult::Ip { data, prefix_len } => {
+        QueryResult::Ip { data, prefix_len, .. } => {
             format_cidr_into(
                 &lib_match.matched_text,
                 *prefix_len,
@@ -400,7 +400,7 @@ pub fn build_match_result(
                 cidr: Some(match_buffers.cidr.clone()),
             })
         }
-        QueryResult::Pattern { pattern_ids, data } => {
+        QueryResult::Pattern { pattern_ids, data, .. } => {
             let data_values: Vec<_> = data
                 .iter()
                 .filter_map(|opt_dv| opt_dv.as_ref().map(data_value_to_json))
