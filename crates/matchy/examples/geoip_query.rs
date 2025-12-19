@@ -49,7 +49,9 @@ fn query_ip(db: &Database, ip: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("Querying IP: {}", ip);
 
     match db.lookup(ip)? {
-        Some(QueryResult::Ip { data, prefix_len, .. }) => {
+        Some(QueryResult::Ip {
+            data, prefix_len, ..
+        }) => {
             println!("  ✓ Found in database");
             println!("  Prefix length: /{}", prefix_len);
             println!("  Data: {:#?}", data);

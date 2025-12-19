@@ -1455,9 +1455,21 @@ fn psl_contains(suffix: &[u8]) -> bool {
             return false;
         }
 
-        let entry_hash = u64::from_le_bytes(PSL_HASH_DATA[entry_offset..entry_offset + 8].try_into().unwrap());
-        let string_offset = u32::from_le_bytes(PSL_HASH_DATA[entry_offset + 8..entry_offset + 12].try_into().unwrap());
-        let string_len = u32::from_le_bytes(PSL_HASH_DATA[entry_offset + 12..entry_offset + 16].try_into().unwrap());
+        let entry_hash = u64::from_le_bytes(
+            PSL_HASH_DATA[entry_offset..entry_offset + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let string_offset = u32::from_le_bytes(
+            PSL_HASH_DATA[entry_offset + 8..entry_offset + 12]
+                .try_into()
+                .unwrap(),
+        );
+        let string_len = u32::from_le_bytes(
+            PSL_HASH_DATA[entry_offset + 12..entry_offset + 16]
+                .try_into()
+                .unwrap(),
+        );
 
         if string_offset == EMPTY_SLOT {
             // Empty slot - key not found

@@ -1832,7 +1832,10 @@ mod tests {
         let result = db.lookup("1.1.1.1").unwrap();
         assert!(result.is_some());
 
-        if let Some(QueryResult::Ip { data, prefix_len, .. }) = result {
+        if let Some(QueryResult::Ip {
+            data, prefix_len, ..
+        }) = result
+        {
             assert!(prefix_len > 0);
             assert!(prefix_len <= 32);
 

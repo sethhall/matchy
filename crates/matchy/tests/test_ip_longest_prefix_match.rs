@@ -49,7 +49,10 @@ fn test_ip_specific_before_subnet() {
         "Should find data for 192.0.2.1"
     );
 
-    if let Some(QueryResult::Ip { data, prefix_len, .. }) = result {
+    if let Some(QueryResult::Ip {
+        data, prefix_len, ..
+    }) = result
+    {
         // Should match the /32 entry (most specific)
         assert_eq!(
             prefix_len, 32,
@@ -120,7 +123,10 @@ fn test_ip_specific_after_subnet() {
         "Should find data for 192.0.2.1"
     );
 
-    if let Some(QueryResult::Ip { data, prefix_len, .. }) = result {
+    if let Some(QueryResult::Ip {
+        data, prefix_len, ..
+    }) = result
+    {
         // Should match the /32 entry (most specific)
         assert_eq!(
             prefix_len, 32,

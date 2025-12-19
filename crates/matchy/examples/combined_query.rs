@@ -51,12 +51,16 @@ fn query_database(db: &Database, query: &str) -> Result<(), Box<dyn std::error::
     println!("Query: {}", query);
 
     match db.lookup(query)? {
-        Some(QueryResult::Ip { data, prefix_len, .. }) => {
+        Some(QueryResult::Ip {
+            data, prefix_len, ..
+        }) => {
             println!("  ✓ IP Match");
             println!("  Prefix: /{}", prefix_len);
             println!("  Data: {:?}", data);
         }
-        Some(QueryResult::Pattern { pattern_ids, data, .. }) => {
+        Some(QueryResult::Pattern {
+            pattern_ids, data, ..
+        }) => {
             println!("  ✓ Pattern Match");
             println!(
                 "  Matched {} pattern(s): {:?}",
