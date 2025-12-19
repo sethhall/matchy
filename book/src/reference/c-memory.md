@@ -82,12 +82,9 @@ if (builder) {
 void matchy_free_result(matchy_result_t *result);
 ```
 
-Frees a query result:
-- Releases match data
-- Frees any associated strings
-- Invalidates the handle
+Query results use a zero-allocation design - data is decoded on-demand from memory-mapped storage. This function is a **no-op** but should still be called for API consistency and forward compatibility.
 
-**When to call**: Immediately after extracting needed data
+**When to call**: After you're done with the result (for code clarity and future compatibility)
 
 ```c
 matchy_result_t *result = NULL;
@@ -365,24 +362,22 @@ void *thread2(void *arg) {
 
 ❌ **Wrong:**
 ```c
-for (int i = 0; i < 1000; i++) {
-    matchy_result_t *result = NULL;
-    matchy_lookup(db, queries[i], &result);
-    // Memory leak! Never freed result
-}
+matchy_t *db = NULL;
+matchy_open("database.mxy", &db);
+// ... use db ...
+// Forgot to close! Memory/file handle leak
 ```
 
 ✅ **Correct:**
 ```c
-for (int i = 0; i < 1000; i++) {
-    matchy_result_t *result = NULL;
-    matchy_lookup(db, queries[i], &result);
-    if (result) {
-        // Use result...
-        matchy_free_result(result);
-    }
-}
+matchy_t *db = NULL;
+matchy_open("database.mxy", &db);
+// ... use db ...
+matchy_close(db);
+db = NULL;
 ```
+
+> **Note**: Query results (`matchy_result_t`) use zero-allocation design, so forgetting `matchy_free_result()` won't leak memory. However, calling it is still recommended for code clarity and forward compatibility.
 
 ### Mistake 2: Use After Free
 
@@ -409,19 +404,23 @@ result = NULL;  // Good practice
 
 ### Mistake 3: Double Free
 
+For most handles, double-free causes undefined behavior:
+
 ❌ **Wrong:**
 ```c
-matchy_free_result(result);
-matchy_free_result(result);  // Double free! Undefined behavior
+matchy_close(db);
+matchy_close(db);  // Double free! Undefined behavior
 ```
 
 ✅ **Correct:**
 ```c
-if (result) {
-    matchy_free_result(result);
-    result = NULL;
+if (db) {
+    matchy_close(db);
+    db = NULL;
 }
 ```
+
+> **Note**: `matchy_free_result()` is safe to call multiple times (it's a no-op), but setting pointers to NULL after cleanup is still good practice for consistency.
 
 ### Mistake 4: Missing Cleanup on Error
 
