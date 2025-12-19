@@ -13,7 +13,10 @@ bech32.workspace = true
 bs58.workspace = true
 sha2.workspace = true
 tiny-keccak.workspace = true
-rustc-hash.workspace = true
+xxhash-rust.workspace = true
+
+[build-dependencies]
+xxhash-rust.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

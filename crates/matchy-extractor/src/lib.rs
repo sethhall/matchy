@@ -1417,25 +1417,71 @@ impl<'a> Iterator for ExtractIter<'a> {
 
 impl<'a> ExactSizeIterator for ExtractIter<'a> {}
 
-/// Public Suffix List data embedded at compile time
-const PSL_DATA: &str = include_str!("data/public_suffix_list.dat");
+/// Public Suffix List hash table - compiled at build time, zero heap allocation.
+///
+/// Format: [magic:4][version:4][count:4][table_size:4][hash_table][string_pool]
+/// Each hash entry: [hash:8][string_offset:4][string_len:4]
+///
+/// This enables O(1) TLD lookups without any runtime heap allocation.
+/// The data lives in the binary's read-only section and is shared across processes.
+static PSL_HASH_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/psl_hash.bin"));
 
-/// Hash set of all PSL suffixes as byte slices (e.g., b"com", b"co.uk")
-/// Built once at startup from PSL_DATA for O(1) TLD validation
-/// Uses bytes instead of strings to avoid UTF-8 validation overhead
-/// Uses FxHashSet (rustc-hash) for fast non-cryptographic hashing (~3-5x faster than SipHash)
-static PSL_SUFFIXES: std::sync::LazyLock<rustc_hash::FxHashSet<&'static [u8]>> =
-    std::sync::LazyLock::new(|| {
-        rustc_hash::FxHashSet::from_iter(PSL_DATA.lines().filter_map(|line| {
-            let line = line.trim();
-            // Skip comments and empty lines
-            if line.is_empty() || line.starts_with("//") {
-                return None;
+/// Check if a suffix exists in the PSL hash table (zero-copy, O(1))
+#[inline]
+fn psl_contains(suffix: &[u8]) -> bool {
+    use xxhash_rust::xxh64::xxh64;
+
+    const EMPTY_SLOT: u32 = 0xFFFFFFFF;
+
+    // Parse header (16 bytes)
+    if PSL_HASH_DATA.len() < 16 {
+        return false;
+    }
+
+    let table_size = u32::from_le_bytes(PSL_HASH_DATA[12..16].try_into().unwrap());
+    let table_mask = table_size.wrapping_sub(1);
+
+    // Hash table starts at offset 16
+    let table_start = 16usize;
+    let string_pool_start = table_start + (table_size as usize * 16);
+
+    let hash = xxh64(suffix, 0);
+    let mut slot = (hash as u32 & table_mask) as usize;
+
+    // Linear probe (max table_size iterations)
+    for _ in 0..table_size {
+        let entry_offset = table_start + slot * 16;
+        if entry_offset + 16 > PSL_HASH_DATA.len() {
+            return false;
+        }
+
+        let entry_hash = u64::from_le_bytes(PSL_HASH_DATA[entry_offset..entry_offset + 8].try_into().unwrap());
+        let string_offset = u32::from_le_bytes(PSL_HASH_DATA[entry_offset + 8..entry_offset + 12].try_into().unwrap());
+        let string_len = u32::from_le_bytes(PSL_HASH_DATA[entry_offset + 12..entry_offset + 16].try_into().unwrap());
+
+        if string_offset == EMPTY_SLOT {
+            // Empty slot - key not found
+            return false;
+        }
+
+        if entry_hash == hash {
+            // Hash match - verify string
+            let str_start = string_pool_start + string_offset as usize;
+            let str_end = str_start + string_len as usize;
+            if str_end <= PSL_HASH_DATA.len() {
+                let stored = &PSL_HASH_DATA[str_start..str_end];
+                if stored == suffix {
+                    return true;
+                }
             }
-            // PSL entries like "com" -> store as bytes
-            Some(line.as_bytes())
-        }))
-    });
+        }
+
+        // Linear probe to next slot
+        slot = (slot + 1) & (table_mask as usize);
+    }
+
+    false
+}
 
 /// Compile-time boundary character lookup table for O(1) checking
 /// This replaces the branch-heavy is_word_boundary() function with a single array lookup.
@@ -1555,7 +1601,7 @@ fn find_valid_tld_suffix_bytes(domain_bytes: &[u8]) -> Option<usize> {
             // Found a dot - check if suffix from here is in PSL
             let suffix = &domain_bytes[i + 1..]; // Skip the dot itself for PSL lookup
 
-            if PSL_SUFFIXES.contains(suffix) {
+            if psl_contains(suffix) {
                 // Found valid TLD! Return position of the dot before it
                 return Some(i);
             }

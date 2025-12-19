@@ -1147,9 +1147,9 @@ dependencies = [
  "bs58",
  "criterion",
  "memchr",
- "rustc-hash 2.1.1",
  "sha2",
  "tiny-keccak",
+ "xxhash-rust",
 ]
 
 [[package]]
