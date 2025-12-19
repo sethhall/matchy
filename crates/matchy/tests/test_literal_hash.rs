@@ -8,6 +8,12 @@ fn make_type_map<S: Into<String>>(type_value: S) -> HashMap<String, DataValue> {
     map
 }
 
+fn lookup_expect_result(db: &Database, key: &str) -> QueryResult {
+    db.lookup(key)
+        .unwrap_or_else(|e| panic!("lookup failed for '{}': {}", key, e))
+        .unwrap_or_else(|| panic!("no result for lookup '{}'", key))
+}
+
 fn assert_pattern_with_type(result: QueryResult, expected_type: &str) {
     match result {
         QueryResult::Pattern {
@@ -53,11 +59,11 @@ fn test_literal_exact_match() {
         .unwrap();
 
     // Test exact match
-    let result = db.lookup("evil.com").unwrap().unwrap();
+    let result = lookup_expect_result(&db, "evil.com");
     assert_pattern_with_type(result, "malware");
 
     // Test no match
-    let result = db.lookup("notfound.com").unwrap().unwrap();
+    let result = lookup_expect_result(&db, "notfound.com");
     assert!(matches!(result, QueryResult::NotFound));
 }
 
@@ -100,7 +106,7 @@ fn test_literal_and_glob_both_match() {
         .unwrap();
 
     // Query should match BOTH the literal AND the glob
-    let result = db.lookup("evil.com").unwrap().unwrap();
+    let result = lookup_expect_result(&db, "evil.com");
     match result {
         QueryResult::Pattern {
             pattern_ids, data, ..
@@ -149,7 +155,7 @@ fn test_glob_only_match() {
         .unwrap();
 
     // Test glob match
-    let result = db.lookup("test.phishing.com").unwrap().unwrap();
+    let result = lookup_expect_result(&db, "test.phishing.com");
     match result {
         QueryResult::Pattern { pattern_ids, .. } => {
             assert_eq!(pattern_ids.len(), 1);
@@ -158,7 +164,7 @@ fn test_glob_only_match() {
     }
 
     // Test another glob match
-    let result = db.lookup("bad-actor").unwrap().unwrap();
+    let result = lookup_expect_result(&db, "bad-actor");
     match result {
         QueryResult::Pattern { pattern_ids, .. } => {
             assert_eq!(pattern_ids.len(), 1);
@@ -191,11 +197,11 @@ fn test_mixed_ip_literal_glob() {
         .unwrap();
 
     // Test IP lookup
-    let result = db.lookup("1.2.3.4").unwrap().unwrap();
+    let result = lookup_expect_result(&db, "1.2.3.4");
     assert!(matches!(result, QueryResult::Ip { .. }));
 
     // Test literal lookup
-    let result = db.lookup("evil.com").unwrap().unwrap();
+    let result = lookup_expect_result(&db, "evil.com");
     match result {
         QueryResult::Pattern { pattern_ids, .. } => {
             assert_eq!(pattern_ids.len(), 1);
@@ -204,7 +210,7 @@ fn test_mixed_ip_literal_glob() {
     }
 
     // Test glob lookup
-    let result = db.lookup("test.bad.com").unwrap().unwrap();
+    let result = lookup_expect_result(&db, "test.bad.com");
     match result {
         QueryResult::Pattern { pattern_ids, .. } => {
             assert_eq!(pattern_ids.len(), 1);
@@ -241,21 +247,21 @@ fn test_literal_with_special_chars() {
 
     // These should match exactly
     assert!(matches!(
-        db.lookup("file[1].txt").unwrap().unwrap(),
+        lookup_expect_result(&db, "file[1].txt"),
         QueryResult::Pattern { .. }
     ));
     assert!(matches!(
-        db.lookup("what?.com").unwrap().unwrap(),
+        lookup_expect_result(&db, "what?.com"),
         QueryResult::Pattern { .. }
     ));
     assert!(matches!(
-        db.lookup("price*list").unwrap().unwrap(),
+        lookup_expect_result(&db, "price*list"),
         QueryResult::Pattern { .. }
     ));
 
     // These should NOT match (they're not the exact string)
     assert!(matches!(
-        db.lookup("file2.txt").unwrap().unwrap(),
+        lookup_expect_result(&db, "file2.txt"),
         QueryResult::NotFound
     ));
 }
