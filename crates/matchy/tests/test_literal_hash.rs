@@ -2,6 +2,30 @@ use matchy::{DataValue, Database, DatabaseBuilder, MatchMode, QueryResult};
 use std::collections::HashMap;
 use tempfile::NamedTempFile;
 
+fn make_type_map<S: Into<String>>(type_value: S) -> HashMap<String, DataValue> {
+    let mut map = HashMap::new();
+    map.insert("type".to_string(), DataValue::String(type_value.into()));
+    map
+}
+
+fn assert_pattern_with_type(result: QueryResult, expected_type: &str) {
+    match result {
+        QueryResult::Pattern {
+            pattern_ids, data, ..
+        } => {
+            assert_eq!(pattern_ids.len(), 1);
+            assert!(!data.is_empty());
+            if let Some(DataValue::Map(map)) = &data[0] {
+                assert_eq!(
+                    map.get("type"),
+                    Some(&DataValue::String(expected_type.to_string()))
+                );
+            }
+        }
+        _ => panic!("Expected Pattern result"),
+    }
+}
+
 #[test]
 fn test_literal_exact_match() {
     // Build database with literals
@@ -30,21 +54,7 @@ fn test_literal_exact_match() {
 
     // Test exact match
     let result = db.lookup("evil.com").unwrap().unwrap();
-    match result {
-        QueryResult::Pattern {
-            pattern_ids, data, ..
-        } => {
-            assert_eq!(pattern_ids.len(), 1);
-            assert!(data[0].is_some());
-            if let Some(DataValue::Map(map)) = &data[0] {
-                assert_eq!(
-                    map.get("type"),
-                    Some(&DataValue::String("malware".to_string()))
-                );
-            }
-        }
-        _ => panic!("Expected Pattern result"),
-    }
+    assert_pattern_with_type(result, "malware");
 
     // Test no match
     let result = db.lookup("notfound.com").unwrap().unwrap();
@@ -123,11 +133,7 @@ fn test_glob_only_match() {
     // Build database with only globs
     let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
 
-    let mut data = HashMap::new();
-    data.insert(
-        "type".to_string(),
-        DataValue::String("phishing".to_string()),
-    );
+    let data = make_type_map("phishing");
 
     builder.add_glob("*.phishing.com", data.clone()).unwrap();
     builder.add_glob("bad-*", data).unwrap();
@@ -166,23 +172,9 @@ fn test_mixed_ip_literal_glob() {
     // Build database with IPs, literals, and globs
     let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
 
-    let mut ip_data = HashMap::new();
-    ip_data.insert(
-        "type".to_string(),
-        DataValue::String("ip_threat".to_string()),
-    );
-
-    let mut literal_data = HashMap::new();
-    literal_data.insert(
-        "type".to_string(),
-        DataValue::String("domain_threat".to_string()),
-    );
-
-    let mut glob_data = HashMap::new();
-    glob_data.insert(
-        "type".to_string(),
-        DataValue::String("pattern_threat".to_string()),
-    );
+    let ip_data = make_type_map("ip_threat");
+    let literal_data = make_type_map("domain_threat");
+    let glob_data = make_type_map("pattern_threat");
 
     builder.add_ip("1.2.3.4", ip_data).unwrap();
     builder.add_literal("evil.com", literal_data).unwrap();

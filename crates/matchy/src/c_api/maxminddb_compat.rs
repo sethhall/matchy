@@ -246,16 +246,32 @@ pub unsafe extern "C" fn MMDB_lookup_sockaddr(
     }
 
     // Convert sockaddr to IP string
-    let ip_addr = match (*sockaddr).sa_family as i32 {
+    // First, read the address family with a minimal dereference
+    let family = (*sockaddr).sa_family as i32;
+
+    let ip_addr = match family {
         libc::AF_INET => {
+            // Safely copy the IPv4 address bytes into a local in_addr
             let sa = sockaddr as *const libc::sockaddr_in;
-            let addr = u32::from_be((*sa).sin_addr.s_addr);
+            let mut in_addr: libc::in_addr = mem::zeroed();
+            ptr::copy_nonoverlapping(
+                &(*sa).sin_addr as *const libc::in_addr,
+                &mut in_addr as *mut libc::in_addr,
+                1,
+            );
+            let addr = u32::from_be(in_addr.s_addr);
             IpAddr::V4(Ipv4Addr::from(addr))
         }
         libc::AF_INET6 => {
+            // Safely copy the IPv6 address bytes into a local in6_addr
             let sa = sockaddr as *const libc::sockaddr_in6;
-            let addr = (*sa).sin6_addr.s6_addr;
-            IpAddr::V6(Ipv6Addr::from(addr))
+            let mut in6_addr: libc::in6_addr = mem::zeroed();
+            ptr::copy_nonoverlapping(
+                &(*sa).sin6_addr as *const libc::in6_addr,
+                &mut in6_addr as *mut libc::in6_addr,
+                1,
+            );
+            IpAddr::V6(Ipv6Addr::from(in6_addr.s6_addr))
         }
         _ => return set_error(MMDB_INVALID_DATA_ERROR),
     };

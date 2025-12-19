@@ -110,12 +110,22 @@ const domains = domainExtractor.extract("Visit example.com or test.org");
 ### `Database`
 
 ```typescript
+interface DatabaseStats {
+  total_queries: number;
+  cache_hits: number;
+  cache_misses: number;
+  queries_with_match: number;
+  queries_without_match: number;
+  ip_queries: number;
+  string_queries: number;
+}
+
 class Database {
   constructor(bytes: Uint8Array);
   lookup(key: string): object | null;
   lookupIp(ip: string): object | null;
   lookupPattern(text: string): object | null;
-  stats(): { total_queries: number, cache_hits: number, ... };
+  stats(): DatabaseStats;
 }
 ```
 

@@ -18,6 +18,8 @@ use std::collections::HashMap;
 
 use tempfile::tempdir;
 
+const NON_MATCHING_TEST_IP_RANGE: &str = "1.1.1.0/24";
+
 /// Helper to check if a lookup result is an actual match (not NotFound)
 fn is_match(result: &Option<QueryResult>) -> bool {
     match result {
@@ -50,7 +52,7 @@ fn test_stale_notfound_does_not_persist() {
             "name".to_string(),
             matchy_data_format::DataValue::String("other".to_string()),
         );
-        builder.add_entry("1.1.1.0/24", data).unwrap();
+        builder.add_entry(NON_MATCHING_TEST_IP_RANGE, data).unwrap();
         let bytes = builder.build().unwrap();
         std::fs::write(&db_a_path, bytes).unwrap();
     }
@@ -166,7 +168,7 @@ fn test_stale_match_does_not_persist() {
             "name".to_string(),
             matchy_data_format::DataValue::String("other".to_string()),
         );
-        builder.add_entry("1.1.1.0/24", data).unwrap();
+        builder.add_entry(NON_MATCHING_TEST_IP_RANGE, data).unwrap();
         let bytes = builder.build().unwrap();
         std::fs::write(&db_b_path, bytes).unwrap();
     }
@@ -241,7 +243,7 @@ fn test_no_cache_works_correctly() {
             "name".to_string(),
             matchy_data_format::DataValue::String("other".to_string()),
         );
-        builder.add_entry("1.1.1.0/24", data).unwrap();
+        builder.add_entry(NON_MATCHING_TEST_IP_RANGE, data).unwrap();
         let bytes = builder.build().unwrap();
         std::fs::write(&db_a_path, bytes).unwrap();
     }
@@ -307,7 +309,7 @@ fn test_same_path_reload_gets_fresh_results() {
             "name".to_string(),
             matchy_data_format::DataValue::String("initial".to_string()),
         );
-        builder.add_entry("1.1.1.0/24", data).unwrap();
+        builder.add_entry(NON_MATCHING_TEST_IP_RANGE, data).unwrap();
         let bytes = builder.build().unwrap();
         std::fs::write(&db_path, bytes).unwrap();
     }
