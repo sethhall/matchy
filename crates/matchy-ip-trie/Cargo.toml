@@ -9,3 +9,6 @@ publish = false  # Internal crate for now
 
 # No dependencies - pure IP trie data structure
 [dependencies]
+
+[lints]
+workspace = true

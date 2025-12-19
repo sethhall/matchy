@@ -177,11 +177,9 @@ unsafe fn ascii_lowercase_simd_arm(text: &[u8], output: &mut Vec<u8>) {
 pub fn ascii_lowercase_simd(text: &[u8], output: &mut Vec<u8>) {
     #[cfg(target_arch = "x86_64")]
     {
-        // SAFETY: SSE2 is guaranteed on x86_64, but we use runtime check for extra safety.
-        // The function requires SSE2 via #[target_feature(enable = "sse2")].
-        if is_x86_feature_detected!("sse2") {
-            unsafe { ascii_lowercase_simd_x86(text, output) };
-        }
+        // SAFETY: SSE2 is mandatory on x86_64 (part of baseline ISA since AMD64 spec).
+        // The target_feature attribute is satisfied on all x86_64 CPUs.
+        unsafe { ascii_lowercase_simd_x86(text, output) };
     }
 
     #[cfg(target_arch = "aarch64")]

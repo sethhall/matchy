@@ -20,7 +20,10 @@ struct CCallbackAdapter {
     user_data: *mut c_void,
 }
 
+// SAFETY: CCallbackAdapter is Send+Sync because the C callback and user_data
+// are provided by the caller who guarantees thread-safety of their usage
 unsafe impl Send for CCallbackAdapter {}
+// SAFETY: See above
 unsafe impl Sync for CCallbackAdapter {}
 
 impl CCallbackAdapter {
@@ -42,6 +45,7 @@ impl CCallbackAdapter {
             generation: event.generation,
         };
 
+        // SAFETY: Callback and user_data validity guaranteed by C caller contract
         unsafe { (self.callback)(&c_event, self.user_data) };
     }
 }
@@ -1815,6 +1819,7 @@ pub unsafe extern "C" fn matchy_get_entry_data_list(
     ) {
         // Add the current node
         if let Some(entry_data) =
+            // SAFETY: from_data_value only reads from value and appends to string_cache
             unsafe { matchy_entry_data_t::from_data_value(value, string_cache) }
         {
             add_node(entry_data);

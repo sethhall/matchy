@@ -428,10 +428,8 @@ impl ACBuilder {
 
                     for (ch, target) in &edges {
                         let edge = ACEdge::new(*ch, *target);
-                        unsafe {
-                            let ptr = buffer.as_mut_ptr().add(edge_offset) as *mut ACEdge;
-                            ptr.write(edge);
-                        }
+                        buffer[edge_offset..edge_offset + edge_size]
+                            .copy_from_slice(edge.as_bytes());
                         edge_offset += edge_size;
                     }
 
@@ -449,10 +447,8 @@ impl ACBuilder {
                         lookup.targets[*ch as usize] = *target;
                     }
 
-                    unsafe {
-                        let ptr = buffer.as_mut_ptr().add(dense_offset) as *mut DenseLookup;
-                        ptr.write(lookup);
-                    }
+                    buffer[dense_offset..dense_offset + dense_size]
+                        .copy_from_slice(lookup.as_bytes());
                     dense_offset += dense_size;
 
                     (lookup_offset as u32, 0u8, 0u32)
@@ -467,10 +463,8 @@ impl ACBuilder {
             };
 
             for &pattern_id in &state.outputs {
-                unsafe {
-                    let ptr = buffer.as_mut_ptr().add(pattern_offset) as *mut u32;
-                    ptr.write(pattern_id);
-                }
+                buffer[pattern_offset..pattern_offset + 4]
+                    .copy_from_slice(&pattern_id.to_le_bytes());
                 pattern_offset += mem::size_of::<u32>();
             }
 
@@ -506,10 +500,7 @@ impl ACBuilder {
                 patterns_offset: patterns_offset_for_node,
             };
 
-            unsafe {
-                let ptr = buffer.as_mut_ptr().add(node_offset) as *mut ACNodeHot;
-                ptr.write(node);
-            }
+            buffer[node_offset..node_offset + node_size].copy_from_slice(node.as_bytes());
         }
 
         Ok(buffer)

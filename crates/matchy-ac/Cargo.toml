@@ -11,3 +11,6 @@ publish = false  # Internal crate for now
 matchy-match-mode = { path = "../matchy-match-mode" }
 zerocopy.workspace = true
 memchr.workspace = true
+
+[lints]
+workspace = true

@@ -321,10 +321,10 @@ pub struct Match<'a> {
 }
 
 impl<'a> Match<'a> {
-    /// Get the matched text as a string slice
+    /// Get the matched text as a string slice.
+    /// Returns empty string if the matched bytes are not valid UTF-8.
     pub fn as_str(&self, input: &'a [u8]) -> &'a str {
-        // Safe because we validated UTF-8 during extraction
-        unsafe { std::str::from_utf8_unchecked(&input[self.span.0..self.span.1]) }
+        std::str::from_utf8(&input[self.span.0..self.span.1]).unwrap_or("")
     }
 }
 
@@ -356,6 +356,7 @@ pub struct Extractor {
 // - Scratch buffers use thread-local storage (each thread has its own)
 // - No shared mutable state after construction
 unsafe impl Send for Extractor {}
+// SAFETY: See above
 unsafe impl Sync for Extractor {}
 
 impl Extractor {

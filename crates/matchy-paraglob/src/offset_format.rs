@@ -710,13 +710,9 @@ pub unsafe fn read_struct_slice<T: Copy>(buffer: &[u8], offset: usize, count: us
 
 /// Helper to read a null-terminated UTF-8 string from buffer
 ///
-/// # Safety
-///
-/// Caller must ensure:
-/// - offset < buffer.len()
-/// - String is null-terminated
-/// - Bytes are valid UTF-8
-pub unsafe fn read_cstring(buffer: &[u8], offset: usize) -> Result<&str, &'static str> {
+/// Returns error if offset is out of bounds, string is not null-terminated,
+/// or bytes are not valid UTF-8.
+pub fn read_cstring(buffer: &[u8], offset: usize) -> Result<&str, &'static str> {
     if offset >= buffer.len() {
         return Err("Offset out of bounds");
     }
@@ -732,7 +728,6 @@ pub unsafe fn read_cstring(buffer: &[u8], offset: usize) -> Result<&str, &'stati
         return Err("String not null-terminated");
     }
 
-    // Convert to str
     std::str::from_utf8(&buffer[start..end]).map_err(|_| "Invalid UTF-8")
 }
 
@@ -889,12 +884,15 @@ mod tests {
         let header = ParaglobHeader::new();
 
         // Write header to buffer
+        // SAFETY: buffer is exactly 112 bytes (v5 header size), properly allocated,
+        // and ParaglobHeader is #[repr(C)] with size 112.
         unsafe {
             let ptr = buffer.as_mut_ptr() as *mut ParaglobHeader;
             ptr.write(header);
         }
 
         // Read it back
+        // SAFETY: buffer contains valid ParaglobHeader bytes written above, offset 0 is aligned.
         let read_header: ParaglobHeader = unsafe { read_struct(&buffer, 0) };
         assert_eq!(read_header.magic, *MAGIC);
         assert_eq!(read_header.version, MATCHY_FORMAT_VERSION);
@@ -905,15 +903,13 @@ mod tests {
     fn test_read_cstring() {
         let buffer = b"hello\0world\0\0";
 
-        unsafe {
-            let s1 = read_cstring(buffer, 0).unwrap();
-            assert_eq!(s1, "hello");
+        let s1 = read_cstring(buffer, 0).unwrap();
+        assert_eq!(s1, "hello");
 
-            let s2 = read_cstring(buffer, 6).unwrap();
-            assert_eq!(s2, "world");
+        let s2 = read_cstring(buffer, 6).unwrap();
+        assert_eq!(s2, "world");
 
-            let s3 = read_cstring(buffer, 12).unwrap();
-            assert_eq!(s3, "");
-        }
+        let s3 = read_cstring(buffer, 12).unwrap();
+        assert_eq!(s3, "");
     }
 }

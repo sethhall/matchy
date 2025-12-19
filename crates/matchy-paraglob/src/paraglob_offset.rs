@@ -749,6 +749,7 @@ impl ParaglobBuilder {
         header.glob_segments_offset = glob_segments_start as u32;
         header.glob_segments_size = glob_segments_size as u32;
 
+        // SAFETY: buffer is freshly allocated with correct size, ptr is aligned for ParaglobHeader
         unsafe {
             let ptr = buffer.as_mut_ptr() as *mut ParaglobHeader;
             ptr.write(header);
@@ -773,6 +774,7 @@ impl ParaglobBuilder {
             entry.pattern_string_offset = string_offset;
             entry.pattern_string_length = pat.pattern().len() as u32;
 
+            // SAFETY: entry_offset is within buffer bounds, PatternEntry is repr(C)
             unsafe {
                 let ptr = buffer.as_mut_ptr().add(entry_offset) as *mut PatternEntry;
                 ptr.write(entry);
@@ -795,6 +797,7 @@ impl ParaglobBuilder {
                 pattern_string_offset: string_offset as u32,
             };
 
+            // SAFETY: wildcard_offset is within buffer bounds, SingleWildcard is repr(C)
             unsafe {
                 let ptr = buffer.as_mut_ptr().add(wildcard_offset) as *mut SingleWildcard;
                 ptr.write(wildcard);
@@ -810,6 +813,7 @@ impl ParaglobBuilder {
         // Write pattern data mappings
         for (i, mapping) in pattern_data_mappings.iter().enumerate() {
             let mapping_offset = mappings_start + i * mapping_entry_size;
+            // SAFETY: mapping_offset is within buffer bounds, PatternDataMapping is repr(C)
             unsafe {
                 let ptr = buffer.as_mut_ptr().add(mapping_offset) as *mut PatternDataMapping;
                 ptr.write(*mapping);
@@ -834,6 +838,7 @@ impl ParaglobBuilder {
                 segment_count: index.segment_count,
                 reserved: index.reserved,
             };
+            // SAFETY: index_offset is within buffer bounds, GlobSegmentIndex is repr(C)
             unsafe {
                 let ptr = buffer.as_mut_ptr().add(index_offset)
                     as *mut crate::offset_format::GlobSegmentIndex;
@@ -869,7 +874,7 @@ impl ParaglobBuilder {
                             header.data_offset - glob_index_size as u32 + glob_index_end as u32;
                     }
 
-                    // Write adjusted header back
+                    // SAFETY: header_offset_in_data is bounds-checked above, GlobSegmentHeader is repr(C)
                     unsafe {
                         let ptr = adjusted_segment_data
                             .as_mut_ptr()
@@ -951,6 +956,7 @@ pub struct Paraglob {
 // - pattern_data_map: Contains only offsets, Send + Sync
 // - All scratch buffers moved to thread-local storage
 unsafe impl Send for Paraglob {}
+// SAFETY: See above
 unsafe impl Sync for Paraglob {}
 
 impl Paraglob {
@@ -1871,7 +1877,8 @@ impl Paraglob {
         let (entry_ref, _) = Ref::<_, PatternEntry>::from_prefix(entry_slice).ok()?;
         let entry = *entry_ref;
 
-        unsafe { read_cstring(buffer, entry.pattern_string_offset as usize).ok() }
+        read_cstring(buffer, entry.pattern_string_offset as usize)
+            .ok()
             .map(|s| s.to_string())
     }
 }

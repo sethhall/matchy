@@ -3,6 +3,10 @@
 pub fn set_thread_name(name: &str) {
     use std::ffi::CString;
     if let Ok(cname) = CString::new(name) {
+        // SAFETY: pthread_setname_np on macOS sets current thread's name.
+        // - cname is a valid null-terminated C string (CString guarantees this)
+        // - cname lives for the duration of the call
+        // - Function only reads from the pointer, no ownership transfer
         unsafe {
             libc::pthread_setname_np(cname.as_ptr());
         }
@@ -13,8 +17,12 @@ pub fn set_thread_name(name: &str) {
 pub fn set_thread_name(name: &str) {
     use std::ffi::CString;
     if let Ok(cname) = CString::new(name) {
+        // SAFETY: pthread_setname_np on Linux sets a thread's name.
+        // - pthread_self() returns the calling thread's ID (always valid)
+        // - cname is a valid null-terminated C string (CString guarantees this)
+        // - cname lives for the duration of the call
+        // - Function only reads from the pointer, no ownership transfer
         unsafe {
-            // Linux takes current thread (NULL) + name
             libc::pthread_setname_np(libc::pthread_self(), cname.as_ptr());
         }
     }

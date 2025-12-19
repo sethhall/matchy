@@ -9,3 +9,6 @@ publish = false  # Internal crate - just the MatchMode enum
 
 # NO dependencies - pure enum
 [dependencies]
+
+[lints]
+workspace = true

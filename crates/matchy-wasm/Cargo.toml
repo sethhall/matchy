@@ -32,3 +32,6 @@ wasm-opt = ["-O3", "--enable-simd"]
 
 [package.metadata.wasm-pack.profile.dev]
 wasm-opt = false
+
+[lints]
+workspace = true

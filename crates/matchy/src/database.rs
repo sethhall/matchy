@@ -503,7 +503,17 @@ pub struct Database {
     live: Option<Box<LiveState>>,
 }
 
+// SAFETY: Database is Send + Sync because:
+// - All fields are either Send+Sync types (Arc, Vec, Option of Send+Sync types)
+// - LiteralHash<'static> and Paraglob contain references transmuted to 'static lifetime
+//   that point into `data` (DatabaseStorage). This is safe because:
+//   1. Database owns both the data and the structures referencing it
+//   2. They are created together and destroyed together (no dangling references)
+//   3. The data is read-only after construction (no mutation races)
+// - The 'static lifetime trick is a common pattern for self-referential structs
+//   when the referenced data is owned and outlives all references
 unsafe impl Send for Database {}
+// SAFETY: See above
 unsafe impl Sync for Database {}
 
 impl Database {
@@ -756,6 +766,11 @@ impl Database {
         let file = File::open(path)
             .map_err(|e| DatabaseError::Io(format!("Failed to open {}: {}", path, e)))?;
 
+        // SAFETY: Mmap::map is unsafe because the file could be modified externally
+        // while mapped, causing undefined behavior. We accept this risk because:
+        // - Database files are expected to be stable after creation
+        // - Live-reload creates a new mmap rather than modifying in-place
+        // - This is standard practice for read-only database files
         let mmap = unsafe { Mmap::map(&file) }
             .map_err(|e| DatabaseError::Io(format!("Failed to mmap {}: {}", path, e)))?;
 

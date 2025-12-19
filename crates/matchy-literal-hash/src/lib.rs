@@ -300,54 +300,22 @@ impl LiteralHashBuilder {
             buffer.extend_from_slice(&offset.to_le_bytes());
         }
 
-        // Hash table entries - write in bulk with unsafe for performance
-        let entry_size = mem::size_of::<HashEntry>();
-        let table_start = buffer.len();
-        unsafe {
-            buffer.reserve(table_bytes_size);
-            let ptr = buffer.as_mut_ptr().add(table_start);
-
-            for (i, entry) in final_table.iter().enumerate() {
-                let entry_ptr = ptr.add(i * entry_size) as *mut HashEntry;
-                std::ptr::write(
-                    entry_ptr,
-                    HashEntry {
-                        hash: entry.hash,
-                        string_offset: entry.string_offset,
-                        pattern_id: entry.pattern_id,
-                    },
-                );
-            }
-
-            buffer.set_len(table_start + table_bytes_size);
+        // Hash table entries
+        buffer.reserve(table_bytes_size);
+        for entry in final_table.iter() {
+            buffer.extend_from_slice(&entry.hash.to_le_bytes());
+            buffer.extend_from_slice(&entry.string_offset.to_le_bytes());
+            buffer.extend_from_slice(&entry.pattern_id.to_le_bytes());
         }
 
         // String pool
         buffer.extend_from_slice(&final_string_pool);
 
-        // Pattern mappings - write in bulk
+        // Pattern mappings
         buffer.extend_from_slice(&(pattern_data_offsets.len() as u32).to_le_bytes());
-        unsafe {
-            let mappings_start = buffer.len();
-            let mappings_size = pattern_data_offsets.len() * 8; // 2 u32s per mapping
-            buffer.reserve(mappings_size);
-            let ptr = buffer.as_mut_ptr().add(mappings_start);
-
-            for (i, (pattern_id, data_offset)) in pattern_data_offsets.iter().enumerate() {
-                let offset = i * 8;
-                std::ptr::copy_nonoverlapping(
-                    pattern_id.to_le_bytes().as_ptr(),
-                    ptr.add(offset),
-                    4,
-                );
-                std::ptr::copy_nonoverlapping(
-                    data_offset.to_le_bytes().as_ptr(),
-                    ptr.add(offset + 4),
-                    4,
-                );
-            }
-
-            buffer.set_len(mappings_start + mappings_size);
+        for (pattern_id, data_offset) in pattern_data_offsets.iter() {
+            buffer.extend_from_slice(&pattern_id.to_le_bytes());
+            buffer.extend_from_slice(&data_offset.to_le_bytes());
         }
 
         Ok(buffer)
@@ -601,35 +569,18 @@ fn build_shard_auto_size(shard_id: usize, entries: Vec<(String, u32, u64)>) -> S
     let capacity = needed.next_power_of_two().max(16);
     let mask = capacity - 1;
 
-    // Build string pool for this shard with bulk writes
+    // Build string pool for this shard
     let estimated_pool_size: usize = entries.iter().map(|(p, _, _)| 2 + p.len() + 1).sum();
     let mut strings = Vec::with_capacity(estimated_pool_size);
     let mut string_offsets = Vec::with_capacity(entries.len());
 
-    unsafe {
-        let ptr: *mut u8 = strings.as_mut_ptr();
-        let mut offset = 0;
+    for (pattern, _, _) in &entries {
+        string_offsets.push(strings.len());
 
-        for (pattern, _, _) in &entries {
-            string_offsets.push(offset);
-
-            let len = pattern.len() as u16;
-            let bytes = pattern.as_bytes();
-
-            // Write length
-            std::ptr::copy_nonoverlapping(len.to_le_bytes().as_ptr(), ptr.add(offset), 2);
-            offset += 2;
-
-            // Write string
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(offset), bytes.len());
-            offset += bytes.len();
-
-            // Null terminator
-            *ptr.add(offset) = 0;
-            offset += 1;
-        }
-
-        strings.set_len(offset);
+        let len = pattern.len() as u16;
+        strings.extend_from_slice(&len.to_le_bytes());
+        strings.extend_from_slice(pattern.as_bytes());
+        strings.push(0); // null terminator
     }
 
     // Build with FxHashMap (fast!), then convert to linear-probed array

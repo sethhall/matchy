@@ -12,3 +12,6 @@ matchy-match-mode = { path = "../matchy-match-mode" }
 rayon = { workspace = true }
 rustc-hash = { workspace = true }
 xxhash-rust = { workspace = true }
+
+[lints]
+workspace = true

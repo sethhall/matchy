@@ -25,3 +25,6 @@ tempfile.workspace = true
 [[bench]]
 name = "paraglob_bench"
 harness = false
+
+[lints]
+workspace = true

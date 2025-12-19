@@ -67,6 +67,9 @@ criterion = "0.8"
 tempfile = "3.8"
 proptest = "1.9"
 
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
 [profile.release]
 opt-level = 3
 lto = true
