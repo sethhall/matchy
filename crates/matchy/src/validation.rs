@@ -120,6 +120,7 @@ impl ValidationReport {
     }
 
     /// Check if database passed all validations (no errors)
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
     }
@@ -142,6 +143,7 @@ impl ValidationReport {
 
 impl DatabaseStats {
     /// Human-readable summary
+    #[must_use]
     pub fn summary(&self) -> String {
         let base = format!(
             "Version: v{}, Nodes: {}, Patterns: {} ({} literal, {} glob), IPs: {}, Size: {} KB",
@@ -155,7 +157,7 @@ impl DatabaseStats {
         );
 
         if let Some(ref db_type) = self.database_type {
-            format!("{}, Type: {}", base, db_type)
+            format!("{base}, Type: {db_type}")
         } else {
             base
         }
@@ -182,9 +184,9 @@ fn read_tree_record(buffer: &[u8], node_offset: usize, node_bytes: usize, side: 
         6 => {
             // 24-bit records (3 bytes each)
             let offset = node_offset + (side as usize) * 3;
-            let b0 = buffer[offset] as u32;
-            let b1 = buffer[offset + 1] as u32;
-            let b2 = buffer[offset + 2] as u32;
+            let b0 = u32::from(buffer[offset]);
+            let b1 = u32::from(buffer[offset + 1]);
+            let b2 = u32::from(buffer[offset + 2]);
             Some((b0 << 16) | (b1 << 8) | b2)
         }
         7 => {
@@ -194,17 +196,17 @@ fn read_tree_record(buffer: &[u8], node_offset: usize, node_bytes: usize, side: 
             let middle = buffer[node_offset + 3];
             if side == 0 {
                 // Left record
-                let low = ((buffer[node_offset] as u32) << 16)
-                    | ((buffer[node_offset + 1] as u32) << 8)
-                    | (buffer[node_offset + 2] as u32);
-                let high = ((middle >> 4) & 0x0F) as u32;
+                let low = (u32::from(buffer[node_offset]) << 16)
+                    | (u32::from(buffer[node_offset + 1]) << 8)
+                    | u32::from(buffer[node_offset + 2]);
+                let high = u32::from((middle >> 4) & 0x0F);
                 Some((high << 24) | low)
             } else {
                 // Right record
-                let low = ((buffer[node_offset + 4] as u32) << 16)
-                    | ((buffer[node_offset + 5] as u32) << 8)
-                    | (buffer[node_offset + 6] as u32);
-                let high = (middle & 0x0F) as u32;
+                let low = (u32::from(buffer[node_offset + 4]) << 16)
+                    | (u32::from(buffer[node_offset + 5]) << 8)
+                    | u32::from(buffer[node_offset + 6]);
+                let high = u32::from(middle & 0x0F);
                 Some((high << 24) | low)
             }
         }
@@ -258,13 +260,14 @@ pub fn validate_database(path: &Path, level: ValidationLevel) -> Result<Validati
 
     // Load entire file into memory for validation
     let file =
-        File::open(path).map_err(|e| ParaglobError::Io(format!("Failed to open file: {}", e)))?;
+        File::open(path).map_err(|e| ParaglobError::Io(format!("Failed to open file: {e}")))?;
 
     let metadata = file
         .metadata()
-        .map_err(|e| ParaglobError::Io(format!("Failed to get file metadata: {}", e)))?;
+        .map_err(|e| ParaglobError::Io(format!("Failed to get file metadata: {e}")))?;
 
-    let file_size = metadata.len() as usize;
+    let file_size = usize::try_from(metadata.len())
+        .map_err(|_| ParaglobError::Io("File too large for this platform".to_string()))?;
     report.stats.file_size = file_size;
     report.info(format!(
         "File size: {} bytes ({} KB)",
@@ -273,8 +276,8 @@ pub fn validate_database(path: &Path, level: ValidationLevel) -> Result<Validati
     ));
 
     // Read entire file
-    let buffer = std::fs::read(path)
-        .map_err(|e| ParaglobError::Io(format!("Failed to read file: {}", e)))?;
+    let buffer =
+        std::fs::read(path).map_err(|e| ParaglobError::Io(format!("Failed to read file: {e}")))?;
 
     // Validate as MMDB format
     validate_mmdb_database(&buffer, &mut report, level)
@@ -288,7 +291,7 @@ fn validate_mmdb_database(
 ) -> Result<ValidationReport> {
     // Check for MMDB metadata marker
     if let Err(e) = crate::mmdb::find_metadata_marker(buffer) {
-        report.error(format!("Invalid MMDB format: {}", e));
+        report.error(format!("Invalid MMDB format: {e}"));
         return Ok(report.clone());
     }
 
@@ -300,9 +303,15 @@ fn validate_mmdb_database(
             if let Ok(crate::DataValue::Map(map)) = metadata.as_value() {
                 // Extract and validate required MMDB fields
                 let node_count = match map.get("node_count") {
-                    Some(crate::DataValue::Uint16(n)) => *n as u32,
+                    Some(crate::DataValue::Uint16(n)) => u32::from(*n),
                     Some(crate::DataValue::Uint32(n)) => *n,
-                    Some(crate::DataValue::Uint64(n)) => *n as u32,
+                    Some(crate::DataValue::Uint64(n)) => match u32::try_from(*n) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            report.error("node_count exceeds u32 maximum");
+                            return Ok(report.clone());
+                        }
+                    },
                     _ => {
                         report.error("Missing or invalid node_count in metadata");
                         return Ok(report.clone());
@@ -311,7 +320,13 @@ fn validate_mmdb_database(
 
                 let record_size = match map.get("record_size") {
                     Some(crate::DataValue::Uint16(n)) => *n,
-                    Some(crate::DataValue::Uint32(n)) => *n as u16,
+                    Some(crate::DataValue::Uint32(n)) => match u16::try_from(*n) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            report.error("record_size exceeds u16 maximum");
+                            return Ok(report.clone());
+                        }
+                    },
                     _ => {
                         report.error("Missing or invalid record_size in metadata");
                         return Ok(report.clone());
@@ -320,7 +335,13 @@ fn validate_mmdb_database(
 
                 let ip_version = match map.get("ip_version") {
                     Some(crate::DataValue::Uint16(n)) => *n,
-                    Some(crate::DataValue::Uint32(n)) => *n as u16,
+                    Some(crate::DataValue::Uint32(n)) => match u16::try_from(*n) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            report.error("ip_version exceeds u16 maximum");
+                            return Ok(report.clone());
+                        }
+                    },
                     _ => {
                         report.error("Missing or invalid ip_version in metadata");
                         return Ok(report.clone());
@@ -330,16 +351,12 @@ fn validate_mmdb_database(
                 // Validate values
                 if record_size != 24 && record_size != 28 && record_size != 32 {
                     report.error(format!(
-                        "Invalid record_size: {} (must be 24, 28, or 32)",
-                        record_size
+                        "Invalid record_size: {record_size} (must be 24, 28, or 32)"
                     ));
                 }
 
                 if ip_version != 4 && ip_version != 6 {
-                    report.error(format!(
-                        "Invalid ip_version: {} (must be 4 or 6)",
-                        ip_version
-                    ));
+                    report.error(format!("Invalid ip_version: {ip_version} (must be 4 or 6)"));
                 }
 
                 // Calculate and validate tree size
@@ -359,15 +376,14 @@ fn validate_mmdb_database(
                     ));
                 } else {
                     report.info(format!(
-                        "IP tree: {} nodes, {} bits/record, IPv{}, tree size: {} bytes",
-                        node_count, record_size, ip_version, tree_size
+                        "IP tree: {node_count} nodes, {record_size} bits/record, IPv{ip_version}, tree size: {tree_size} bytes"
                     ));
                 }
 
                 // Extract database info
                 let database_type =
                     if let Some(crate::DataValue::String(db_type)) = map.get("database_type") {
-                        report.info(format!("Database type: {}", db_type));
+                        report.info(format!("Database type: {db_type}"));
                         report.stats.database_type = Some(db_type.clone());
                         Some(db_type.clone())
                     } else {
@@ -376,7 +392,7 @@ fn validate_mmdb_database(
 
                 if let Some(crate::DataValue::String(desc)) = map.get("description") {
                     if desc.len() <= 100 {
-                        report.info(format!("Description: {}", desc));
+                        report.info(format!("Description: {desc}"));
                     }
                 }
 
@@ -384,10 +400,10 @@ fn validate_mmdb_database(
                 if let Some(build_epoch) = map.get("build_epoch") {
                     match build_epoch {
                         crate::DataValue::Uint32(epoch) => {
-                            report.info(format!("Build epoch: {}", epoch));
+                            report.info(format!("Build epoch: {epoch}"));
                         }
                         crate::DataValue::Uint64(epoch) => {
-                            report.info(format!("Build epoch: {}", epoch));
+                            report.info(format!("Build epoch: {epoch}"));
                         }
                         _ => {}
                     }
@@ -399,7 +415,7 @@ fn validate_mmdb_database(
                 {
                     if *pattern_offset > 0 {
                         let offset = *pattern_offset as usize;
-                        report.info(format!("Pattern section found at offset {}", offset));
+                        report.info(format!("Pattern section found at offset {offset}"));
 
                         // Validate the embedded PARAGLOB section
                         if offset < buffer.len() {
@@ -420,11 +436,11 @@ fn validate_mmdb_database(
                 {
                     if *literal_offset > 0 {
                         let offset = *literal_offset as usize;
-                        report.info(format!("Literal section found at offset {}", offset));
+                        report.info(format!("Literal section found at offset {offset}"));
 
                         // Validate literal hash section if in standard or strict mode
                         if offset < buffer.len() {
-                            validate_literal_hash_section(buffer, offset, report)?;
+                            validate_literal_hash_section(buffer, offset, report);
                         } else {
                             report.error(format!(
                                 "Literal section offset {} beyond file size {}",
@@ -442,28 +458,28 @@ fn validate_mmdb_database(
                 }
 
                 // Always validate data section structure and UTF-8 (critical for safety)
-                validate_mmdb_data_section(buffer, tree_size, report)?;
+                validate_mmdb_data_section(buffer, tree_size, report);
 
                 // Validate UTF-8 in data section (critical for safety)
                 validate_data_section_utf8(
                     buffer, tree_size, node_count, node_bytes, report, level,
-                )?;
+                );
 
                 // Validate data section pointers (critical for safety)
                 validate_data_section_pointers(
                     buffer, tree_size, node_count, node_bytes, report, level,
-                )?;
+                );
 
                 // Strict mode: deep validation
                 if level == ValidationLevel::Strict {
                     // Check for size bombs
-                    validate_size_limits(buffer.len(), node_count, report)?;
+                    validate_size_limits(buffer.len(), node_count, report);
 
                     // Sample tree nodes for integrity
-                    validate_tree_samples(buffer, node_count, node_bytes, tree_size, report)?;
+                    validate_tree_samples(buffer, node_count, node_bytes, tree_size, report);
 
                     // Validate data pointer references
-                    validate_data_pointers(buffer, tree_size, node_count, node_bytes, report)?;
+                    validate_data_pointers(buffer, tree_size, node_count, node_bytes, report);
 
                     // Deep IP tree traversal validation
                     let ip_tree_result = matchy_ip_trie::validate_ip_tree(
@@ -486,13 +502,13 @@ fn validate_mmdb_database(
                     if is_known_database_type(db_type) {
                         validate_schema_content(
                             buffer, db_type, tree_size, node_count, node_bytes, report, level,
-                        )?;
+                        );
                     }
                 }
             }
         }
         Err(e) => {
-            report.error(format!("Failed to parse MMDB metadata: {}", e));
+            report.error(format!("Failed to parse MMDB metadata: {e}"));
             return Ok(report.clone());
         }
     }
@@ -505,17 +521,13 @@ fn validate_mmdb_database(
 }
 
 /// Validate literal hash section structure
-fn validate_literal_hash_section(
-    buffer: &[u8],
-    offset: usize,
-    report: &mut ValidationReport,
-) -> Result<()> {
+fn validate_literal_hash_section(buffer: &[u8], offset: usize, report: &mut ValidationReport) {
     // Check for "MMDB_LITERAL" marker (16 bytes)
     const LITERAL_MARKER: &[u8] = b"MMDB_LITERAL\x00\x00\x00\x00";
 
     if offset < 16 || offset - 16 > buffer.len() {
         report.error("Literal section offset invalid");
-        return Ok(());
+        return;
     }
 
     // Check for marker before the data
@@ -535,7 +547,7 @@ fn validate_literal_hash_section(
 
     if offset + 4 > buffer.len() {
         report.error("Literal hash section truncated (no magic bytes)");
-        return Ok(());
+        return;
     }
 
     let magic = &buffer[offset..offset + 4];
@@ -564,26 +576,23 @@ fn validate_literal_hash_section(
             ]);
 
             report.info(format!(
-                "Literal hash: version {}, {} entries, table size {}",
-                version, entry_count, table_size
+                "Literal hash: version {version}, {entry_count} entries, table size {table_size}"
             ));
 
             // Basic sanity checks
             if version != 1 {
-                report.warning(format!("Unexpected literal hash version: {}", version));
+                report.warning(format!("Unexpected literal hash version: {version}"));
             }
 
             if entry_count > 10_000_000 {
                 report.warning(format!(
-                    "Very large literal count: {} (> 10M, potential memory issue)",
-                    entry_count
+                    "Very large literal count: {entry_count} (> 10M, potential memory issue)"
                 ));
             }
 
             if table_size < entry_count {
                 report.error(format!(
-                    "Table size {} is smaller than entry count {}",
-                    table_size, entry_count
+                    "Table size {table_size} is smaller than entry count {entry_count}"
                 ));
             }
 
@@ -598,16 +607,10 @@ fn validate_literal_hash_section(
             String::from_utf8_lossy(magic)
         ));
     }
-
-    Ok(())
 }
 
 /// Validate size limits to prevent memory bombs
-fn validate_size_limits(
-    file_size: usize,
-    node_count: u32,
-    report: &mut ValidationReport,
-) -> Result<()> {
+fn validate_size_limits(file_size: usize, node_count: u32, report: &mut ValidationReport) {
     // Check for unreasonably large files (> 2GB)
     const MAX_SAFE_FILE_SIZE: usize = 2 * 1024 * 1024 * 1024;
     if file_size > MAX_SAFE_FILE_SIZE {
@@ -621,12 +624,9 @@ fn validate_size_limits(
     const MAX_REASONABLE_NODES: u32 = 10_000_000;
     if node_count > MAX_REASONABLE_NODES {
         report.warning(format!(
-            "Very large node count: {} (> 10M threshold, potential memory bomb)",
-            node_count
+            "Very large node count: {node_count} (> 10M threshold, potential memory bomb)"
         ));
     }
-
-    Ok(())
 }
 
 /// Sample tree nodes to verify structure integrity
@@ -636,9 +636,9 @@ fn validate_tree_samples(
     node_bytes: usize,
     tree_size: usize,
     report: &mut ValidationReport,
-) -> Result<()> {
+) {
     if node_count == 0 {
-        return Ok(());
+        return;
     }
 
     // Sample up to 100 random nodes (or all if fewer)
@@ -658,8 +658,7 @@ fn validate_tree_samples(
         let node_offset = i * node_bytes;
         if node_offset + node_bytes > tree_size {
             report.error(format!(
-                "Node {} offset {} exceeds tree size {}",
-                i, node_offset, tree_size
+                "Node {i} offset {node_offset} exceeds tree size {tree_size}"
             ));
             break;
         }
@@ -667,8 +666,7 @@ fn validate_tree_samples(
         // Basic check: node data should be within bounds
         if node_offset + node_bytes > buffer.len() {
             report.error(format!(
-                "Node {} at offset {} would exceed buffer",
-                i, node_offset
+                "Node {i} at offset {node_offset} would exceed buffer"
             ));
             break;
         }
@@ -676,8 +674,7 @@ fn validate_tree_samples(
         sampled += 1;
     }
 
-    report.info(format!("Sampled {} tree nodes for integrity", sampled));
-    Ok(())
+    report.info(format!("Sampled {sampled} tree nodes for integrity"));
 }
 
 /// Validate data pointers in tree nodes
@@ -687,9 +684,9 @@ fn validate_data_pointers(
     node_count: u32,
     node_bytes: usize,
     report: &mut ValidationReport,
-) -> Result<()> {
+) {
     if node_count == 0 {
-        return Ok(());
+        return;
     }
 
     // Sample some nodes and check their record values
@@ -725,14 +722,11 @@ fn validate_data_pointers(
             let data_offset = record_val - node_count - 16;
             if data_offset as usize > max_valid_offset {
                 report.warning(format!(
-                    "Node {} has data pointer {} that may exceed data section",
-                    i, data_offset
+                    "Node {i} has data pointer {data_offset} that may exceed data section"
                 ));
             }
         }
     }
-
-    Ok(())
 }
 
 /// Validate UTF-8 in data section strings (CRITICAL for safety)
@@ -743,11 +737,11 @@ fn validate_data_section_utf8(
     node_bytes: usize,
     report: &mut ValidationReport,
     level: ValidationLevel,
-) -> Result<()> {
+) {
     let data_section_start = tree_size + 16; // Tree + separator
 
     if data_section_start >= buffer.len() {
-        return Ok(()); // No data section
+        return; // No data section
     }
 
     let data_section = &buffer[data_section_start..];
@@ -762,7 +756,7 @@ fn validate_data_section_utf8(
     };
 
     if node_count == 0 || sample_count == 0 {
-        return Ok(());
+        return;
     }
 
     let step = if node_count > sample_count {
@@ -815,8 +809,7 @@ fn validate_data_section_utf8(
 
     if strings_checked > 0 {
         report.info(format!(
-            "UTF-8 validated: {} string(s) checked in data section (all valid)",
-            strings_checked
+            "UTF-8 validated: {strings_checked} string(s) checked in data section (all valid)"
         ));
     } else if sample_count > 0 {
         report.info("UTF-8 validation: no data records found to sample");
@@ -826,8 +819,6 @@ fn validate_data_section_utf8(
         report
             .error("Database contains invalid UTF-8 - DO NOT use with --trusted mode!".to_string());
     }
-
-    Ok(())
 }
 
 /// Check UTF-8 validity of all strings in a data value
@@ -837,11 +828,7 @@ fn check_data_value_utf8(data_section: &[u8], offset: usize) -> std::result::Res
 }
 
 /// Validate MMDB data section structure
-fn validate_mmdb_data_section(
-    buffer: &[u8],
-    tree_size: usize,
-    report: &mut ValidationReport,
-) -> Result<()> {
+fn validate_mmdb_data_section(buffer: &[u8], tree_size: usize, report: &mut ValidationReport) {
     // After the tree, there should be a 16-byte separator, then the data section
     const DATA_SEPARATOR_SIZE: usize = 16;
 
@@ -852,7 +839,7 @@ fn validate_mmdb_data_section(
             DATA_SEPARATOR_SIZE,
             buffer.len()
         ));
-        return Ok(());
+        return;
     }
 
     let separator_start = tree_size;
@@ -869,7 +856,7 @@ fn validate_mmdb_data_section(
     // Validate data section exists and is reasonable
     let data_size = buffer.len() - data_start;
     if data_size > 0 {
-        report.info(format!("Data section: {} bytes", data_size));
+        report.info(format!("Data section: {data_size} bytes"));
 
         // Basic sanity check: data section shouldn't be impossibly small
         if data_size < 4 {
@@ -878,8 +865,6 @@ fn validate_mmdb_data_section(
     } else {
         report.warning("No data section found after tree");
     }
-
-    Ok(())
 }
 
 /// Validate an embedded PARAGLOB section within an MMDB database
@@ -1025,7 +1010,7 @@ fn validate_paraglob_section(
                                 .get("record_size")
                                 .and_then(|v| match v {
                                     crate::DataValue::Uint16(n) => Some(*n),
-                                    crate::DataValue::Uint32(n) => Some(*n as u16),
+                                    crate::DataValue::Uint32(n) => u16::try_from(*n).ok(),
                                     _ => None,
                                 })
                                 .unwrap_or(24);
@@ -1049,8 +1034,7 @@ fn validate_paraglob_section(
                                 let offset = offset as usize;
                                 if offset < data_section_start {
                                     report.error(format!(
-                                        "Pattern data offset {} points before data section (starts at {})",
-                                        offset, data_section_start
+                                        "Pattern data offset {offset} points before data section (starts at {data_section_start})"
                                     ));
                                 } else if offset >= buffer.len() {
                                     report.error(format!(
@@ -1069,7 +1053,7 @@ fn validate_paraglob_section(
                 }
             }
             Err(e) => {
-                report.error(format!("Failed to extract pattern data offsets: {}", e));
+                report.error(format!("Failed to extract pattern data offsets: {e}"));
             }
         }
     }
@@ -1112,8 +1096,7 @@ fn validate_paraglob_header(buffer: &[u8], report: &mut ValidationReport) -> Res
     if &header.magic != MAGIC {
         let magic_str = String::from_utf8_lossy(&header.magic);
         report.error(format!(
-            "Invalid magic bytes: expected {:?}, got {:?}",
-            MAGIC, magic_str
+            "Invalid magic bytes: expected {MAGIC:?}, got {magic_str:?}"
         ));
         return Ok(());
     }
@@ -1135,10 +1118,7 @@ fn validate_paraglob_header(buffer: &[u8], report: &mut ValidationReport) -> Res
             report.warning("Format version: v1 (oldest - no data section, no AC literal mapping)");
         }
         v => {
-            report.error(format!(
-                "Unsupported version: {} (expected 1, 2, 3, or 4)",
-                v
-            ));
+            report.error(format!("Unsupported version: {v} (expected 1, 2, 3, or 4)"));
             return Ok(());
         }
     }
@@ -1155,7 +1135,7 @@ fn validate_paraglob_header(buffer: &[u8], report: &mut ValidationReport) -> Res
                 );
             }
         }
-        e => report.warning(format!("Unknown endianness marker: 0x{:02x}", e)),
+        e => report.warning(format!("Unknown endianness marker: 0x{e:02x}")),
     }
 
     // Validate total buffer size matches file size
@@ -1168,7 +1148,7 @@ fn validate_paraglob_header(buffer: &[u8], report: &mut ValidationReport) -> Res
     }
 
     if let Err(e) = header.validate_offsets(buffer.len()) {
-        report.error(format!("Header offset validation failed: {}", e));
+        report.error(format!("Header offset validation failed: {e}"));
     }
 
     Ok(())
@@ -1287,11 +1267,11 @@ fn validate_data_section_pointers(
     node_bytes: usize,
     report: &mut ValidationReport,
     level: ValidationLevel,
-) -> Result<()> {
+) {
     let data_section_start = tree_size + 16; // Tree + separator
 
     if data_section_start >= buffer.len() {
-        return Ok(()); // No data section
+        return; // No data section
     }
 
     let data_section = &buffer[data_section_start..];
@@ -1304,7 +1284,7 @@ fn validate_data_section_pointers(
     };
 
     if node_count == 0 || sample_count == 0 {
-        return Ok(());
+        return;
     }
 
     let step = if node_count > sample_count {
@@ -1355,8 +1335,7 @@ fn validate_data_section_pointers(
                         matchy_data_format::PointerValidationError::Cycle { offset } => {
                             cycles_detected += 1;
                             report.error(format!(
-                                "Pointer cycle detected in data section at offset {}",
-                                offset
+                                "Pointer cycle detected in data section at offset {offset}"
                             ));
                         }
                         matchy_data_format::PointerValidationError::DepthExceeded { depth } => {
@@ -1371,17 +1350,13 @@ fn validate_data_section_pointers(
                             reason,
                         } => {
                             invalid_pointers += 1;
-                            report
-                                .error(format!("Invalid pointer at offset {}: {}", offset, reason));
+                            report.error(format!("Invalid pointer at offset {offset}: {reason}"));
                         }
                         matchy_data_format::PointerValidationError::InvalidType {
                             offset,
                             type_id,
                         } => {
-                            report.error(format!(
-                                "Invalid data type {} at offset {}",
-                                type_id, offset
-                            ));
+                            report.error(format!("Invalid data type {type_id} at offset {offset}"));
                         }
                     },
                 }
@@ -1392,26 +1367,21 @@ fn validate_data_section_pointers(
     // Report findings
     if pointers_checked > 0 {
         report.info(format!(
-            "Data pointers validated: {} checked, max chain depth: {}",
-            pointers_checked, max_depth_found
+            "Data pointers validated: {pointers_checked} checked, max chain depth: {max_depth_found}"
         ));
     }
 
     if cycles_detected > 0 {
         report.error(format!(
-            "🚨 CRITICAL: {} pointer cycles detected - could cause infinite loops!",
-            cycles_detected
+            "🚨 CRITICAL: {cycles_detected} pointer cycles detected - could cause infinite loops!"
         ));
     }
 
     if invalid_pointers > 0 {
         report.error(format!(
-            "🚨 CRITICAL: {} invalid pointers detected - could cause crashes!",
-            invalid_pointers
+            "🚨 CRITICAL: {invalid_pointers} invalid pointers detected - could cause crashes!"
         ));
     }
-
-    Ok(())
 }
 
 /// Find the literal section offset from metadata
@@ -1500,38 +1470,36 @@ fn validate_schema_content(
     node_bytes: usize,
     report: &mut ValidationReport,
     _level: ValidationLevel,
-) -> Result<()> {
+) {
     // Try to create a schema validator
     let validator = match SchemaValidator::new(database_type) {
         Ok(v) => v,
         Err(e) => {
             report.warning(format!(
-                "Could not create schema validator for '{}': {}",
-                database_type, e
+                "Could not create schema validator for '{database_type}': {e}"
             ));
-            return Ok(());
+            return;
         }
     };
 
     report.info(format!(
-        "Validating ALL data entries against {} schema...",
-        database_type
+        "Validating ALL data entries against {database_type} schema..."
     ));
     report.stats.schema_validated = true;
 
     let data_section_start = tree_size + 16; // Tree + separator
     if data_section_start >= buffer.len() {
         report.warning("No data section found for schema validation");
-        return Ok(());
+        return;
     }
 
     let data_section = &buffer[data_section_start..];
     let decoder = DataDecoder::new(data_section, 0); // Offsets are relative to data section
 
-    let mut entries_checked = 0u32;
-    let mut validation_failures = 0u32;
+    let mut entries_checked: u32 = 0;
+    let mut validation_failures: u32 = 0;
     let mut first_errors: Vec<String> = Vec::new();
-    const MAX_ERRORS_TO_REPORT: usize = 10;
+    const MAX_ERRORS_TO_REPORT: u32 = 10;
 
     // Track validated offsets to avoid duplicates (data deduplication means multiple
     // keys can point to the same data)
@@ -1556,9 +1524,8 @@ fn validate_schema_content(
 
                     if let Err(e) = validator.validate(&map) {
                         validation_failures += 1;
-                        if first_errors.len() < MAX_ERRORS_TO_REPORT {
-                            first_errors
-                                .push(format!("{} at offset {}: {}", source, data_offset, e));
+                        if first_errors.len() < MAX_ERRORS_TO_REPORT as usize {
+                            first_errors.push(format!("{source} at offset {data_offset}: {e}"));
                         }
                     }
                 }
@@ -1575,9 +1542,11 @@ fn validate_schema_content(
             for offset in data_offsets.iter() {
                 if *offset > 0 {
                     // Offset is absolute, convert to relative to data section
-                    if *offset as usize >= data_section_start {
-                        let rel_offset = (*offset as usize - data_section_start) as u32;
-                        validate_at_offset(rel_offset, "Literal entry");
+                    let offset_usize = *offset as usize;
+                    if offset_usize >= data_section_start {
+                        if let Ok(rel_offset) = u32::try_from(offset_usize - data_section_start) {
+                            validate_at_offset(rel_offset, "Literal entry");
+                        }
                     }
                 }
             }
@@ -1618,9 +1587,11 @@ fn validate_schema_content(
                                         for offset in data_offsets.iter() {
                                             if *offset > 0 {
                                                 // Pattern data offsets are absolute
-                                                if *offset as usize >= data_section_start {
-                                                    let rel_offset = (*offset as usize - data_section_start) as u32;
-                                                    validate_at_offset(rel_offset, "Pattern entry");
+                                                let offset_usize = *offset as usize;
+                                                if offset_usize >= data_section_start {
+                                                    if let Ok(rel_offset) = u32::try_from(offset_usize - data_section_start) {
+                                                        validate_at_offset(rel_offset, "Pattern entry");
+                                                    }
                                                 }
                                             }
                                         }
@@ -1664,7 +1635,6 @@ fn validate_schema_content(
         }
     }
 
-    // Update stats
     report.stats.schema_entries_checked = entries_checked;
     report.stats.schema_validation_failures = validation_failures;
 
@@ -1672,33 +1642,29 @@ fn validate_schema_content(
     if entries_checked > 0 {
         if validation_failures == 0 {
             report.info(format!(
-                "✓ Schema validation passed: {} entries checked, all valid",
-                entries_checked
+                "✓ Schema validation passed: {entries_checked} entries checked, all valid"
             ));
         } else {
             let pct_failed = (validation_failures * 100) / entries_checked;
             report.error(format!(
-                "Schema validation failed: {}/{} entries invalid ({}%)",
-                validation_failures, entries_checked, pct_failed
+                "Schema validation failed: {validation_failures}/{entries_checked} entries invalid ({pct_failed}%)"
             ));
 
             // Report first few errors as details
             for err in first_errors {
-                report.error(format!("  • {}", err));
+                report.error(format!("  • {err}"));
             }
 
-            if validation_failures > MAX_ERRORS_TO_REPORT as u32 {
+            if validation_failures > MAX_ERRORS_TO_REPORT {
                 report.error(format!(
                     "  ... and {} more validation errors",
-                    validation_failures - MAX_ERRORS_TO_REPORT as u32
+                    validation_failures - MAX_ERRORS_TO_REPORT
                 ));
             }
         }
     } else {
         report.warning("No data entries found for schema validation");
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

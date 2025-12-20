@@ -67,7 +67,7 @@ impl SystemState {
     fn record_file_completion(&self) {
         self.files_completed_recent.fetch_add(1, Ordering::Relaxed);
         self.last_completion_ns.store(
-            Instant::now().elapsed().as_nanos() as u64,
+            u64::try_from(Instant::now().elapsed().as_nanos()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
     }
@@ -124,7 +124,7 @@ fn chunk_size_for(file_size: u64, is_compressed: bool) -> usize {
 
 /// Reader thread worker: chunks a single file and sends batches to worker queue
 /// Called by reader threads in the reader pool as they pull files from the file queue
-fn reader_thread_chunker(file_path: PathBuf, work_sender: &Sender<WorkUnit>) -> Result<(), String> {
+fn reader_thread_chunker(file_path: &Path, work_sender: &Sender<WorkUnit>) -> Result<(), String> {
     // Special handling for stdin (can't stat it)
     let is_stdin = file_path.to_str() == Some("-");
 
@@ -132,14 +132,14 @@ fn reader_thread_chunker(file_path: PathBuf, work_sender: &Sender<WorkUnit>) -> 
         // Use default chunk size for stdin
         256 * 1024 // 256KB
     } else {
-        let metadata = fs::metadata(&file_path)
+        let metadata = fs::metadata(file_path)
             .map_err(|e| format!("Failed to stat {}: {}", file_path.display(), e))?;
         let file_size = metadata.len();
-        let is_compressed = is_file_compressed(&file_path);
+        let is_compressed = is_file_compressed(file_path);
         chunk_size_for(file_size, is_compressed)
     };
 
-    let mut reader = FileReader::new(&file_path, chunk_size)
+    let mut reader = FileReader::new(file_path, chunk_size)
         .map_err(|e| format!("Failed to open {}: {}", file_path.display(), e))?;
 
     while let Some(batch) = reader
@@ -187,11 +187,13 @@ pub struct RoutingStats {
 
 impl RoutingStats {
     /// Total number of files processed
+    #[must_use]
     pub fn total_files(&self) -> usize {
         self.files_to_workers + self.files_to_readers
     }
 
     /// Total bytes across all files
+    #[must_use]
     pub fn total_bytes(&self) -> u64 {
         self.bytes_to_workers + self.bytes_to_readers
     }
@@ -275,7 +277,7 @@ fn compute_workload_stats(file_infos: &[FileInfo]) -> WorkloadStats {
     sizes.sort_unstable();
 
     let median_size = sizes[sizes.len() / 2];
-    let p95_idx = (sizes.len() as f64 * 0.95) as usize;
+    let p95_idx = sizes.len() * 95 / 100;
     let p95_size = sizes[p95_idx.min(sizes.len() - 1)];
     let total_bytes: u64 = sizes.iter().sum();
 
@@ -465,7 +467,7 @@ fn process_work_unit_with_worker(
 /// let files = vec!["access.log".into(), "errors.log".into()];
 ///
 /// let result = processing::process_files_parallel(
-///     files,
+///     &files,
 ///     None, // Use default reader count
 ///     None, // Use default worker count  
 ///     || {
@@ -492,7 +494,7 @@ fn process_work_unit_with_worker(
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn process_files_parallel<F, P>(
-    files: Vec<PathBuf>,
+    files: &[PathBuf],
     num_readers: Option<usize>,
     num_workers: Option<usize>,
     create_worker: F,
@@ -504,12 +506,12 @@ where
     P: Fn(&WorkerStats) + Sync + Send + 'static,
 {
     let num_cpus = thread::available_parallelism()
-        .map(|n| n.get())
+        .map(std::num::NonZero::get)
         .unwrap_or(4);
     let num_workers = num_workers.unwrap_or(num_cpus);
 
     // Phase 1: Collect file metadata and compute workload statistics upfront
-    let file_infos = collect_file_metadata(&files)?;
+    let file_infos = collect_file_metadata(files)?;
     let workload_stats = compute_workload_stats(&file_infos);
     let file_count = file_infos.len();
 
@@ -520,7 +522,7 @@ where
     if debug_routing {
         eprintln!("\n[DEBUG] === Routing Analysis ===");
         eprintln!("[DEBUG] Workload statistics:");
-        eprintln!("[DEBUG]   Total files: {}", file_count);
+        eprintln!("[DEBUG]   Total files: {file_count}");
         eprintln!(
             "[DEBUG]   Median size: {} bytes ({:.2} MB)",
             workload_stats.median_size,
@@ -536,8 +538,8 @@ where
             workload_stats.total_bytes,
             workload_stats.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
         );
-        eprintln!("[DEBUG]   Workers: {}", num_workers);
-        eprintln!("[DEBUG]   Predicted files to chunk: {}", files_to_chunk);
+        eprintln!("[DEBUG]   Workers: {num_workers}");
+        eprintln!("[DEBUG]   Predicted files to chunk: {files_to_chunk}");
         eprintln!();
     }
 
@@ -603,8 +605,8 @@ where
                     state.dec_reader_queue(); // File removed from queue
 
                     // Chunk this file and send chunks to work queue
-                    if let Err(e) = reader_thread_chunker(file_path, &work_tx) {
-                        eprintln!("Reader error: {}", e);
+                    if let Err(e) = reader_thread_chunker(&file_path, &work_tx) {
+                        eprintln!("Reader error: {e}");
                     }
                     state.record_chunk_processed();
                 }
@@ -630,7 +632,7 @@ where
             let mut worker = match factory() {
                 Ok(w) => w,
                 Err(e) => {
-                    eprintln!("Worker creation failed: {}", e);
+                    eprintln!("Worker creation failed: {e}");
                     return (Vec::new(), WorkerStats::default());
                 }
             };
@@ -649,7 +651,7 @@ where
                         local_matches.extend(matches);
                     }
                     Err(e) => {
-                        eprintln!("Processing error: {}", e);
+                        eprintln!("Processing error: {e}");
                     }
                 }
 
@@ -810,7 +812,7 @@ where
 
     if debug_routing {
         eprintln!("\n[DEBUG] === Routing Summary ===");
-        eprintln!("[DEBUG] Readers spawned: {}", num_readers);
+        eprintln!("[DEBUG] Readers spawned: {num_readers}");
         eprintln!(
             "[DEBUG] Files to workers: {}",
             routing_stats.files_to_workers
@@ -828,7 +830,7 @@ where
     // Wait for all reader threads to finish
     for handle in reader_handles {
         if let Err(e) = handle.join() {
-            eprintln!("Reader thread panicked: {:?}", e);
+            eprintln!("Reader thread panicked: {e:?}");
         }
     }
 
@@ -858,7 +860,7 @@ where
                 aggregate_stats.email_count += stats.email_count;
             }
             Err(e) => {
-                eprintln!("Worker thread panicked: {:?}", e);
+                eprintln!("Worker thread panicked: {e:?}");
             }
         }
     }
@@ -923,8 +925,7 @@ mod tests {
             );
             assert!(
                 !should_chunk,
-                "File {} (remaining={}) should NOT chunk with many files",
-                i, files_remaining
+                "File {i} (remaining={files_remaining}) should NOT chunk with many files"
             );
         }
 
@@ -940,8 +941,7 @@ mod tests {
             );
             assert!(
                 !should_chunk,
-                "File {} (remaining={}) should NOT chunk (not an outlier)",
-                i, files_remaining
+                "File {i} (remaining={files_remaining}) should NOT chunk (not an outlier)"
             );
         }
 
@@ -964,13 +964,11 @@ mod tests {
             );
             assert!(
                 !should_chunk_normal,
-                "File {} (remaining={}, 5GB) should NOT chunk (< 2x median)",
-                i, files_remaining
+                "File {i} (remaining={files_remaining}, 5GB) should NOT chunk (< 2x median)"
             );
             assert!(
                 should_chunk_large,
-                "File {} (remaining={}, 12GB) SHOULD chunk (> 2x median)",
-                i, files_remaining
+                "File {i} (remaining={files_remaining}, 12GB) SHOULD chunk (> 2x median)"
             );
         }
     }
@@ -1000,8 +998,7 @@ mod tests {
             );
             assert!(
                 !should_chunk,
-                "File {} (remaining={}) should NOT chunk (many files)",
-                i, files_remaining
+                "File {i} (remaining={files_remaining}) should NOT chunk (many files)"
             );
         }
 
@@ -1049,8 +1046,7 @@ mod tests {
             // Should NOT chunk
             assert!(
                 !should_chunk,
-                "File {} (remaining={}, 120MB) should NOT chunk",
-                i, files_remaining
+                "File {i} (remaining={files_remaining}, 120MB) should NOT chunk"
             );
         }
 
@@ -1125,8 +1121,7 @@ mod tests {
             );
             assert!(
                 !should_chunk,
-                "File {} should NOT chunk (many small files)",
-                i
+                "File {i} should NOT chunk (many small files)"
             );
         }
     }
@@ -1154,8 +1149,7 @@ mod tests {
             );
             assert!(
                 !should_chunk,
-                "File {} (remaining={}) should NOT chunk (many remaining)",
-                i, files_remaining
+                "File {i} (remaining={files_remaining}) should NOT chunk (many remaining)"
             );
         }
 
@@ -1235,7 +1229,7 @@ mod tests {
 
         // Process files in parallel
         let result = process_files_parallel(
-            files,
+            &files,
             Some(1), // 1 reader
             Some(2), // 2 workers
             move || {
@@ -1289,7 +1283,7 @@ mod tests {
 
         // Process with multiple workers
         let result = process_files_parallel(
-            files,
+            &files,
             Some(0), // No readers (files go direct to workers)
             Some(4), // 4 workers
             move || {
@@ -1441,20 +1435,15 @@ mod tests {
 
         assert!(
             observed_max_len <= channel_capacity,
-            "Channel exceeded capacity: max observed length ({}) > capacity ({}). \
-             With unbounded channels this would grow to {}.",
-            observed_max_len,
-            channel_capacity,
-            total_items
+            "Channel exceeded capacity: max observed length ({observed_max_len}) > capacity ({channel_capacity}). \
+             With unbounded channels this would grow to {total_items}."
         );
 
         // Verify we actually stressed the system (queue got reasonably full)
         assert!(
             observed_max_len >= channel_capacity / 2,
-            "Test may not have applied enough pressure: max channel length ({}) \
-             was less than half capacity ({}). Increase total_items or slow down consumers.",
-            observed_max_len,
-            channel_capacity
+            "Test may not have applied enough pressure: max channel length ({observed_max_len}) \
+             was less than half capacity ({channel_capacity}). Increase total_items or slow down consumers."
         );
 
         // This test proves: with bounded channels, memory is bounded to

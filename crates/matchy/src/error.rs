@@ -38,13 +38,13 @@ pub type Result<T> = std::result::Result<T, MatchyError>;
 // Convenient conversions for common error types
 impl From<String> for MatchyError {
     fn from(s: String) -> Self {
-        MatchyError::Database(s)
+        Self::Database(s)
     }
 }
 
 impl From<&str> for MatchyError {
     fn from(s: &str) -> Self {
-        MatchyError::Database(s.to_string())
+        Self::Database(s.to_string())
     }
 }
 

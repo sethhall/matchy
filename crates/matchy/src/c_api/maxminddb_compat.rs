@@ -61,7 +61,7 @@ pub struct MMDB_entry_data_list_s {
     /// The entry data for this node
     pub entry_data: MMDB_entry_data_s,
     /// Pointer to the next node in the list (NULL if last)
-    pub next: *mut MMDB_entry_data_list_s,
+    pub next: *mut Self,
     /// Memory pool pointer (not used in this implementation)
     pub pool: *mut c_void,
 }
@@ -86,8 +86,6 @@ fn map_matchy_error(matchy_error: i32) -> c_int {
         super::matchy::MATCHY_ERROR_IO => MMDB_IO_ERROR,
         super::matchy::MATCHY_ERROR_OUT_OF_MEMORY => MMDB_OUT_OF_MEMORY_ERROR,
         super::matchy::MATCHY_ERROR_LOOKUP_PATH_INVALID => MMDB_INVALID_LOOKUP_PATH_ERROR,
-        super::matchy::MATCHY_ERROR_NO_DATA => MMDB_INVALID_DATA_ERROR,
-        super::matchy::MATCHY_ERROR_DATA_PARSE => MMDB_INVALID_DATA_ERROR,
         _ => MMDB_INVALID_DATA_ERROR,
     }
 }
@@ -121,7 +119,7 @@ pub unsafe extern "C" fn MMDB_open(
     };
 
     // Open database using matchy
-    let db = matchy_open(filename_str.as_ptr() as *const c_char);
+    let db = matchy_open(filename_str.as_ptr().cast::<c_char>());
     if db.is_null() {
         return MMDB_FILE_OPEN_ERROR;
     }
@@ -197,7 +195,7 @@ pub unsafe extern "C" fn MMDB_lookup_string(
                 _data_offset: result._data_offset,
             },
         },
-        netmask: result.prefix_len as u16,
+        netmask: u16::from(result.prefix_len),
     };
 
     if !gai_error.is_null() {
@@ -247,12 +245,12 @@ pub unsafe extern "C" fn MMDB_lookup_sockaddr(
 
     // Convert sockaddr to IP string
     // First, read the address family with a minimal dereference
-    let family = (*sockaddr).sa_family as i32;
+    let family = i32::from((*sockaddr).sa_family);
 
     let ip_addr = match family {
         libc::AF_INET => {
             // Safely copy the IPv4 address bytes into a local in_addr
-            let sa = sockaddr as *const libc::sockaddr_in;
+            let sa = sockaddr.cast::<libc::sockaddr_in>();
             let mut in_addr: libc::in_addr = mem::zeroed();
             ptr::copy_nonoverlapping(
                 &(*sa).sin_addr as *const libc::in_addr,
@@ -264,7 +262,7 @@ pub unsafe extern "C" fn MMDB_lookup_sockaddr(
         }
         libc::AF_INET6 => {
             // Safely copy the IPv6 address bytes into a local in6_addr
-            let sa = sockaddr as *const libc::sockaddr_in6;
+            let sa = sockaddr.cast::<libc::sockaddr_in6>();
             let mut in6_addr: libc::in6_addr = mem::zeroed();
             ptr::copy_nonoverlapping(
                 &(*sa).sin6_addr as *const libc::in6_addr,
@@ -385,7 +383,7 @@ pub unsafe extern "C" fn MMDB_get_entry_data_list(
 
     // Call matchy's get_entry_data_list
     let matchy_entry = &(*start)._matchy_entry as *const _;
-    let matchy_list_ptr = entry_data_list as *mut *mut matchy_entry_data_list_t;
+    let matchy_list_ptr = entry_data_list.cast::<*mut matchy_entry_data_list_t>();
     let status = matchy_get_entry_data_list(matchy_entry, matchy_list_ptr);
 
     map_matchy_error(status)
@@ -436,7 +434,9 @@ pub unsafe extern "C" fn MMDB_close(mmdb: *mut MMDB_s) {
 #[no_mangle]
 pub extern "C" fn MMDB_lib_version() -> *const c_char {
     // Return matchy version with "-compat" suffix
-    concat!(env!("CARGO_PKG_VERSION"), "-compat\0").as_ptr() as *const c_char
+    concat!(env!("CARGO_PKG_VERSION"), "-compat\0")
+        .as_ptr()
+        .cast::<c_char>()
 }
 
 /// Convert error code to string
@@ -452,7 +452,7 @@ pub extern "C" fn MMDB_strerror(error_code: c_int) -> *const c_char {
         MMDB_INVALID_NODE_NUMBER_ERROR => "Invalid node number\0",
         _ => "Unknown error\0",
     };
-    msg.as_ptr() as *const c_char
+    msg.as_ptr().cast::<c_char>()
 }
 
 // ============================================================================

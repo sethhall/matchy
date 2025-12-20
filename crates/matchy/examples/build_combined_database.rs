@@ -168,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Optionally save to disk
     let output_file = "combined_database.mxy";
     std::fs::write(output_file, &database_bytes)?;
-    println!("\n💾 Saved to: {}", output_file);
+    println!("\n💾 Saved to: {output_file}");
     println!("   Ready to load and query!");
 
     Ok(())

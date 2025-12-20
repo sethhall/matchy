@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use matchy::{Database, DatabaseBuilder, MatchMode};
 use std::collections::HashMap;
@@ -17,21 +19,21 @@ fn bench_cache_comparison(c: &mut Criterion) {
     // Add 100 IPs
     for i in 0..100 {
         builder
-            .add_ip(&format!("10.0.0.{}", i), empty_data.clone())
+            .add_ip(&format!("10.0.0.{i}"), empty_data.clone())
             .unwrap();
     }
 
     // Add 100 literals
     for i in 0..100 {
         builder
-            .add_literal(&format!("literal_{}.example.com", i), empty_data.clone())
+            .add_literal(&format!("literal_{i}.example.com"), empty_data.clone())
             .unwrap();
     }
 
     // Add 100 patterns
     for i in 0..100 {
         builder
-            .add_glob(&format!("*.pattern{}.com", i), empty_data.clone())
+            .add_glob(&format!("*.pattern{i}.com"), empty_data.clone())
             .unwrap();
     }
 
@@ -60,8 +62,8 @@ fn bench_cache_comparison(c: &mut Criterion) {
                         (query_idx / 16) % 256,
                         query_idx % 256
                     ),
-                    1 => format!("literal_{}.example.com", query_idx),
-                    _ => format!("test.pattern{}.com", query_idx),
+                    1 => format!("literal_{query_idx}.example.com"),
+                    _ => format!("test.pattern{query_idx}.com"),
                 }
             })
             .collect();
@@ -75,7 +77,7 @@ fn bench_cache_comparison(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(total_queries as u64));
         group.bench_with_input(
-            BenchmarkId::new("with_cache", format!("{}%_hits", hit_rate)),
+            BenchmarkId::new("with_cache", format!("{hit_rate}%_hits")),
             &queries,
             |b, queries| {
                 b.iter(|| {
@@ -97,7 +99,7 @@ fn bench_cache_comparison(c: &mut Criterion) {
             .unwrap();
 
         group.bench_with_input(
-            BenchmarkId::new("no_cache", format!("{}%_hits", hit_rate)),
+            BenchmarkId::new("no_cache", format!("{hit_rate}%_hits")),
             &queries,
             |b, queries| {
                 b.iter(|| {
@@ -127,13 +129,13 @@ fn bench_cache_by_type(c: &mut Criterion) {
 
     for i in 0..100 {
         builder
-            .add_ip(&format!("10.0.0.{}", i), empty_data.clone())
+            .add_ip(&format!("10.0.0.{i}"), empty_data.clone())
             .unwrap();
         builder
-            .add_literal(&format!("literal_{}.com", i), empty_data.clone())
+            .add_literal(&format!("literal_{i}.com"), empty_data.clone())
             .unwrap();
         builder
-            .add_glob(&format!("*.pattern{}.com", i), empty_data.clone())
+            .add_glob(&format!("*.pattern{i}.com"), empty_data.clone())
             .unwrap();
     }
 

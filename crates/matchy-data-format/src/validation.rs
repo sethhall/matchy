@@ -22,6 +22,7 @@ pub struct DataFormatValidationResult {
 
 impl DataFormatValidationResult {
     /// Create a new empty validation result
+    #[must_use]
     pub fn new() -> Self {
         Self {
             errors: Vec::new(),
@@ -31,6 +32,7 @@ impl DataFormatValidationResult {
     }
 
     /// Check if validation passed (no errors)
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
     }
@@ -84,10 +86,12 @@ pub fn validate_data_value_utf8(
     base_offset: usize,
 ) -> Result<u32, String> {
     let decoder = DataDecoder::new(data_section, base_offset);
+    let offset_u32 =
+        u32::try_from(offset).map_err(|_| format!("Offset {offset} exceeds u32::MAX"))?;
 
-    match decoder.decode(offset as u32) {
+    match decoder.decode(offset_u32) {
         Ok(value) => validate_value_strings_utf8(&value),
-        Err(e) => Err(format!("Failed to decode data value: {}", e)),
+        Err(e) => Err(format!("Failed to decode data value: {e}")),
     }
 }
 
@@ -161,6 +165,7 @@ pub fn validate_value_strings_utf8(value: &DataValue) -> Result<u32, String> {
 ///
 /// # Returns
 /// Validation result with errors, warnings, and statistics
+#[must_use]
 pub fn validate_data_section(
     data_section: &[u8],
     base_offset: usize,
@@ -176,7 +181,10 @@ pub fn validate_data_section(
     let decoder = DataDecoder::new(data_section, base_offset);
 
     // If specific offsets provided, check those
-    if !offsets_to_check.is_empty() {
+    if offsets_to_check.is_empty() {
+        // If no specific offsets, just validate that the section is well-formed
+        result.warning("No specific offsets to validate".to_string());
+    } else {
         for &offset in offsets_to_check {
             match decoder.decode(offset) {
                 Ok(value) => {
@@ -186,7 +194,7 @@ pub fn validate_data_section(
                             result.stats.strings_checked += count;
                         }
                         Err(e) => {
-                            result.error(format!("Invalid UTF-8 at offset {}: {}", offset, e));
+                            result.error(format!("Invalid UTF-8 at offset {offset}: {e}"));
                         }
                     }
 
@@ -194,13 +202,10 @@ pub fn validate_data_section(
                     update_stats_for_value(&value, &mut result.stats);
                 }
                 Err(e) => {
-                    result.error(format!("Failed to decode at offset {}: {}", offset, e));
+                    result.error(format!("Failed to decode at offset {offset}: {e}"));
                 }
             }
         }
-    } else {
-        // If no specific offsets, just validate that the section is well-formed
-        result.warning("No specific offsets to validate".to_string());
     }
 
     result
@@ -247,17 +252,17 @@ pub enum PointerValidationError {
 impl std::fmt::Display for PointerValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PointerValidationError::Cycle { offset } => {
-                write!(f, "Pointer cycle detected at offset {}", offset)
+            Self::Cycle { offset } => {
+                write!(f, "Pointer cycle detected at offset {offset}")
             }
-            PointerValidationError::DepthExceeded { depth } => {
-                write!(f, "Depth {} exceeds limit", depth)
+            Self::DepthExceeded { depth } => {
+                write!(f, "Depth {depth} exceeds limit")
             }
-            PointerValidationError::InvalidOffset { offset, reason } => {
-                write!(f, "Invalid offset {} ({})", offset, reason)
+            Self::InvalidOffset { offset, reason } => {
+                write!(f, "Invalid offset {offset} ({reason})")
             }
-            PointerValidationError::InvalidType { offset, type_id } => {
-                write!(f, "Invalid type {} at offset {}", type_id, offset)
+            Self::InvalidType { offset, type_id } => {
+                write!(f, "Invalid type {type_id} at offset {offset}")
             }
         }
     }
@@ -291,6 +296,7 @@ pub struct PointerValidationStats {
 
 impl PointerValidationResult {
     /// Create new empty result
+    #[must_use]
     pub fn new() -> Self {
         Self {
             errors: Vec::new(),
@@ -300,6 +306,7 @@ impl PointerValidationResult {
     }
 
     /// Check if validation passed
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
     }

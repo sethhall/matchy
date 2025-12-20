@@ -21,12 +21,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add 100 IPs
     for i in 0..100 {
-        builder.add_ip(&format!("10.0.0.{}", i), data.clone())?;
+        builder.add_ip(&format!("10.0.0.{i}"), data.clone())?;
     }
 
     // Add 100 patterns
     for i in 0..100 {
-        builder.add_glob(&format!("*.pattern{}.com", i), data.clone())?;
+        builder.add_glob(&format!("*.pattern{i}.com"), data.clone())?;
     }
 
     let db_bytes = builder.build()?;
@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("   Queries:  {}", queries.len());
     println!("   Duration: {:.3}s", uncached_duration.as_secs_f64());
-    println!("   QPS:      {:.0}\n", uncached_qps);
+    println!("   QPS:      {uncached_qps:.0}\n");
 
     // Test 2: With caching
     println!("3. Testing WITH caching (10k capacity)...");
@@ -69,11 +69,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("   Queries:  {}", queries.len());
     println!("   Duration: {:.3}s", cached_duration.as_secs_f64());
-    println!("   QPS:      {:.0}", cached_qps);
+    println!("   QPS:      {cached_qps:.0}");
 
     // Calculate speedup
     let speedup = uncached_duration.as_secs_f64() / cached_duration.as_secs_f64();
-    println!("   Speedup:  {:.2}x faster\n", speedup);
+    println!("   Speedup:  {speedup:.2}x faster\n");
 
     // Test 3: Cache management
     println!("4. Cache management...");
@@ -105,10 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let qps = queries.len() as f64 / duration.as_secs_f64();
         let speedup = qps / uncached_qps;
 
-        println!(
-            "   {:>3}%     | {:>10.0} | {:>6.2}x",
-            hit_rate, qps, speedup
-        );
+        println!("   {hit_rate:>3}%     | {qps:>10.0} | {speedup:>6.2}x");
     }
 
     println!("\n=== Key Takeaways ===");

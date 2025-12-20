@@ -34,6 +34,7 @@ pub struct ExtractorBuilder {
 
 impl ExtractorBuilder {
     /// Create a new builder with default configuration
+    #[must_use]
     pub fn new() -> Self {
         Self {
             extract_domains: true,
@@ -50,60 +51,70 @@ impl ExtractorBuilder {
     }
 
     /// Enable or disable domain extraction
+    #[must_use]
     pub fn extract_domains(mut self, enable: bool) -> Self {
         self.extract_domains = enable;
         self
     }
 
     /// Enable or disable email extraction
+    #[must_use]
     pub fn extract_emails(mut self, enable: bool) -> Self {
         self.extract_emails = enable;
         self
     }
 
     /// Enable or disable IPv4 extraction
+    #[must_use]
     pub fn extract_ipv4(mut self, enable: bool) -> Self {
         self.extract_ipv4 = enable;
         self
     }
 
     /// Enable or disable IPv6 extraction
+    #[must_use]
     pub fn extract_ipv6(mut self, enable: bool) -> Self {
         self.extract_ipv6 = enable;
         self
     }
 
     /// Enable or disable hash extraction (MD5, SHA1, SHA256)
+    #[must_use]
     pub fn extract_hashes(mut self, enable: bool) -> Self {
         self.extract_hashes = enable;
         self
     }
 
     /// Enable or disable Bitcoin address extraction
+    #[must_use]
     pub fn extract_bitcoin(mut self, enable: bool) -> Self {
         self.extract_bitcoin = enable;
         self
     }
 
     /// Enable or disable Ethereum address extraction
+    #[must_use]
     pub fn extract_ethereum(mut self, enable: bool) -> Self {
         self.extract_ethereum = enable;
         self
     }
 
     /// Enable or disable Monero address extraction
+    #[must_use]
     pub fn extract_monero(mut self, enable: bool) -> Self {
         self.extract_monero = enable;
         self
     }
 
     /// Set minimum number of domain labels (e.g., 2 for "example.com")
+    #[must_use]
     pub fn min_domain_labels(mut self, min: usize) -> Self {
         self.min_domain_labels = min;
         self
     }
 
     /// Require word boundaries around extracted patterns
+    #[must_use]
     pub fn require_word_boundaries(mut self, require: bool) -> Self {
         self.require_word_boundaries = require;
         self
@@ -159,28 +170,30 @@ impl HashType {
     /// Get hash type from byte length
     fn from_len(len: usize) -> Option<Self> {
         match len {
-            32 => Some(HashType::Md5),
-            40 => Some(HashType::Sha1),
-            64 => Some(HashType::Sha256),
-            96 => Some(HashType::Sha384),
-            128 => Some(HashType::Sha512),
+            32 => Some(Self::Md5),
+            40 => Some(Self::Sha1),
+            64 => Some(Self::Sha256),
+            96 => Some(Self::Sha384),
+            128 => Some(Self::Sha512),
             _ => None,
         }
     }
 
     /// Get expected length for this hash type
+    #[must_use]
     pub fn len(&self) -> usize {
         match self {
-            HashType::Md5 => 32,
-            HashType::Sha1 => 40,
-            HashType::Sha256 => 64,
-            HashType::Sha384 => 96,
-            HashType::Sha512 => 128,
+            Self::Md5 => 32,
+            Self::Sha1 => 40,
+            Self::Sha256 => 64,
+            Self::Sha384 => 96,
+            Self::Sha512 => 128,
         }
     }
 
     /// Check if hash is empty (always false - hashes are never empty)
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         false
     }
@@ -200,13 +213,14 @@ impl HashType {
     /// assert_eq!(HashType::Md5.type_name(), "MD5");
     /// assert_eq!(HashType::Sha256.type_name(), "SHA256");
     /// ```
+    #[must_use]
     pub fn type_name(&self) -> &'static str {
         match self {
-            HashType::Md5 => "MD5",
-            HashType::Sha1 => "SHA1",
-            HashType::Sha256 => "SHA256",
-            HashType::Sha384 => "SHA384",
-            HashType::Sha512 => "SHA512",
+            Self::Md5 => "MD5",
+            Self::Sha1 => "SHA1",
+            Self::Sha256 => "SHA256",
+            Self::Sha384 => "SHA384",
+            Self::Sha512 => "SHA512",
         }
     }
 }
@@ -258,6 +272,7 @@ impl<'a> ExtractedItem<'a> {
     ///
     /// # See Also
     /// - [`as_value()`](Self::as_value) - Get the extracted value as a string
+    #[must_use]
     pub fn type_name(&self) -> &'static str {
         match self {
             ExtractedItem::Domain(_) => "Domain",
@@ -297,16 +312,17 @@ impl<'a> ExtractedItem<'a> {
     /// # See Also
     /// - [`type_name()`](Self::type_name) - Get the type name of this item
     /// - [`Match::as_str()`] - Get a zero-copy string slice
+    #[must_use]
     pub fn as_value(&self) -> String {
         match self {
-            ExtractedItem::Domain(s) => s.to_string(),
-            ExtractedItem::Email(s) => s.to_string(),
+            ExtractedItem::Domain(s)
+            | ExtractedItem::Email(s)
+            | ExtractedItem::Bitcoin(s)
+            | ExtractedItem::Ethereum(s)
+            | ExtractedItem::Monero(s)
+            | ExtractedItem::Hash(_, s) => (*s).to_string(),
             ExtractedItem::Ipv4(ip) => ip.to_string(),
             ExtractedItem::Ipv6(ip) => ip.to_string(),
-            ExtractedItem::Hash(_, s) => s.to_string(),
-            ExtractedItem::Bitcoin(s) => s.to_string(),
-            ExtractedItem::Ethereum(s) => s.to_string(),
-            ExtractedItem::Monero(s) => s.to_string(),
         }
     }
 }
@@ -323,6 +339,7 @@ pub struct Match<'a> {
 impl<'a> Match<'a> {
     /// Get the matched text as a string slice.
     /// Returns empty string if the matched bytes are not valid UTF-8.
+    #[must_use]
     pub fn as_str(&self, input: &'a [u8]) -> &'a str {
         std::str::from_utf8(&input[self.span.0..self.span.1]).unwrap_or("")
     }
@@ -366,6 +383,7 @@ impl Extractor {
     }
 
     /// Create a builder for custom configuration
+    #[must_use]
     pub fn builder() -> ExtractorBuilder {
         ExtractorBuilder::new()
     }
@@ -385,6 +403,7 @@ impl Extractor {
     ///     println!("{}: {}", match_item.item.type_name(), match_item.as_str(line));
     /// }
     /// ```
+    #[must_use]
     pub fn extract_from_line<'a>(&'a self, line: &'a [u8]) -> ExtractIter<'a> {
         ExtractIter::new(self, line)
     }
@@ -407,6 +426,7 @@ impl Extractor {
     /// let matches = extractor.extract_from_chunk(chunk);
     /// assert!(matches.len() > 0);
     /// ```
+    #[must_use]
     pub fn extract_from_chunk<'a>(&'a self, chunk: &'a [u8]) -> Vec<Match<'a>> {
         let mut matches = Vec::new();
 
@@ -489,46 +509,55 @@ impl Extractor {
     }
 
     /// Check if domain extraction is enabled
+    #[must_use]
     pub fn extract_domains(&self) -> bool {
         self.extract_domains
     }
 
     /// Check if email extraction is enabled
+    #[must_use]
     pub fn extract_emails(&self) -> bool {
         self.extract_emails
     }
 
     /// Check if IPv4 extraction is enabled
+    #[must_use]
     pub fn extract_ipv4(&self) -> bool {
         self.extract_ipv4
     }
 
     /// Check if IPv6 extraction is enabled
+    #[must_use]
     pub fn extract_ipv6(&self) -> bool {
         self.extract_ipv6
     }
 
     /// Check if hash extraction is enabled
+    #[must_use]
     pub fn extract_hashes(&self) -> bool {
         self.extract_hashes
     }
 
     /// Check if Bitcoin extraction is enabled
+    #[must_use]
     pub fn extract_bitcoin(&self) -> bool {
         self.extract_bitcoin
     }
 
     /// Check if Ethereum extraction is enabled
+    #[must_use]
     pub fn extract_ethereum(&self) -> bool {
         self.extract_ethereum
     }
 
     /// Check if Monero extraction is enabled
+    #[must_use]
     pub fn extract_monero(&self) -> bool {
         self.extract_monero
     }
 
     /// Get minimum domain labels requirement
+    #[must_use]
     pub fn min_domain_labels(&self) -> usize {
         self.min_domain_labels
     }
@@ -714,7 +743,7 @@ impl Extractor {
             let octet_start = pos;
 
             while pos < line.len() && line[pos].is_ascii_digit() && digit_count < 3 {
-                let digit = (line[pos] - b'0') as u16;
+                let digit = u16::from(line[pos] - b'0');
                 octet_value = octet_value * 10 + digit;
                 pos += 1;
                 digit_count += 1;
@@ -724,18 +753,14 @@ impl Extractor {
                 return None; // No digits found
             }
 
-            // Validate octet is in range 0-255
-            if octet_value > 255 {
-                return None;
-            }
-
             // Reject leading zeros (except "0" itself)
             // e.g., "192.168.01.1" is invalid
             if digit_count > 1 && line[octet_start] == b'0' {
                 return None;
             }
 
-            *octet = octet_value as u8;
+            // Validate octet is in range 0-255
+            *octet = u8::try_from(octet_value).ok()?;
 
             // Expect dot after first 3 octets
             if octet_idx < 3 {
@@ -1447,7 +1472,7 @@ fn psl_contains(suffix: &[u8]) -> bool {
     let string_pool_start = table_start + (table_size as usize * 16);
 
     let hash = xxh64(suffix, 0);
-    let mut slot = (hash as u32 & table_mask) as usize;
+    let mut slot = usize::try_from(hash & u64::from(table_mask)).unwrap();
 
     // Linear probe (max table_size iterations)
     for _ in 0..table_size {
@@ -1785,11 +1810,11 @@ fn validate_ethereum_checksum(addr: &str) -> bool {
     let all_lower = addr_hex
         .chars()
         .filter(|c| c.is_alphabetic())
-        .all(|c| c.is_lowercase());
+        .all(char::is_lowercase);
     let all_upper = addr_hex
         .chars()
         .filter(|c| c.is_alphabetic())
-        .all(|c| c.is_uppercase());
+        .all(char::is_uppercase);
 
     if all_lower || all_upper {
         return true; // Valid, just not checksummed

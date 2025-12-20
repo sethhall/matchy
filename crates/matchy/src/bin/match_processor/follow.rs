@@ -1,3 +1,6 @@
+// Arc is passed by value intentionally - Arc::clone() is cheap (atomic increment)
+#![allow(clippy::needless_pass_by_value)]
+
 use anyhow::{Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::collections::HashMap;
@@ -19,7 +22,7 @@ const POLL_INTERVAL_MS: u64 = 100;
 
 #[allow(clippy::too_many_arguments)]
 pub fn follow_files(
-    inputs: Vec<PathBuf>,
+    inputs: &[PathBuf],
     db: &matchy::Database,
     extractor: &matchy::extractor::Extractor,
     output_format: &str,
@@ -44,7 +47,7 @@ pub fn follow_files(
         eprintln!("[INFO] Processing existing file content...");
     }
 
-    for input_path in &inputs {
+    for input_path in inputs {
         let stats = process_existing_content(
             input_path,
             db,
@@ -62,7 +65,7 @@ pub fn follow_files(
     }
 
     let mut file_positions: Vec<(PathBuf, u64)> = Vec::new();
-    for input_path in &inputs {
+    for input_path in inputs {
         let file = File::open(input_path)
             .with_context(|| format!("Failed to open {}", input_path.display()))?;
         let pos = file.metadata()?.len();
@@ -214,7 +217,7 @@ fn process_new_content(
 
 #[allow(clippy::too_many_arguments)]
 pub fn follow_files_parallel(
-    inputs: Vec<PathBuf>,
+    inputs: &[PathBuf],
     db: Arc<matchy::Database>,
     num_threads: usize,
     output_format: &str,
@@ -259,7 +262,7 @@ pub fn follow_files_parallel(
         let extractor_config = extractor_config.clone();
 
         let handle = thread::spawn(move || {
-            set_thread_name(&format!("matchy-follow-worker-{}", worker_id));
+            set_thread_name(&format!("matchy-follow-worker-{worker_id}"));
             worker_thread_follow(
                 worker_id,
                 work_rx,
@@ -275,15 +278,15 @@ pub fn follow_files_parallel(
     drop(result_tx);
 
     let reader_handle = {
-        let inputs = inputs.clone();
+        let inputs = inputs.to_vec();
         let shutdown_reader = Arc::clone(&shutdown);
         thread::spawn(move || {
             set_thread_name("matchy-follow-reader");
-            reader_watcher_thread(inputs, work_tx, overall_start, shutdown_reader, show_stats)
+            reader_watcher_thread(inputs, work_tx, overall_start, shutdown_reader, show_stats);
         })
     };
 
-    let reader_result = reader_handle.join().expect("Reader thread panicked");
+    reader_handle.join().expect("Reader thread panicked");
 
     let mut worker_stats = Vec::new();
     for handle in worker_handles {
@@ -307,8 +310,6 @@ pub fn follow_files_parallel(
         aggregate.email_count += stats.email_count;
     }
 
-    reader_result?;
-
     Ok(aggregate)
 }
 
@@ -318,7 +319,7 @@ fn reader_watcher_thread(
     _overall_start: Instant,
     shutdown: Arc<AtomicBool>,
     show_stats: bool,
-) -> Result<()> {
+) {
     if show_stats {
         eprintln!("[INFO] Processing existing file content...");
     }
@@ -402,8 +403,6 @@ fn reader_watcher_thread(
     }
 
     drop(work_tx);
-
-    Ok(())
 }
 
 fn worker_thread_follow(
@@ -421,10 +420,7 @@ fn worker_thread_follow(
     let extractor = match create_extractor_for_db(&db, &extractor_config) {
         Ok(ext) => ext,
         Err(e) => {
-            eprintln!(
-                "[ERROR] Worker {} failed to create extractor: {}",
-                worker_id, e
-            );
+            eprintln!("[ERROR] Worker {worker_id} failed to create extractor: {e}");
             return WorkerStats::default();
         }
     };
@@ -452,10 +448,7 @@ fn worker_thread_follow(
                         }
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[ERROR] Worker {} batch processing failed: {}",
-                            worker_id, e
-                        );
+                        eprintln!("[ERROR] Worker {worker_id} batch processing failed: {e}");
                     }
                 }
 
@@ -529,7 +522,7 @@ fn output_thread_follow(
                         }
 
                         if let Ok(json_str) = serde_json::to_string(&match_obj) {
-                            println!("{}", json_str);
+                            println!("{json_str}");
                         }
                     }
 

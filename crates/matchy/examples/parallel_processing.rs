@@ -34,8 +34,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for i in 1..=10 {
         let mut file = NamedTempFile::new()?;
-        writeln!(file, "Request from 192.168.1.{}", i)?;
-        writeln!(file, "Request from 10.0.0.{}", i)?;
+        writeln!(file, "Request from 192.168.1.{i}")?;
+        writeln!(file, "Request from 10.0.0.{i}")?;
         if i % 3 == 0 {
             writeln!(file, "DNS query for malicious.com")?;
             writeln!(file, "Connection to evil.net")?;
@@ -55,18 +55,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
 
     let result = processing::process_files_parallel(
-        file_paths.clone(),
+        &file_paths,
         None,    // Use default reader threads (num_cpus / 2)
         Some(4), // Use 4 worker threads (or None for all cores)
         move || {
             // This closure is called once per worker thread to create a Worker
             let extractor =
-                Extractor::new().map_err(|e| format!("Failed to create extractor: {}", e))?;
+                Extractor::new().map_err(|e| format!("Failed to create extractor: {e}"))?;
 
             let db = Database::from_bytes_builder(db_bytes.clone())
                 .no_cache() // Disable cache for this example
                 .open()
-                .map_err(|e| format!("Failed to open database: {}", e))?;
+                .map_err(|e| format!("Failed to open database: {e}"))?;
 
             let worker = processing::Worker::builder()
                 .extractor(extractor)
@@ -123,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nResults:");
     println!("--------");
     println!("Match objects returned: {}", result.matches.len());
-    println!("Processing time: {:?}", elapsed);
+    println!("Processing time: {elapsed:?}");
     println!("\nSample matches:");
 
     for (i, m) in result.matches.iter().take(5).enumerate() {

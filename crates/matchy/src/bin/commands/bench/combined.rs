@@ -29,12 +29,12 @@ pub fn bench_combined_database(
     // Add IPs (half the count)
     let ip_count = count / 2;
     for i in 0..ip_count {
-        let ip_num = i as u32;
+        let ip_num = u32::try_from(i).unwrap_or(u32::MAX);
         let octet1 = (ip_num >> 24) & 0xFF;
         let octet2 = (ip_num >> 16) & 0xFF;
         let octet3 = (ip_num >> 8) & 0xFF;
         let octet4 = ip_num & 0xFF;
-        let ip_str = format!("{}.{}.{}.{}", octet1, octet2, octet3, octet4);
+        let ip_str = format!("{octet1}.{octet2}.{octet3}.{octet4}");
         builder.add_ip(&ip_str, empty_data.clone())?;
 
         if ip_count > 100_000 && (i + 1) % 500_000 == 0 {
@@ -53,17 +53,17 @@ pub fn bench_combined_database(
         let pattern = if i % 20 == 0 {
             // ~5% complex patterns
             match (i / 20) % 4 {
-                0 => format!("*[0-9].*.attacker{}.com", i),
-                1 => format!("evil-*-[a-z][a-z].*.domain{}.net", i),
+                0 => format!("*[0-9].*.attacker{i}.com"),
+                1 => format!("evil-*-[a-z][a-z].*.domain{i}.net"),
                 2 => "*.malware-[0-9][0-9][0-9]-*.com".to_string(),
                 _ => "*bad*.phishing-?.*.org".to_string(),
             }
         } else {
             match i % 4 {
-                0 => format!("*.domain{}.com", i),
-                1 => format!("subdomain{}.*.com", i),
-                2 => format!("test-{}-*.com", i),
-                _ => format!("*-{}.net", i),
+                0 => format!("*.domain{i}.com"),
+                1 => format!("subdomain{i}.*.com"),
+                2 => format!("test-{i}-*.com"),
+                _ => format!("*-{i}.net"),
             }
         };
         builder.add_glob(&pattern, empty_data.clone())?;
@@ -109,7 +109,8 @@ pub fn bench_combined_database(
             load_time.as_micros() as f64 / 1000.0
         );
     }
-    let avg_load = load_times.iter().sum::<std::time::Duration>() / load_iterations as u32;
+    let avg_load = load_times.iter().sum::<std::time::Duration>()
+        / u32::try_from(load_iterations).unwrap_or(1);
     println!("  Average:  {:.3}ms", avg_load.as_micros() as f64 / 1000.0);
     println!();
 
@@ -143,7 +144,7 @@ pub fn bench_combined_database(
     // Query IPs
     for i in 0..half_queries {
         let query_idx = i % unique_half.max(1);
-        let ip_num = ((query_idx * 43) % ip_count) as u32;
+        let ip_num = u32::try_from((query_idx * 43) % ip_count).unwrap_or(u32::MAX);
         let octet1 = (ip_num >> 24) & 0xFF;
         let octet2 = (ip_num >> 16) & 0xFF;
         let octet3 = (ip_num >> 8) & 0xFF;
@@ -162,17 +163,17 @@ pub fn bench_combined_database(
         let test_str = if pattern_id.is_multiple_of(20) {
             // Match complex patterns (~5%)
             match (pattern_id / 20) % 4 {
-                0 => format!("prefix5.suffix.attacker{}.com", pattern_id),
-                1 => format!("evil-middle-ab.end.domain{}.net", pattern_id),
+                0 => format!("prefix5.suffix.attacker{pattern_id}.com"),
+                1 => format!("evil-middle-ab.end.domain{pattern_id}.net"),
                 2 => "prefix.malware-123-suffix.com".to_string(),
                 _ => "firstbadsecond.phishing-x.end.org".to_string(),
             }
         } else {
             match pattern_id % 4 {
-                0 => format!("prefix.domain{}.com", pattern_id),
-                1 => format!("subdomain{}.middle.com", pattern_id),
-                2 => format!("test-{}-suffix.com", pattern_id),
-                _ => format!("prefix-{}.net", pattern_id),
+                0 => format!("prefix.domain{pattern_id}.com"),
+                1 => format!("subdomain{pattern_id}.middle.com"),
+                2 => format!("test-{pattern_id}-suffix.com"),
+                _ => format!("prefix-{pattern_id}.net"),
             }
         };
 
@@ -185,7 +186,7 @@ pub fn bench_combined_database(
 
     let bench_time = bench_start.elapsed();
     let qps = query_count as f64 / bench_time.as_secs_f64();
-    let avg_query = bench_time / query_count as u32;
+    let avg_query = bench_time / u32::try_from(query_count).unwrap_or(1);
 
     println!("  Query count: {}", format_number(query_count));
     println!("  Total time:  {:.2}s", bench_time.as_secs_f64());
@@ -206,11 +207,11 @@ pub fn bench_combined_database(
     );
     println!();
 
-    if !keep {
+    if keep {
+        println!("✓ Benchmark complete (file kept: {})", temp_file.display());
+    } else {
         std::fs::remove_file(temp_file)?;
         println!("✓ Benchmark complete (temp file removed)");
-    } else {
-        println!("✓ Benchmark complete (file kept: {})", temp_file.display());
     }
 
     Ok(())

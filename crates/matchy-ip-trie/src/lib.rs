@@ -25,11 +25,11 @@ pub enum IpTreeError {
 impl fmt::Display for IpTreeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IpTreeError::InvalidPattern(msg) => write!(f, "Invalid pattern: {}", msg),
-            IpTreeError::ResourceLimitExceeded(msg) => {
-                write!(f, "Resource limit exceeded: {}", msg)
+            Self::InvalidPattern(msg) => write!(f, "Invalid pattern: {msg}"),
+            Self::ResourceLimitExceeded(msg) => {
+                write!(f, "Resource limit exceeded: {msg}")
             }
-            IpTreeError::Other(msg) => write!(f, "{}", msg),
+            Self::Other(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -49,11 +49,12 @@ pub enum RecordSize {
 
 impl RecordSize {
     /// Get the size of a node (2 records) in bytes
+    #[must_use]
     pub fn node_bytes(self) -> usize {
         match self {
-            RecordSize::Bits24 => 6,
-            RecordSize::Bits28 => 7,
-            RecordSize::Bits32 => 8,
+            Self::Bits24 => 6,
+            Self::Bits28 => 7,
+            Self::Bits32 => 8,
         }
     }
 }
@@ -101,6 +102,7 @@ enum NodePointer {
 
 impl IpTreeBuilder {
     /// Create a new IPv4 tree builder
+    #[must_use]
     pub fn new_v4(record_size: RecordSize) -> Self {
         let mut builder = Self {
             record_size,
@@ -113,6 +115,7 @@ impl IpTreeBuilder {
     }
 
     /// Create a new IPv6 tree builder (can include IPv4)
+    #[must_use]
     pub fn new_v6(record_size: RecordSize) -> Self {
         let mut builder = Self {
             record_size,
@@ -149,17 +152,16 @@ impl IpTreeBuilder {
             IpAddr::V4(v4) => {
                 if self.ip_version == IpVersion::V6 {
                     // Insert IPv4 into IPv6 tree (as IPv4-mapped at ::ffff:0:0/96)
-                    let bits = ipv4_to_bits(v4) as u128;
+                    let bits = u128::from(ipv4_to_bits(v4));
                     self.insert_bits_u128(bits, 96 + prefix_len, data_offset)
                 } else {
                     // Pure IPv4 tree
                     if prefix_len > 32 {
                         return Err(IpTreeError::InvalidPattern(format!(
-                            "IPv4 prefix length {} exceeds 32",
-                            prefix_len
+                            "IPv4 prefix length {prefix_len} exceeds 32"
                         )));
                     }
-                    let bits = ipv4_to_bits(v4) as u128;
+                    let bits = u128::from(ipv4_to_bits(v4));
                     self.insert_bits_u128(bits << 96, prefix_len, data_offset)
                 }
             }
@@ -171,8 +173,7 @@ impl IpTreeBuilder {
                 }
                 if prefix_len > 128 {
                     return Err(IpTreeError::InvalidPattern(format!(
-                        "IPv6 prefix length {} exceeds 128",
-                        prefix_len
+                        "IPv6 prefix length {prefix_len} exceeds 128"
                     )));
                 }
                 let bits = bits_to_u128(ipv6_to_bits(v6));
@@ -195,8 +196,7 @@ impl IpTreeBuilder {
 
         if prefix_len > max_depth {
             return Err(IpTreeError::InvalidPattern(format!(
-                "Prefix length {} exceeds maximum {}",
-                prefix_len, max_depth
+                "Prefix length {prefix_len} exceeds maximum {max_depth}"
             )));
         }
 
@@ -259,7 +259,7 @@ impl IpTreeBuilder {
             match child_ptr_value {
                 NodePointer::Empty => {
                     // Allocate new node
-                    let new_id = self.allocate_node();
+                    let new_id = self.allocate_node()?;
                     // Update the parent's pointer
                     let current_node = &mut self.nodes[node_id as usize];
                     if bit == 0 {
@@ -283,7 +283,7 @@ impl IpTreeBuilder {
                     // 2. Make both children point to the existing data (to preserve less specific match)
                     // 3. Continue down the tree to insert the more specific prefix
 
-                    let new_node_id = self.allocate_node();
+                    let new_node_id = self.allocate_node()?;
 
                     // Make both children of the new node point to the existing data
                     // This preserves the less specific match for all IPs under this prefix
@@ -310,10 +310,11 @@ impl IpTreeBuilder {
     }
 
     /// Allocate a new node and return its ID
-    fn allocate_node(&mut self) -> u32 {
-        let id = self.nodes.len() as u32;
+    fn allocate_node(&mut self) -> Result<u32, IpTreeError> {
+        let id = u32::try_from(self.nodes.len())
+            .map_err(|_| IpTreeError::Other("IP tree node count exceeds u32::MAX".into()))?;
         self.nodes.push(Node::new_empty());
-        id
+        Ok(id)
     }
 
     /// Backfill a subtree with less-specific prefix data
@@ -383,7 +384,8 @@ impl IpTreeBuilder {
     ///
     /// Returns: (tree_bytes, node_count)
     pub fn build(&self) -> Result<(Vec<u8>, u32), IpTreeError> {
-        let node_count = self.nodes.len() as u32;
+        let node_count = u32::try_from(self.nodes.len())
+            .map_err(|_| IpTreeError::Other("IP tree node count exceeds u32::MAX".into()))?;
         let node_size = self.record_size.node_bytes();
         let tree_size = node_count as usize * node_size;
 
@@ -424,9 +426,7 @@ impl IpTreeBuilder {
                 // Validate node ID is within bounds
                 assert!(
                     id < node_count,
-                    "Invalid node ID {} >= node_count {}",
-                    id,
-                    node_count
+                    "Invalid node ID {id} >= node_count {node_count}"
                 );
                 id
             }
@@ -440,8 +440,7 @@ impl IpTreeBuilder {
                     .and_then(|base| base.checked_add(offset))
                     .unwrap_or_else(|| {
                         panic!(
-                        "Data pointer overflow: node_count={} + 16 + offset={} exceeds u32::MAX",
-                        node_count, offset
+                        "Data pointer overflow: node_count={node_count} + 16 + offset={offset} exceeds u32::MAX"
                     )
                     })
             }
@@ -459,8 +458,7 @@ impl IpTreeBuilder {
         let offset = node_id * 6;
         if offset + 6 > tree.len() {
             return Err(IpTreeError::Other(format!(
-                "Node offset {} exceeds tree size",
-                offset
+                "Node offset {offset} exceeds tree size"
             )));
         }
 
@@ -488,8 +486,7 @@ impl IpTreeBuilder {
         let offset = node_id * 7;
         if offset + 7 > tree.len() {
             return Err(IpTreeError::Other(format!(
-                "Node offset {} exceeds tree size",
-                offset
+                "Node offset {offset} exceeds tree size"
             )));
         }
 
@@ -525,8 +522,7 @@ impl IpTreeBuilder {
         let offset = node_id * 8;
         if offset + 8 > tree.len() {
             return Err(IpTreeError::Other(format!(
-                "Node offset {} exceeds tree size",
-                offset
+                "Node offset {offset} exceeds tree size"
             )));
         }
 
@@ -558,29 +554,29 @@ impl Node {
 /// Convert IPv4 address to 32-bit integer
 fn ipv4_to_bits(addr: std::net::Ipv4Addr) -> u32 {
     let octets = addr.octets();
-    ((octets[0] as u32) << 24)
-        | ((octets[1] as u32) << 16)
-        | ((octets[2] as u32) << 8)
-        | (octets[3] as u32)
+    (u32::from(octets[0]) << 24)
+        | (u32::from(octets[1]) << 16)
+        | (u32::from(octets[2]) << 8)
+        | u32::from(octets[3])
 }
 
 /// Convert IPv6 address to 128-bit integer (as two u64s)
 fn ipv6_to_bits(addr: std::net::Ipv6Addr) -> (u64, u64) {
     let segments = addr.segments();
-    let high = ((segments[0] as u64) << 48)
-        | ((segments[1] as u64) << 32)
-        | ((segments[2] as u64) << 16)
-        | (segments[3] as u64);
-    let low = ((segments[4] as u64) << 48)
-        | ((segments[5] as u64) << 32)
-        | ((segments[6] as u64) << 16)
-        | (segments[7] as u64);
+    let high = (u64::from(segments[0]) << 48)
+        | (u64::from(segments[1]) << 32)
+        | (u64::from(segments[2]) << 16)
+        | u64::from(segments[3]);
+    let low = (u64::from(segments[4]) << 48)
+        | (u64::from(segments[5]) << 32)
+        | (u64::from(segments[6]) << 16)
+        | u64::from(segments[7]);
     (high, low)
 }
 
 /// Convert two u64s to u128
 fn bits_to_u128(bits: (u64, u64)) -> u128 {
-    ((bits.0 as u128) << 64) | (bits.1 as u128)
+    (u128::from(bits.0) << 64) | u128::from(bits.1)
 }
 
 #[cfg(test)]

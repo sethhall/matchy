@@ -90,19 +90,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Query IP
     if let Some(result) = db.lookup("8.8.8.8")? {
         println!("   ✓ Found IP: 8.8.8.8");
-        println!("     {:?}", result);
+        println!("     {result:?}");
     }
 
     // Query glob pattern
     if let Some(result) = db.lookup("subdomain.example.com")? {
         println!("   ✓ Matched pattern: *.example.com");
-        println!("     {:?}", result);
+        println!("     {result:?}");
     }
 
     // Query literal (exact match only)
     if let Some(result) = db.lookup("evil.com")? {
         println!("   ✓ Found literal: evil.com");
-        println!("     {:?}", result);
+        println!("     {result:?}");
     }
 
     // This won't match because "*.actually-in-domain.com" is stored as literal
@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // But exact match will work
     if let Some(result) = db.lookup("*.actually-in-domain.com")? {
         println!("   ✓ Found literal: *.actually-in-domain.com");
-        println!("     {:?}", result);
+        println!("     {result:?}");
     }
 
     // Cleanup

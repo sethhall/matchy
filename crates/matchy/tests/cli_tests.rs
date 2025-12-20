@@ -706,7 +706,7 @@ fn test_json_output_includes_match_data() {
 
     // Create log file with known content
     let test_line = "2024-01-15 Connection from 192.168.1.100 detected";
-    fs::write(&log_file, format!("{}\n", test_line)).unwrap();
+    fs::write(&log_file, format!("{test_line}\n")).unwrap();
 
     // Run match with JSON output (force sequential mode with --threads 1)
     let output = matchy_cmd()
@@ -964,10 +964,7 @@ fn test_json_output_parallel_mode() {
     let target_line = "Line 2: Request to bad.malware.com blocked";
     fs::write(
         &log_file,
-        format!(
-            "Line 1: Normal traffic\n{}\nLine 3: More content\n",
-            target_line
-        ),
+        format!("Line 1: Normal traffic\n{target_line}\nLine 3: More content\n"),
     )
     .unwrap();
 

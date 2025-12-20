@@ -52,6 +52,7 @@ pub struct DatabaseBuilder {
 }
 
 impl DatabaseBuilder {
+    #[must_use]
     pub fn new(match_mode: MatchMode) -> Self {
         Self {
             entries: Vec::new(),
@@ -77,6 +78,7 @@ impl DatabaseBuilder {
     /// let builder = DatabaseBuilder::new(MatchMode::CaseSensitive)
     ///     .with_database_type("MyCompany-ThreatIntel");
     /// ```
+    #[must_use]
     pub fn with_database_type(mut self, db_type: impl Into<String>) -> Self {
         self.database_type = Some(db_type.into());
         self
@@ -96,6 +98,7 @@ impl DatabaseBuilder {
     ///     .with_description("en", "My custom threat database")
     ///     .with_description("es", "Mi base de datos de amenazas personalizada");
     /// ```
+    #[must_use]
     pub fn with_description(
         mut self,
         language: impl Into<String>,
@@ -106,6 +109,7 @@ impl DatabaseBuilder {
     }
 
     /// Set an entry validator for schema validation
+    #[must_use]
     pub fn with_validator(mut self, validator: Box<dyn EntryValidator>) -> Self {
         self.validator = Some(validator);
         self
@@ -124,6 +128,7 @@ impl DatabaseBuilder {
     /// let builder = DatabaseBuilder::new(MatchMode::CaseSensitive)
     ///     .with_update_url("https://example.com/threats.mxy");
     /// ```
+    #[must_use]
     pub fn with_update_url(mut self, url: impl Into<String>) -> Self {
         self.update_url = Some(url.into());
         self
@@ -143,6 +148,7 @@ impl DatabaseBuilder {
     /// let builder = DatabaseBuilder::new(MatchMode::CaseSensitive)
     ///     .with_match_mode(MatchMode::CaseInsensitive);
     /// ```
+    #[must_use]
     pub fn with_match_mode(mut self, match_mode: MatchMode) -> Self {
         self.match_mode = match_mode;
         self
@@ -165,7 +171,7 @@ impl DatabaseBuilder {
         if let Some(ref validator) = self.validator {
             validator
                 .validate(key, data)
-                .map_err(|e| FormatError::ValidationError(format!("{}", e)))?;
+                .map_err(|e| FormatError::ValidationError(format!("{e}")))?;
         }
         Ok(())
     }
@@ -353,8 +359,7 @@ impl DatabaseBuilder {
         }
 
         Err(FormatError::InvalidPattern(format!(
-            "Invalid IP address or CIDR: {}",
-            key
+            "Invalid IP address or CIDR: {key}"
         )))
     }
 
@@ -393,7 +398,7 @@ impl DatabaseBuilder {
         if let Some(stripped) = key.strip_prefix("glob:") {
             // Force glob matching - strip prefix and validate as glob
             matchy_paraglob::validate_glob_pattern(stripped).map_err(|e| {
-                FormatError::InvalidPattern(format!("Invalid glob pattern syntax: {}", e))
+                FormatError::InvalidPattern(format!("Invalid glob pattern syntax: {e}"))
             })?;
             return Ok(EntryType::Glob(stripped.to_string()));
         }
@@ -453,7 +458,13 @@ impl DatabaseBuilder {
 
         // Always build IP tree structure (even if empty) to maintain MMDB format
         // This ensures pattern-only databases still work with the Database API
-        let (ip_tree_bytes, node_count, record_size, ip_version) = if !ip_entries.is_empty() {
+        let (ip_tree_bytes, node_count, record_size, ip_version) = if ip_entries.is_empty() {
+            // Empty IP tree - create minimal valid tree
+            let record_size = RecordSize::Bits24;
+            let tree_builder = IpTreeBuilder::new_v4(record_size);
+            let (tree_bytes, node_cnt) = tree_builder.build()?;
+            (tree_bytes, node_cnt, record_size, 4)
+        } else {
             // Determine IP version needed
             let needs_v6 = ip_entries.iter().any(|(addr, _, _)| addr.is_ipv6());
 
@@ -499,16 +510,12 @@ impl DatabaseBuilder {
 
             let ip_ver = if needs_v6 { 6 } else { 4 };
             (tree_bytes, node_cnt, record_size, ip_ver)
-        } else {
-            // Empty IP tree - create minimal valid tree
-            let record_size = RecordSize::Bits24;
-            let tree_builder = IpTreeBuilder::new_v4(record_size);
-            let (tree_bytes, node_cnt) = tree_builder.build()?;
-            (tree_bytes, node_cnt, record_size, 4)
         };
 
         // Build glob pattern section if we have glob entries (NOT literals)
-        let (has_globs, glob_section_bytes) = if !glob_entries.is_empty() {
+        let (has_globs, glob_section_bytes) = if glob_entries.is_empty() {
+            (false, Vec::new())
+        } else {
             let mut pattern_builder = ParaglobBuilder::new(self.match_mode);
             let mut pattern_data = Vec::with_capacity(glob_entries.len());
 
@@ -531,37 +538,39 @@ impl DatabaseBuilder {
             section.extend_from_slice(&paraglob_bytes);
 
             // Mappings: pattern_count + data offsets
-            let pattern_count = pattern_data.len() as u32;
+            let pattern_count =
+                u32::try_from(pattern_data.len()).expect("Pattern count exceeds u32::MAX");
             section.extend_from_slice(&pattern_count.to_le_bytes());
             for (_pattern_id, data_offset) in pattern_data {
                 section.extend_from_slice(&data_offset.to_le_bytes());
             }
 
             // Fill in sizes
-            let total_size = section.len() as u32;
-            let paraglob_size = paraglob_bytes.len() as u32;
+            let total_size =
+                u32::try_from(section.len()).expect("Glob section exceeds u32::MAX bytes");
+            let paraglob_size =
+                u32::try_from(paraglob_bytes.len()).expect("Paraglob data exceeds u32::MAX bytes");
             section[0..4].copy_from_slice(&total_size.to_le_bytes());
             section[4..8].copy_from_slice(&paraglob_size.to_le_bytes());
 
             (true, section)
-        } else {
-            (false, Vec::new())
         };
 
         // Build literal hash table section for literal_entries
-        let (has_literals, literal_section_bytes) = if !literal_entries.is_empty() {
+        let (has_literals, literal_section_bytes) = if literal_entries.is_empty() {
+            (false, Vec::new())
+        } else {
             let mut literal_builder = LiteralHashBuilder::new(self.match_mode);
             let mut literal_pattern_data = Vec::with_capacity(literal_entries.len());
 
             for (next_pattern_id, (literal, data_offset)) in literal_entries.iter().enumerate() {
-                literal_builder.add_pattern(literal, next_pattern_id as u32);
-                literal_pattern_data.push((next_pattern_id as u32, *data_offset));
+                let pid = u32::try_from(next_pattern_id).expect("Literal pattern ID exceeds u32");
+                literal_builder.add_pattern(literal, pid);
+                literal_pattern_data.push((pid, *data_offset));
             }
 
             let literal_bytes = literal_builder.build(&literal_pattern_data)?;
             (true, literal_bytes)
-        } else {
-            (false, Vec::new())
         };
 
         // Assemble final database - always use MMDB format
@@ -607,10 +616,10 @@ impl DatabaseBuilder {
             // Database type - use custom if provided, otherwise auto-generate
             let db_type = self.database_type.clone().unwrap_or_else(|| {
                 if has_globs || !literal_entries.is_empty() {
-                    if !ip_entries.is_empty() {
-                        "Paraglob-Combined-IP-Pattern".to_string()
-                    } else {
+                    if ip_entries.is_empty() {
                         "Paraglob-Pattern".to_string()
+                    } else {
+                        "Paraglob-Combined-IP-Pattern".to_string()
                     }
                 } else {
                     "Paraglob-IP".to_string()
@@ -641,7 +650,7 @@ impl DatabaseBuilder {
             );
             metadata.insert(
                 "ip_version".to_string(),
-                DataValue::Uint16(ip_version as u16),
+                DataValue::Uint16(u16::try_from(ip_version).unwrap()),
             );
             metadata.insert("node_count".to_string(), DataValue::Uint32(node_count));
             metadata.insert(
@@ -656,15 +665,15 @@ impl DatabaseBuilder {
             // Add entry counts for easy inspection
             metadata.insert(
                 "ip_entry_count".to_string(),
-                DataValue::Uint32(ip_entries.len() as u32),
+                DataValue::Uint32(u32::try_from(ip_entries.len()).unwrap_or(u32::MAX)),
             );
             metadata.insert(
                 "literal_entry_count".to_string(),
-                DataValue::Uint32(literal_entries.len() as u32),
+                DataValue::Uint32(u32::try_from(literal_entries.len()).unwrap_or(u32::MAX)),
             );
             metadata.insert(
                 "glob_entry_count".to_string(),
-                DataValue::Uint32(glob_entries.len() as u32),
+                DataValue::Uint32(u32::try_from(glob_entries.len()).unwrap_or(u32::MAX)),
             );
 
             // Store match mode (0 = CaseSensitive, 1 = CaseInsensitive)
@@ -704,7 +713,9 @@ impl DatabaseBuilder {
             };
             metadata.insert(
                 "pattern_section_offset".to_string(),
-                DataValue::Uint32(pattern_offset as u32),
+                DataValue::Uint32(
+                    u32::try_from(pattern_offset).expect("Pattern section offset exceeds u32::MAX"),
+                ),
             );
 
             // Literal section offset (after pattern section if present)
@@ -725,7 +736,9 @@ impl DatabaseBuilder {
             };
             metadata.insert(
                 "literal_section_offset".to_string(),
-                DataValue::Uint32(literal_offset as u32),
+                DataValue::Uint32(
+                    u32::try_from(literal_offset).expect("Literal section offset exceeds u32::MAX"),
+                ),
             );
 
             // Encode metadata
@@ -758,6 +771,7 @@ impl DatabaseBuilder {
     }
 
     /// Get statistics about the builder
+    #[must_use]
     pub fn stats(&self) -> BuilderStats {
         let mut ip_count = 0;
         let mut literal_count = 0;
@@ -859,7 +873,7 @@ mod tests {
         let result = DatabaseBuilder::detect_entry_type("literal:*.not-a-glob.com").unwrap();
         match result {
             EntryType::Literal(p) => assert_eq!(p, "*.not-a-glob.com"),
-            _ => panic!("Expected literal, got: {:?}", result),
+            _ => panic!("Expected literal, got: {result:?}"),
         }
     }
 
@@ -881,7 +895,7 @@ mod tests {
         let result = DatabaseBuilder::detect_entry_type("glob:no-wildcards.com").unwrap();
         match result {
             EntryType::Glob(p) => assert_eq!(p, "no-wildcards.com"),
-            _ => panic!("Expected glob, got: {:?}", result),
+            _ => panic!("Expected glob, got: {result:?}"),
         }
     }
 

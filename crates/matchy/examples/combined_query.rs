@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let db_path = &args[1];
 
-    println!("Loading combined database: {}", db_path);
+    println!("Loading combined database: {db_path}");
     let db = Database::from(db_path).open()?;
     println!("Format: {}", db.format());
     println!("Has IP data: {}", db.has_ip_data());
@@ -48,15 +48,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn query_database(db: &Database, query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Query: {}", query);
+    println!("Query: {query}");
 
     match db.lookup(query)? {
         Some(QueryResult::Ip {
             data, prefix_len, ..
         }) => {
             println!("  ✓ IP Match");
-            println!("  Prefix: /{}", prefix_len);
-            println!("  Data: {:?}", data);
+            println!("  Prefix: /{prefix_len}");
+            println!("  Data: {data:?}");
         }
         Some(QueryResult::Pattern {
             pattern_ids, data, ..

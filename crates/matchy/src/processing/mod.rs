@@ -264,6 +264,7 @@ impl FileReader {
     /// }
     /// # Ok::<(), std::io::Error>(())
     /// ```
+    #[must_use]
     pub fn batches(self) -> DataBatchIter {
         DataBatchIter { reader: self }
     }
@@ -323,6 +324,7 @@ pub struct Worker {
 
 impl Worker {
     /// Create a worker builder
+    #[must_use]
     pub fn builder() -> WorkerBuilder {
         WorkerBuilder::new()
     }
@@ -485,6 +487,7 @@ impl Worker {
     /// Get accumulated statistics
     ///
     /// Returns statistics for all batches processed by this worker.
+    #[must_use]
     pub fn stats(&self) -> &WorkerStats {
         &self.stats
     }
@@ -522,6 +525,7 @@ pub struct WorkerBuilder {
 
 impl WorkerBuilder {
     /// Create a new builder
+    #[must_use]
     pub fn new() -> Self {
         Self {
             extractor: None,
@@ -530,6 +534,7 @@ impl WorkerBuilder {
     }
 
     /// Set the pattern extractor
+    #[must_use]
     pub fn extractor(mut self, extractor: Extractor) -> Self {
         self.extractor = Some(extractor);
         self
@@ -539,6 +544,7 @@ impl WorkerBuilder {
     ///
     /// The identifier is included in match results to show which database matched.
     /// The database is wrapped in Arc for efficient sharing across workers.
+    #[must_use]
     pub fn add_database(mut self, id: impl Into<String>, database: Arc<Database>) -> Self {
         self.databases.push((id.into(), database));
         self
@@ -549,6 +555,7 @@ impl WorkerBuilder {
     /// # Panics
     ///
     /// Panics if extractor was not set or no databases were added.
+    #[must_use]
     pub fn build(self) -> Worker {
         let extractor = self
             .extractor
@@ -598,7 +605,7 @@ mod tests {
     fn test_batch_iter() {
         let mut file = NamedTempFile::new().unwrap();
         for i in 1..=10 {
-            writeln!(file, "line {}", i).unwrap();
+            writeln!(file, "line {i}").unwrap();
         }
         file.flush().unwrap();
 

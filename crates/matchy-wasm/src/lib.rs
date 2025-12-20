@@ -59,6 +59,7 @@ pub fn init() {
 
 /// Get the matchy library version
 #[wasm_bindgen]
+#[must_use]
 pub fn version() -> String {
     matchy::MATCHY_VERSION.to_string()
 }
@@ -82,10 +83,10 @@ impl Database {
     /// @param bytes - Database file contents as Uint8Array
     /// @throws Error if the database format is invalid
     #[wasm_bindgen(constructor)]
-    pub fn new(bytes: &[u8]) -> Result<Database, JsError> {
+    pub fn new(bytes: &[u8]) -> Result<Self, JsError> {
         let inner = MatchyDatabase::from_bytes(bytes.to_vec())
-            .map_err(|e| JsError::new(&format!("Invalid database: {}", e)))?;
-        Ok(Database { inner })
+            .map_err(|e| JsError::new(&format!("Invalid database: {e}")))?;
+        Ok(Self { inner })
     }
 
     /// Look up a key in the database
@@ -100,7 +101,7 @@ impl Database {
         let result = self
             .inner
             .lookup(key)
-            .map_err(|e| JsError::new(&format!("Lookup error: {}", e)))?;
+            .map_err(|e| JsError::new(&format!("Lookup error: {e}")))?;
 
         match result {
             Some(QueryResult::Ip {
@@ -132,12 +133,12 @@ impl Database {
     pub fn lookup_ip(&self, ip: &str) -> Result<JsValue, JsError> {
         let ip_addr: std::net::IpAddr = ip
             .parse()
-            .map_err(|e| JsError::new(&format!("Invalid IP address: {}", e)))?;
+            .map_err(|e| JsError::new(&format!("Invalid IP address: {e}")))?;
 
         let result = self
             .inner
             .lookup_ip(ip_addr)
-            .map_err(|e| JsError::new(&format!("Lookup error: {}", e)))?;
+            .map_err(|e| JsError::new(&format!("Lookup error: {e}")))?;
 
         match result {
             Some(QueryResult::Ip {
@@ -162,7 +163,7 @@ impl Database {
         let result = self
             .inner
             .lookup_string(text)
-            .map_err(|e| JsError::new(&format!("Lookup error: {}", e)))?;
+            .map_err(|e| JsError::new(&format!("Lookup error: {e}")))?;
 
         match result {
             Some(QueryResult::Pattern { data, .. }) => {
@@ -222,13 +223,14 @@ impl DatabaseBuilder {
     ///
     /// @param case_sensitive - Whether pattern matching should be case-sensitive
     #[wasm_bindgen(constructor)]
-    pub fn new(case_sensitive: bool) -> DatabaseBuilder {
+    #[must_use]
+    pub fn new(case_sensitive: bool) -> Self {
         let mode = if case_sensitive {
             MatchMode::CaseSensitive
         } else {
             MatchMode::CaseInsensitive
         };
-        DatabaseBuilder {
+        Self {
             inner: MatchyDatabaseBuilder::new(mode),
         }
     }
@@ -247,7 +249,7 @@ impl DatabaseBuilder {
         let data_map = js_to_data_map(data)?;
         self.inner
             .add_entry(key, data_map)
-            .map_err(|e| JsError::new(&format!("Failed to add entry: {}", e)))
+            .map_err(|e| JsError::new(&format!("Failed to add entry: {e}")))
     }
 
     /// Add an IP address or CIDR explicitly
@@ -259,7 +261,7 @@ impl DatabaseBuilder {
         let data_map = js_to_data_map(data)?;
         self.inner
             .add_ip(ip, data_map)
-            .map_err(|e| JsError::new(&format!("Failed to add IP: {}", e)))
+            .map_err(|e| JsError::new(&format!("Failed to add IP: {e}")))
     }
 
     /// Add a glob pattern explicitly
@@ -271,7 +273,7 @@ impl DatabaseBuilder {
         let data_map = js_to_data_map(data)?;
         self.inner
             .add_glob(pattern, data_map)
-            .map_err(|e| JsError::new(&format!("Failed to add pattern: {}", e)))
+            .map_err(|e| JsError::new(&format!("Failed to add pattern: {e}")))
     }
 
     /// Add a literal string explicitly
@@ -283,7 +285,7 @@ impl DatabaseBuilder {
         let data_map = js_to_data_map(data)?;
         self.inner
             .add_literal(literal, data_map)
-            .map_err(|e| JsError::new(&format!("Failed to add literal: {}", e)))
+            .map_err(|e| JsError::new(&format!("Failed to add literal: {e}")))
     }
 
     /// Build the database and return as bytes
@@ -293,7 +295,7 @@ impl DatabaseBuilder {
     pub fn build(self) -> Result<Vec<u8>, JsError> {
         self.inner
             .build()
-            .map_err(|e| JsError::new(&format!("Failed to build database: {}", e)))
+            .map_err(|e| JsError::new(&format!("Failed to build database: {e}")))
     }
 }
 
@@ -339,8 +341,9 @@ pub struct ExtractorBuilder {
 impl ExtractorBuilder {
     /// Create a new ExtractorBuilder with all extractors enabled by default
     #[wasm_bindgen(constructor)]
-    pub fn new() -> ExtractorBuilder {
-        ExtractorBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
             extract_domains: true,
             extract_emails: true,
             extract_ipv4: true,
@@ -355,63 +358,72 @@ impl ExtractorBuilder {
 
     /// Enable or disable domain extraction
     #[wasm_bindgen(js_name = extractDomains)]
-    pub fn extract_domains(mut self, enable: bool) -> ExtractorBuilder {
+    #[must_use]
+    pub fn extract_domains(mut self, enable: bool) -> Self {
         self.extract_domains = enable;
         self
     }
 
     /// Enable or disable email extraction
     #[wasm_bindgen(js_name = extractEmails)]
-    pub fn extract_emails(mut self, enable: bool) -> ExtractorBuilder {
+    #[must_use]
+    pub fn extract_emails(mut self, enable: bool) -> Self {
         self.extract_emails = enable;
         self
     }
 
     /// Enable or disable IPv4 extraction
     #[wasm_bindgen(js_name = extractIpv4)]
-    pub fn extract_ipv4(mut self, enable: bool) -> ExtractorBuilder {
+    #[must_use]
+    pub fn extract_ipv4(mut self, enable: bool) -> Self {
         self.extract_ipv4 = enable;
         self
     }
 
     /// Enable or disable IPv6 extraction
     #[wasm_bindgen(js_name = extractIpv6)]
-    pub fn extract_ipv6(mut self, enable: bool) -> ExtractorBuilder {
+    #[must_use]
+    pub fn extract_ipv6(mut self, enable: bool) -> Self {
         self.extract_ipv6 = enable;
         self
     }
 
     /// Enable or disable hash extraction (MD5, SHA1, SHA256, SHA384, SHA512)
     #[wasm_bindgen(js_name = extractHashes)]
-    pub fn extract_hashes(mut self, enable: bool) -> ExtractorBuilder {
+    #[must_use]
+    pub fn extract_hashes(mut self, enable: bool) -> Self {
         self.extract_hashes = enable;
         self
     }
 
     /// Enable or disable Bitcoin address extraction
     #[wasm_bindgen(js_name = extractBitcoin)]
-    pub fn extract_bitcoin(mut self, enable: bool) -> ExtractorBuilder {
+    #[must_use]
+    pub fn extract_bitcoin(mut self, enable: bool) -> Self {
         self.extract_bitcoin = enable;
         self
     }
 
     /// Enable or disable Ethereum address extraction
     #[wasm_bindgen(js_name = extractEthereum)]
-    pub fn extract_ethereum(mut self, enable: bool) -> ExtractorBuilder {
+    #[must_use]
+    pub fn extract_ethereum(mut self, enable: bool) -> Self {
         self.extract_ethereum = enable;
         self
     }
 
     /// Enable or disable Monero address extraction
     #[wasm_bindgen(js_name = extractMonero)]
-    pub fn extract_monero(mut self, enable: bool) -> ExtractorBuilder {
+    #[must_use]
+    pub fn extract_monero(mut self, enable: bool) -> Self {
         self.extract_monero = enable;
         self
     }
 
     /// Set minimum number of domain labels (default: 2 for "example.com")
     #[wasm_bindgen(js_name = minDomainLabels)]
-    pub fn min_domain_labels(mut self, min: usize) -> ExtractorBuilder {
+    #[must_use]
+    pub fn min_domain_labels(mut self, min: usize) -> Self {
         self.min_domain_labels = min;
         self
     }
@@ -432,7 +444,7 @@ impl ExtractorBuilder {
             .extract_monero(self.extract_monero)
             .min_domain_labels(self.min_domain_labels)
             .build()
-            .map_err(|e| JsError::new(&format!("Failed to build extractor: {}", e)))?;
+            .map_err(|e| JsError::new(&format!("Failed to build extractor: {e}")))?;
 
         Ok(Extractor { inner })
     }
@@ -576,8 +588,8 @@ enum JsDataValue {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Array(Vec<JsDataValue>),
-    Object(HashMap<String, JsDataValue>),
+    Array(Vec<Self>),
+    Object(HashMap<String, Self>),
     Null,
 }
 
@@ -602,17 +614,21 @@ fn js_data_value_to_data_value(value: JsDataValue) -> DataValue {
     match value {
         JsDataValue::String(s) => DataValue::String(s),
         JsDataValue::Int(i) => {
-            // Choose appropriate integer type based on value
             if i >= 0 {
-                if i <= u32::MAX as i64 {
-                    DataValue::Uint32(i as u32)
+                if i <= i64::from(u32::MAX) {
+                    DataValue::Uint32(u32::try_from(i).unwrap())
                 } else {
-                    DataValue::Uint64(i as u64)
+                    DataValue::Uint64(u64::try_from(i).unwrap())
                 }
-            } else if i >= i32::MIN as i64 {
-                DataValue::Int32(i as i32)
+            } else if i >= i64::from(i32::MIN) {
+                DataValue::Int32(i32::try_from(i).unwrap())
             } else {
-                DataValue::Double(i as f64)
+                panic!(
+                    "value {i} is outside the supported signed integer range ({} to {}). \
+                     MMDB format only supports Int32.",
+                    i32::MIN,
+                    i32::MAX
+                );
             }
         }
         JsDataValue::Float(f) => DataValue::Double(f),

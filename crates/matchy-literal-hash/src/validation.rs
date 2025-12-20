@@ -37,6 +37,7 @@ impl LiteralHashValidationResult {
     }
 
     /// Check if validation passed (no errors)
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
     }
@@ -59,6 +60,7 @@ impl LiteralHashValidationResult {
 /// # Returns
 ///
 /// A `LiteralHashValidationResult` with errors, warnings, and statistics
+#[must_use]
 pub fn validate_literal_hash(buffer: &[u8], offset: usize) -> LiteralHashValidationResult {
     let mut result = LiteralHashValidationResult::new();
 
@@ -129,24 +131,21 @@ pub fn validate_literal_hash(buffer: &[u8], offset: usize) -> LiteralHashValidat
     // Validate version
     if version != MATCHY_LITERAL_HASH_VERSION {
         result.warnings.push(format!(
-            "Unexpected literal hash version: {} (expected {})",
-            version, MATCHY_LITERAL_HASH_VERSION
+            "Unexpected literal hash version: {version} (expected {MATCHY_LITERAL_HASH_VERSION})"
         ));
     }
 
     // Sanity check: very large entry counts
     if entry_count > 10_000_000 {
         result.warnings.push(format!(
-            "Very large literal count: {} (> 10M, potential memory issue)",
-            entry_count
+            "Very large literal count: {entry_count} (> 10M, potential memory issue)"
         ));
     }
 
     // Sanity check: table size should be >= entry count
     if table_size < entry_count {
         result.errors.push(format!(
-            "Table size {} is smaller than entry count {}",
-            table_size, entry_count
+            "Table size {table_size} is smaller than entry count {entry_count}"
         ));
     }
 

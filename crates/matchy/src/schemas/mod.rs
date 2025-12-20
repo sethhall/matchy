@@ -61,6 +61,7 @@ pub static SCHEMAS: &[SchemaInfo] = &[SchemaInfo {
 ///
 /// # Returns
 /// The schema info, or None if not found
+#[must_use]
 pub fn get_schema_info(name: &str) -> Option<&'static SchemaInfo> {
     SCHEMAS.iter().find(|s| s.name == name)
 }
@@ -72,6 +73,7 @@ pub fn get_schema_info(name: &str) -> Option<&'static SchemaInfo> {
 ///
 /// # Returns
 /// The database_type to use in metadata (e.g., "ThreatDB-v1"), or None if not found
+#[must_use]
 pub fn schema_database_type(name: &str) -> Option<&'static str> {
     SCHEMAS
         .iter()
@@ -86,6 +88,7 @@ pub fn schema_database_type(name: &str) -> Option<&'static str> {
 ///
 /// # Returns
 /// The schema name (e.g., "threatdb"), or None if not a known schema
+#[must_use]
 pub fn detect_schema_from_database_type(database_type: &str) -> Option<&'static str> {
     SCHEMAS
         .iter()
@@ -108,6 +111,7 @@ pub fn available_schemas() -> impl Iterator<Item = &'static str> {
 ///
 /// # Returns
 /// true if this is a known type with built-in schema validation
+#[must_use]
 pub fn is_known_database_type(name: &str) -> bool {
     SCHEMAS
         .iter()

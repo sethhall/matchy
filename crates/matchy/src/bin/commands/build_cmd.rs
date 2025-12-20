@@ -4,22 +4,22 @@ use matchy::{DataValue, DatabaseBuilder, DatabaseBuilderExt, MatchMode};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cli_utils::json_to_data_map;
 
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_build(
-    inputs: Vec<PathBuf>,
-    output: PathBuf,
-    format: String,
-    database_type: Option<String>,
-    description: Option<String>,
-    desc_lang: String,
+    inputs: &[PathBuf],
+    output: &Path,
+    format: &str,
+    database_type: Option<&str>,
+    description: Option<&str>,
+    desc_lang: &str,
     verbose: bool,
     debug: bool,
     case_insensitive: bool,
-    update_url: Option<String>,
+    update_url: Option<&str>,
 ) -> Result<()> {
     let match_mode = if case_insensitive {
         MatchMode::CaseInsensitive
@@ -30,11 +30,11 @@ pub fn cmd_build(
     if debug {
         println!("Building unified MMDB database (IP + patterns)...");
         println!("  Input files: {}", inputs.len());
-        for input in &inputs {
+        for input in inputs {
             println!("    - {}", input.display());
         }
         println!("  Output: {}", output.display());
-        println!("  Format: {}", format);
+        println!("  Format: {format}");
         println!(
             "  Match mode: {}",
             if case_insensitive {
@@ -49,45 +49,45 @@ pub fn cmd_build(
     let mut builder = DatabaseBuilder::new(match_mode);
 
     // Check if database_type is a known schema type (enables validation)
-    if let Some(ref db_type) = database_type {
+    if let Some(db_type) = database_type {
         if is_known_database_type(db_type) {
             // Known schema type - enable validation via with_schema()
             // This automatically sets database_type and enables validation on add_entry()
             builder = builder
                 .with_schema(db_type)
-                .with_context(|| format!("Failed to load schema for '{}'", db_type))?;
+                .with_context(|| format!("Failed to load schema for '{db_type}'"))?;
 
             if verbose || debug {
                 // Show the canonical database_type that will be stored in metadata
                 let canonical_type = get_schema_info(db_type)
                     .map(|info| info.database_type)
-                    .unwrap_or(db_type.as_str());
-                println!("Schema validation: enabled ({})", canonical_type);
+                    .unwrap_or(db_type);
+                println!("Schema validation: enabled ({canonical_type})");
             }
         } else {
             // Custom database type - no validation, just set metadata
-            builder = builder.with_database_type(db_type.clone());
+            builder = builder.with_database_type(db_type.to_string());
         }
     }
 
     if let Some(desc) = description {
-        builder = builder.with_description(desc_lang, desc);
+        builder = builder.with_description(desc_lang.to_string(), desc.to_string());
     }
 
-    if let Some(ref url) = update_url {
+    if let Some(url) = update_url {
         builder = builder.with_update_url(url);
         if verbose || debug {
-            println!("Update URL: {}", url);
+            println!("Update URL: {url}");
         }
     }
 
-    match format.as_str() {
+    match format {
         "text" => {
             // Read entries from text file(s) (one per line)
             // Auto-detects IP addresses/CIDRs vs patterns
             let mut total_count = 0;
 
-            for input in &inputs {
+            for input in inputs {
                 if debug && inputs.len() > 1 {
                     println!("  Reading: {}...", input.display());
                 }
@@ -136,23 +136,23 @@ pub fn cmd_build(
                         // Auto-detection: builder will determine if it's IP or pattern
                         // Schema validation happens automatically if with_schema() was used
                         builder.add_entry(entry, data).with_context(|| {
-                            format!("Failed to add entry '{}'. Use a custom --database-type name if you don't want schema validation.", entry)
+                            format!("Failed to add entry '{entry}'. Use a custom --database-type name if you don't want schema validation.")
                         })?;
                         count += 1;
                         total_count += 1;
                         if debug && total_count % 1000 == 0 {
-                            println!("    Added {} entries...", total_count);
+                            println!("    Added {total_count} entries...");
                         }
                     }
                 }
 
                 if debug && inputs.len() > 1 {
-                    println!("    {} entries from this file", count);
+                    println!("    {count} entries from this file");
                 }
             }
 
             if debug {
-                println!("  Total: {} entries", total_count);
+                println!("  Total: {total_count} entries");
             }
         }
         "csv" => {
@@ -161,7 +161,7 @@ pub fn cmd_build(
             // Remaining columns become metadata fields
             let mut total_entries = 0;
 
-            for input in &inputs {
+            for input in inputs {
                 if debug && inputs.len() > 1 {
                     println!("  Reading: {}...", input.display());
                 }
@@ -208,7 +208,11 @@ pub fn cmd_build(
                             if !value.is_empty() {
                                 // Try to parse as number, otherwise treat as string
                                 let data_value = if let Ok(i) = value.parse::<i64>() {
-                                    DataValue::Int32(i as i32)
+                                    DataValue::Int32(i32::try_from(i).unwrap_or(if i < 0 {
+                                        i32::MIN
+                                    } else {
+                                        i32::MAX
+                                    }))
                                 } else if let Ok(u) = value.parse::<u64>() {
                                     DataValue::Uint64(u)
                                 } else if let Ok(f) = value.parse::<f64>() {
@@ -230,7 +234,7 @@ pub fn cmd_build(
                     total_entries += 1;
 
                     if debug && total_entries % 1000 == 0 {
-                        println!("    Added {} entries...", total_entries);
+                        println!("    Added {total_entries} entries...");
                     }
                 }
 
@@ -240,7 +244,7 @@ pub fn cmd_build(
             }
 
             if debug {
-                println!("  Total: {} entries", total_entries);
+                println!("  Total: {total_entries} entries");
             }
         }
         "json" => {
@@ -248,7 +252,7 @@ pub fn cmd_build(
             // Format: [{"key": "192.168.0.0/16" or "*.example.com", "data": {...}}]
             let mut total_entries = 0;
 
-            for input in &inputs {
+            for input in inputs {
                 if debug && inputs.len() > 1 {
                     println!("  Reading: {}...", input.display());
                 }
@@ -262,7 +266,7 @@ pub fn cmd_build(
                     let key = item
                         .get("key")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| anyhow::anyhow!("Missing 'key' field at index {}", i))?;
+                        .ok_or_else(|| anyhow::anyhow!("Missing 'key' field at index {i}"))?;
 
                     let data = if let Some(data_json) = item.get("data") {
                         json_to_data_map(data_json)?
@@ -272,12 +276,12 @@ pub fn cmd_build(
 
                     // Schema validation happens automatically if with_schema() was used
                     builder.add_entry(key, data).with_context(|| {
-                        format!("Failed to add entry '{}' at index {}. Use a custom --database-type name if you don't want schema validation.", key, i)
+                        format!("Failed to add entry '{key}' at index {i}. Use a custom --database-type name if you don't want schema validation.")
                     })?;
                     total_entries += 1;
 
                     if debug && total_entries % 1000 == 0 {
-                        println!("    Added {} entries...", total_entries);
+                        println!("    Added {total_entries} entries...");
                     }
                 }
 
@@ -287,7 +291,7 @@ pub fn cmd_build(
             }
 
             if debug {
-                println!("  Total: {} entries", total_entries);
+                println!("  Total: {total_entries} entries");
             }
         }
         "misp" => {
@@ -316,10 +320,7 @@ pub fn cmd_build(
             }
         }
         _ => {
-            anyhow::bail!(
-                "Unknown format: {}. Use 'text', 'csv', 'json', or 'misp'",
-                format
-            );
+            anyhow::bail!("Unknown format: {format}. Use 'text', 'csv', 'json', or 'misp'");
         }
     }
 
@@ -346,7 +347,7 @@ pub fn cmd_build(
     let temp_path = output.with_extension("tmp");
     fs::write(&temp_path, &database_bytes)
         .with_context(|| format!("Failed to write temp file: {}", temp_path.display()))?;
-    fs::rename(&temp_path, &output)
+    fs::rename(&temp_path, output)
         .with_context(|| format!("Failed to rename to: {}", output.display()))?;
 
     // Always show success message (always displayed)

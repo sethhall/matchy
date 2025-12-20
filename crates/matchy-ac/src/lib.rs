@@ -45,9 +45,9 @@ pub enum ACError {
 impl fmt::Display for ACError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ACError::InvalidPattern(msg) => write!(f, "Invalid pattern: {}", msg),
-            ACError::ResourceLimitExceeded(msg) => write!(f, "Resource limit exceeded: {}", msg),
-            ACError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
+            Self::InvalidPattern(msg) => write!(f, "Invalid pattern: {msg}"),
+            Self::ResourceLimitExceeded(msg) => write!(f, "Resource limit exceeded: {msg}"),
+            Self::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
         }
     }
 }
@@ -199,7 +199,8 @@ impl ACBuilder {
     /// Example: Pattern "Hello" becomes "hello" with a single transition path,
     /// rather than 2^5 = 32 paths for all case combinations.
     fn add_pattern(&mut self, pattern: &str) -> Result<u32, ACError> {
-        let pattern_id = self.patterns.len() as u32;
+        let pattern_id = u32::try_from(self.patterns.len())
+            .map_err(|_| ACError::ResourceLimitExceeded("Pattern count exceeds u32::MAX".into()))?;
         self.patterns.push(pattern.to_string());
 
         // For case-insensitive mode, normalize pattern to lowercase during build
@@ -221,7 +222,9 @@ impl ACBuilder {
                 current = next;
             } else {
                 // Create new state
-                let new_id = self.states.len() as u32;
+                let new_id = u32::try_from(self.states.len()).map_err(|_| {
+                    ACError::ResourceLimitExceeded("State count exceeds u32::MAX".into())
+                })?;
                 self.states.push(BuilderState::new(new_id, depth));
                 self.states[current as usize].transitions.insert(ch, new_id);
                 current = new_id;
@@ -274,10 +277,10 @@ impl ACBuilder {
                 if !failure_found {
                     if let Some(&target) = self.states[0].transitions.get(&ch) {
                         // Only set if target is not the node itself (avoid self-loop)
-                        if target != next_state {
-                            self.states[next_state as usize].failure = target;
-                        } else {
+                        if target == next_state {
                             self.states[next_state as usize].failure = 0;
+                        } else {
+                            self.states[next_state as usize].failure = target;
                         }
                     } else {
                         self.states[next_state as usize].failure = 0;
@@ -316,7 +319,7 @@ impl ACBuilder {
         let state_kinds: Vec<StateKind> = self
             .states
             .iter()
-            .map(|s| s.classify_state_kind())
+            .map(BuilderState::classify_state_kind)
             .collect();
 
         let dense_count = state_kinds
@@ -408,8 +411,14 @@ impl ACBuilder {
             let mut edges: Vec<(u8, u32)> = state
                 .transitions
                 .iter()
-                .map(|(&ch, &target)| (ch, node_offsets[target as usize] as u32))
-                .collect();
+                .map(|(&ch, &target)| {
+                    let offset = node_offsets[target as usize];
+                    let offset_u32 = u32::try_from(offset).map_err(|_| {
+                        ACError::ResourceLimitExceeded("Node offset exceeds u32::MAX".into())
+                    });
+                    offset_u32.map(|o| (ch, o))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             edges.sort_by_key(|(ch, _)| *ch); // Sort for efficient lookup
 
             // Write state-specific transition data
@@ -424,7 +433,9 @@ impl ACBuilder {
 
                 StateKind::Sparse => {
                     // Write edges to sparse edge array
-                    let sparse_offset = edge_offset;
+                    let sparse_offset = u32::try_from(edge_offset).map_err(|_| {
+                        ACError::ResourceLimitExceeded("Sparse edge offset exceeds u32::MAX".into())
+                    })?;
 
                     for (ch, target) in &edges {
                         let edge = ACEdge::new(*ch, *target);
@@ -433,12 +444,16 @@ impl ACBuilder {
                         edge_offset += edge_size;
                     }
 
-                    (sparse_offset as u32, 0u8, 0u32)
+                    (sparse_offset, 0u8, 0u32)
                 }
 
                 StateKind::Dense => {
                     // Write dense lookup table
-                    let lookup_offset = dense_offset;
+                    let lookup_offset = u32::try_from(dense_offset).map_err(|_| {
+                        ACError::ResourceLimitExceeded(
+                            "Dense lookup offset exceeds u32::MAX".into(),
+                        )
+                    })?;
                     let mut lookup = DenseLookup {
                         targets: [0u32; 256],
                     };
@@ -451,7 +466,7 @@ impl ACBuilder {
                         .copy_from_slice(lookup.as_bytes());
                     dense_offset += dense_size;
 
-                    (lookup_offset as u32, 0u8, 0u32)
+                    (lookup_offset, 0u8, 0u32)
                 }
             };
 
@@ -459,7 +474,9 @@ impl ACBuilder {
             let patterns_offset_for_node = if state.outputs.is_empty() {
                 0u32
             } else {
-                pattern_offset as u32
+                u32::try_from(pattern_offset).map_err(|_| {
+                    ACError::ResourceLimitExceeded("Pattern offset exceeds u32::MAX".into())
+                })?
             };
 
             for &pattern_id in &state.outputs {
@@ -470,18 +487,19 @@ impl ACBuilder {
 
             // Write cache-optimized hot node (16 bytes)
             let failure_offset = if state.failure == 0 {
-                0
+                0u32
             } else {
-                node_offsets[state.failure as usize]
-            } as u32;
+                u32::try_from(node_offsets[state.failure as usize]).map_err(|_| {
+                    ACError::ResourceLimitExceeded("Failure offset exceeds u32::MAX".into())
+                })?
+            };
 
-            // Validate counts fit in u8 (max 255)
-            // For StateKind::One, edge_count should be 0 (edge stored inline)
+            // Edge and pattern counts saturate at u8::MAX (255)
             let edge_count_u8 = match kind {
                 StateKind::One => 0, // Single edge stored inline, not in edge array
-                _ => state.transitions.len().min(255) as u8,
+                _ => u8::try_from(state.transitions.len()).unwrap_or(u8::MAX),
             };
-            let pattern_count_u8 = state.outputs.len().min(255) as u8;
+            let pattern_count_u8 = u8::try_from(state.outputs.len()).unwrap_or(u8::MAX);
 
             // Create hot node with optimal field ordering for cache access
             let one_target = match kind {
@@ -521,6 +539,7 @@ pub struct ACAutomaton {
 
 impl ACAutomaton {
     /// Create a new AC automaton (initially empty)
+    #[must_use]
     pub fn new(_mode: MatchMode) -> Self {
         Self {
             buffer: Vec::new(),
@@ -553,11 +572,13 @@ impl ACAutomaton {
     }
 
     /// Get the buffer (for serialization)
+    #[must_use]
     pub fn buffer(&self) -> &[u8] {
         &self.buffer
     }
 
     /// Get the number of AC nodes in the automaton
+    #[must_use]
     pub fn node_count(&self) -> usize {
         self.node_count
     }

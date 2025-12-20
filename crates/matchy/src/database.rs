@@ -115,6 +115,7 @@ impl DatabaseStats {
 
 impl DatabaseStatsSnapshot {
     /// Calculate cache hit rate (0.0 to 1.0)
+    #[must_use]
     pub fn cache_hit_rate(&self) -> f64 {
         let total_cache_ops = self.cache_hits + self.cache_misses;
         if total_cache_ops == 0 {
@@ -125,6 +126,7 @@ impl DatabaseStatsSnapshot {
     }
 
     /// Calculate match rate (0.0 to 1.0)
+    #[must_use]
     pub fn match_rate(&self) -> f64 {
         if self.total_queries == 0 {
             0.0
@@ -176,6 +178,7 @@ pub struct LookupRef {
 impl LookupRef {
     /// Create a not-found result
     #[inline]
+    #[must_use]
     pub const fn not_found() -> Self {
         Self {
             found: false,
@@ -187,6 +190,7 @@ impl LookupRef {
 
     /// Create an IP lookup result
     #[inline]
+    #[must_use]
     pub const fn ip(data_offset: u32, prefix_len: u8) -> Self {
         Self {
             found: true,
@@ -198,6 +202,7 @@ impl LookupRef {
 
     /// Create a pattern lookup result
     #[inline]
+    #[must_use]
     pub const fn pattern(data_offset: u32) -> Self {
         Self {
             found: true,
@@ -253,9 +258,9 @@ enum DatabaseStorage {
 impl DatabaseStorage {
     fn as_slice(&self) -> &[u8] {
         match self {
-            DatabaseStorage::Owned(v) => v.as_slice(),
+            Self::Owned(v) => v.as_slice(),
             #[cfg(not(target_family = "wasm"))]
-            DatabaseStorage::Mmap(m) => &m[..],
+            Self::Mmap(m) => &m[..],
         }
     }
 }
@@ -334,12 +339,14 @@ impl DatabaseOpener {
     }
 
     /// Set LRU cache capacity. Default: 10,000 entries.
+    #[must_use]
     pub fn cache_capacity(mut self, capacity: usize) -> Self {
         self.options.cache_capacity = Some(capacity);
         self
     }
 
     /// Disable caching entirely.
+    #[must_use]
     pub fn no_cache(mut self) -> Self {
         self.options.cache_capacity = Some(0);
         self
@@ -362,6 +369,7 @@ impl DatabaseOpener {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     #[cfg(not(target_family = "wasm"))]
+    #[must_use]
     pub fn watch(mut self) -> Self {
         self.live.enabled = true;
         self
@@ -389,6 +397,7 @@ impl DatabaseOpener {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     #[cfg(all(not(target_family = "wasm"), feature = "auto-update"))]
+    #[must_use]
     pub fn auto_update(mut self) -> Self {
         self.live.enabled = true;
         self.live.auto_update_enabled = true;
@@ -402,6 +411,7 @@ impl DatabaseOpener {
 
     /// Set how often to check for remote updates. Default: 1 hour.
     #[cfg(all(not(target_family = "wasm"), feature = "auto-update"))]
+    #[must_use]
     pub fn update_interval(mut self, interval: Duration) -> Self {
         self.live.update_interval = Some(interval);
         self
@@ -412,6 +422,7 @@ impl DatabaseOpener {
     /// Default: `~/.cache/matchy/` on Unix, `%LOCALAPPDATA%\matchy\` on Windows,
     /// or system temp directory as fallback.
     #[cfg(all(not(target_family = "wasm"), feature = "auto-update"))]
+    #[must_use]
     pub fn cache_dir(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.live.cache_dir = Some(path.into());
         self
@@ -419,6 +430,7 @@ impl DatabaseOpener {
 
     /// Set how often to check for local file changes. Default: 1 second.
     #[cfg(not(target_family = "wasm"))]
+    #[must_use]
     pub fn poll_interval(mut self, interval: Duration) -> Self {
         self.live.poll_interval = Some(interval);
         self
@@ -426,6 +438,7 @@ impl DatabaseOpener {
 
     /// Set callback for reload notifications.
     #[cfg(not(target_family = "wasm"))]
+    #[must_use]
     pub fn on_reload<F>(mut self, callback: F) -> Self
     where
         F: Fn(ReloadEvent) + Send + Sync + 'static,
@@ -437,6 +450,7 @@ impl DatabaseOpener {
     /// Set callback for fallback notifications (when current database has errors
     /// and we fall back to the previous version).
     #[cfg(not(target_family = "wasm"))]
+    #[must_use]
     pub fn on_fallback<F>(mut self, callback: F) -> Self
     where
         F: Fn(FallbackEvent) + Send + Sync + 'static,
@@ -460,7 +474,7 @@ impl DatabaseOpener {
         if self.live.enabled {
             let live_state =
                 self.live
-                    .start_updater(self.options.path, db, self.options.cache_capacity)?;
+                    .start_updater(&self.options.path, db, self.options.cache_capacity);
             Ok(Database::with_live_state(live_state))
         } else {
             Ok(db)
@@ -474,8 +488,9 @@ impl DatabaseOpener {
     }
 
     /// Create a `DatabaseOpener` from raw bytes.
-    pub fn from_bytes_builder(bytes: Vec<u8>) -> DatabaseOpener {
-        DatabaseOpener {
+    #[must_use]
+    pub fn from_bytes_builder(bytes: Vec<u8>) -> Self {
+        Self {
             options: DatabaseOptions {
                 bytes: Some(bytes),
                 ..Default::default()
@@ -598,6 +613,7 @@ impl Database {
     ///     .open()?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
+    #[must_use]
     pub fn from_bytes_builder(bytes: Vec<u8>) -> DatabaseOpener {
         DatabaseOpener::from_bytes_builder(bytes)
     }
@@ -656,6 +672,7 @@ impl Database {
     /// println!("Cache size: {}", db.cache_size());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
+    #[must_use]
     pub fn cache_size(&self) -> usize {
         if !self.cache_enabled {
             return 0;
@@ -664,7 +681,7 @@ impl Database {
             caches
                 .borrow()
                 .get(&self.cache_generation)
-                .map_or(0, |c| c.len())
+                .map_or(0, lru::LruCache::len)
         })
     }
 
@@ -689,6 +706,7 @@ impl Database {
     /// println!("Cache hit rate: {:.1}%", stats.cache_hit_rate() * 100.0);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
+    #[must_use]
     pub fn stats(&self) -> DatabaseStatsSnapshot {
         self.stats.snapshot()
     }
@@ -709,6 +727,7 @@ impl Database {
     /// }
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
+    #[must_use]
     pub fn mode(&self) -> matchy_match_mode::MatchMode {
         // If there's a pattern matcher, use its mode
         if let Some(ref pm) = self.pattern_matcher {
@@ -764,7 +783,7 @@ impl Database {
     #[cfg(not(target_family = "wasm"))]
     pub(crate) fn open_internal(path: &str) -> Result<Self, DatabaseError> {
         let file = File::open(path)
-            .map_err(|e| DatabaseError::Io(format!("Failed to open {}: {}", path, e)))?;
+            .map_err(|e| DatabaseError::Io(format!("Failed to open {path}: {e}")))?;
 
         // SAFETY: Mmap::map is unsafe because the file could be modified externally
         // while mapped, causing undefined behavior. We accept this risk because:
@@ -772,7 +791,7 @@ impl Database {
         // - Live-reload creates a new mmap rather than modifying in-place
         // - This is standard practice for read-only database files
         let mmap = unsafe { Mmap::map(&file) }
-            .map_err(|e| DatabaseError::Io(format!("Failed to mmap {}: {}", path, e)))?;
+            .map_err(|e| DatabaseError::Io(format!("Failed to mmap {path}: {e}")))?;
 
         Self::from_storage(DatabaseStorage::Mmap(mmap))
     }
@@ -908,7 +927,7 @@ impl Database {
             DatabaseFormat::PatternOnly => {
                 // Pattern-only: load from start of file
                 let pg = Self::load_pattern_section(data, 0).map_err(|e| {
-                    DatabaseError::Unsupported(format!("Failed to load pattern section: {}", e))
+                    DatabaseError::Unsupported(format!("Failed to load pattern section: {e}"))
                 })?;
                 db.pattern_matcher = Some(pg);
             }
@@ -921,8 +940,7 @@ impl Database {
                     let (pg, map) =
                         Self::load_combined_pattern_section(data, offset).map_err(|e| {
                             DatabaseError::Unsupported(format!(
-                                "Failed to load pattern section: {}",
-                                e
+                                "Failed to load pattern section: {e}"
                             ))
                         })?;
                     db.pattern_matcher = Some(pg);
@@ -938,7 +956,7 @@ impl Database {
             // Read match mode from metadata
             let match_mode = Self::read_match_mode_from_metadata(data);
             db.literal_hash = Some(LiteralHash::from_buffer(literal_data, match_mode).map_err(
-                |e| DatabaseError::Unsupported(format!("Failed to load literal hash: {}", e)),
+                |e| DatabaseError::Unsupported(format!("Failed to load literal hash: {e}")),
             )?);
         }
 
@@ -948,6 +966,7 @@ impl Database {
     /// Get the current generation counter. Increments on each reload.
     /// Returns 0 for static (non-watching) databases.
     #[cfg(not(target_family = "wasm"))]
+    #[must_use]
     pub fn generation(&self) -> u64 {
         match &self.live {
             Some(live) => live.generation.load(Ordering::Acquire),
@@ -1294,7 +1313,7 @@ impl Database {
         if let Ok(addr) = query.parse::<IpAddr>() {
             self.lookup_ip_ref(addr)
         } else {
-            self.lookup_string_ref(query)
+            Ok(self.lookup_string_ref(query))
         }
     }
 
@@ -1315,12 +1334,12 @@ impl Database {
     }
 
     /// Zero-allocation string lookup that returns offset instead of decoded data.
-    fn lookup_string_ref(&self, pattern: &str) -> Result<LookupRef, DatabaseError> {
+    fn lookup_string_ref(&self, pattern: &str) -> LookupRef {
         // 1. Try literal hash table first (O(1) lookup)
         if let Some(literal_hash) = &self.literal_hash {
             if let Some(pattern_id) = literal_hash.lookup(pattern) {
                 if let Some(data_offset) = literal_hash.get_data_offset(pattern_id) {
-                    return Ok(LookupRef::pattern(data_offset));
+                    return LookupRef::pattern(data_offset);
                 }
             }
         }
@@ -1335,13 +1354,13 @@ impl Database {
                 if let Some(mappings) = &self.pattern_data_mappings {
                     if let Some(data_offset) = mappings.get_offset(pattern_id, self.data.as_slice())
                     {
-                        return Ok(LookupRef::pattern(data_offset));
+                        return LookupRef::pattern(data_offset);
                     }
                 }
             }
         }
 
-        Ok(LookupRef::not_found())
+        LookupRef::not_found()
     }
 
     /// Decode data at a given offset in the MMDB data section.
@@ -1427,6 +1446,7 @@ impl Database {
     }
 
     /// Get database format
+    #[must_use]
     pub fn format(&self) -> &str {
         match self.format {
             DatabaseFormat::IpOnly => "IP database",
@@ -1436,21 +1456,25 @@ impl Database {
     }
 
     /// Check if database supports IP lookups
+    #[must_use]
     pub fn has_ip_data(&self) -> bool {
         self.ip_header.is_some()
     }
 
     /// Check if database supports string lookups (literals or patterns)
+    #[must_use]
     pub fn has_string_data(&self) -> bool {
         self.literal_hash.is_some() || self.pattern_matcher.is_some()
     }
 
     /// Check if database supports literal (exact string) lookups
+    #[must_use]
     pub fn has_literal_data(&self) -> bool {
         self.literal_hash.is_some()
     }
 
     /// Check if database supports glob pattern lookups
+    #[must_use]
     pub fn has_glob_data(&self) -> bool {
         self.pattern_matcher.is_some()
     }
@@ -1460,6 +1484,7 @@ impl Database {
         since = "0.5.0",
         note = "Use has_literal_data or has_glob_data instead"
     )]
+    #[must_use]
     pub fn has_pattern_data(&self) -> bool {
         self.has_string_data()
     }
@@ -1468,6 +1493,7 @@ impl Database {
     ///
     /// Returns the full metadata as a DataValue map, or None if this is not
     /// an MMDB-format database or if metadata cannot be parsed.
+    #[must_use]
     pub fn metadata(&self) -> Option<DataValue> {
         #[cfg(not(target_family = "wasm"))]
         if let Some(live) = &self.live {
@@ -1486,6 +1512,7 @@ impl Database {
     /// Get the update URL from database metadata, if set during build.
     ///
     /// Returns `None` if no update URL was set or if metadata is unavailable.
+    #[must_use]
     pub fn update_url(&self) -> Option<String> {
         if let Some(DataValue::Map(map)) = self.metadata() {
             if let Some(DataValue::String(url)) = map.get("update_url") {
@@ -1499,6 +1526,7 @@ impl Database {
     ///
     /// Returns the pattern string for a given pattern ID.
     /// Returns None if the database has no pattern data or pattern ID is invalid.
+    #[must_use]
     pub fn get_pattern_string(&self, pattern_id: u32) -> Option<String> {
         let pg = self.pattern_matcher.as_ref()?;
         pg.get_pattern(pattern_id)
@@ -1508,6 +1536,7 @@ impl Database {
     ///
     /// Returns the number of glob patterns in the database.
     /// Returns 0 if the database has no pattern data.
+    #[must_use]
     pub fn pattern_count(&self) -> usize {
         match &self.pattern_matcher {
             Some(pg) => pg.pattern_count(),
@@ -1519,12 +1548,13 @@ impl Database {
     ///
     /// Returns the number of glob patterns in the database.
     /// Returns 0 if the database has no glob pattern data.
+    #[must_use]
     pub fn glob_count(&self) -> usize {
         // Try to get from metadata first (more accurate)
         if let Some(DataValue::Map(map)) = self.metadata() {
             if let Some(count) = map.get("glob_entry_count") {
                 if let Some(val) = Self::extract_uint_from_datavalue(count) {
-                    return val as usize;
+                    return usize::try_from(val).unwrap_or(usize::MAX);
                 }
             }
         }
@@ -1536,12 +1566,13 @@ impl Database {
     ///
     /// Returns the number of literal (exact-match) patterns in the database.
     /// Returns 0 if the database has no literal pattern data.
+    #[must_use]
     pub fn literal_count(&self) -> usize {
         // Try to get from metadata first (more accurate)
         if let Some(DataValue::Map(map)) = self.metadata() {
             if let Some(count) = map.get("literal_entry_count") {
                 if let Some(val) = Self::extract_uint_from_datavalue(count) {
-                    return val as usize;
+                    return usize::try_from(val).unwrap_or(usize::MAX);
                 }
             }
         }
@@ -1560,18 +1591,19 @@ impl Database {
     /// For databases built with matchy, this returns the exact entry count from `ip_entry_count`.
     /// For standard MMDB files (like MaxMind GeoLite2), it falls back to `node_count` which
     /// represents the search tree size (a reasonable proxy for entry count).
+    #[must_use]
     pub fn ip_count(&self) -> usize {
         if let Some(DataValue::Map(map)) = self.metadata() {
             // Try exact count first (matchy-built databases)
             if let Some(count) = map.get("ip_entry_count") {
                 if let Some(val) = Self::extract_uint_from_datavalue(count) {
-                    return val as usize;
+                    return usize::try_from(val).unwrap_or(usize::MAX);
                 }
             }
             // Fall back to node_count (standard MMDB files like MaxMind)
             if let Some(count) = map.get("node_count") {
                 if let Some(val) = Self::extract_uint_from_datavalue(count) {
-                    return val as usize;
+                    return usize::try_from(val).unwrap_or(usize::MAX);
                 }
             }
         }
@@ -1581,8 +1613,8 @@ impl Database {
     /// Helper to extract unsigned integer from DataValue
     fn extract_uint_from_datavalue(value: &DataValue) -> Option<u64> {
         match value {
-            DataValue::Uint16(v) => Some(*v as u64),
-            DataValue::Uint32(v) => Some(*v as u64),
+            DataValue::Uint16(v) => Some(u64::from(*v)),
+            DataValue::Uint32(v) => Some(u64::from(*v)),
             DataValue::Uint64(v) => Some(*v),
             _ => None,
         }
@@ -1677,7 +1709,7 @@ impl Database {
             // Standard .pgb format - load with zero-copy
             // SAFETY: data is 'static lifetime from mmap, valid for entire Database lifetime
             let result = unsafe { Paraglob::from_mmap(data, match_mode) };
-            return result.map_err(|e| format!("Failed to parse pattern-only database: {}", e));
+            return result.map_err(|e| format!("Failed to parse pattern-only database: {e}"));
         }
 
         Err("Invalid pattern-only database format".to_string())
@@ -1734,7 +1766,7 @@ impl Database {
         let paraglob_data = &data[paraglob_start..paraglob_end];
         // SAFETY: data is 'static lifetime from mmap, valid for entire Database lifetime
         let paraglob = unsafe { Paraglob::from_mmap(paraglob_data, match_mode) };
-        let paraglob = paraglob.map_err(|e| format!("Failed to parse paraglob section: {}", e))?;
+        let paraglob = paraglob.map_err(|e| format!("Failed to parse paraglob section: {e}"))?;
 
         // Store mapping metadata WITHOUT parsing all offsets (O(1) instead of O(n))
         let mappings_start = paraglob_end;
@@ -1755,8 +1787,7 @@ impl Database {
         let total_mapping_bytes = pattern_count * 4;
         if offsets_start + total_mapping_bytes > data.len() {
             return Err(format!(
-                "Pattern mappings section out of bounds (need {} bytes)",
-                total_mapping_bytes
+                "Pattern mappings section out of bounds (need {total_mapping_bytes} bytes)"
             ));
         }
 
@@ -1806,10 +1837,10 @@ pub enum DatabaseError {
 impl std::fmt::Display for DatabaseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DatabaseError::Io(msg) => write!(f, "I/O error: {}", msg),
-            DatabaseError::Format(err) => write!(f, "Format error: {}", err),
-            DatabaseError::Unsupported(msg) => write!(f, "Unsupported: {}", msg),
-            DatabaseError::Config(msg) => write!(f, "Configuration error: {}", msg),
+            Self::Io(msg) => write!(f, "I/O error: {msg}"),
+            Self::Format(err) => write!(f, "Format error: {err}"),
+            Self::Unsupported(msg) => write!(f, "Unsupported: {msg}"),
+            Self::Config(msg) => write!(f, "Configuration error: {msg}"),
         }
     }
 }
@@ -1818,8 +1849,9 @@ impl std::error::Error for DatabaseError {}
 
 impl DatabaseError {
     /// Returns true if this error indicates data corruption that should trigger fallback.
+    #[must_use]
     pub fn is_data_error(&self) -> bool {
-        matches!(self, DatabaseError::Format(_))
+        matches!(self, Self::Format(_))
     }
 }
 
@@ -1968,8 +2000,7 @@ mod tests {
         // The GeoLite2-Country.mmdb has ~1.6 million nodes
         assert!(
             count > 1_000_000,
-            "GeoLite2-Country should have > 1M nodes, got {}",
-            count
+            "GeoLite2-Country should have > 1M nodes, got {count}"
         );
     }
 

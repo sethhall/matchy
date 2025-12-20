@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use matchy::{Database, QueryResult};
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::Path;
 
 use crate::cli_utils::{data_value_to_json, format_cidr};
 
-pub fn cmd_query(database: PathBuf, query: String, quiet: bool) -> Result<()> {
+pub fn cmd_query(database: &Path, query: &str, quiet: bool) -> Result<()> {
     // Load database using fluent API
     let db = Database::from(database.to_str().unwrap())
         .open()
@@ -13,8 +13,8 @@ pub fn cmd_query(database: PathBuf, query: String, quiet: bool) -> Result<()> {
 
     // Perform the query (auto-detects IP vs pattern)
     let result = db
-        .lookup(&query)
-        .with_context(|| format!("Query failed for: {}", query))?;
+        .lookup(query)
+        .with_context(|| format!("Query failed for: {query}"))?;
 
     // Determine if match was found (for exit code)
     let found = matches!(result, Some(QueryResult::Pattern { ref pattern_ids, .. }) if !pattern_ids.is_empty())
@@ -50,7 +50,7 @@ pub fn cmd_query(database: PathBuf, query: String, quiet: bool) -> Result<()> {
         Some(QueryResult::Ip {
             data, prefix_len, ..
         }) => {
-            let cidr = format_cidr(&query, prefix_len);
+            let cidr = format_cidr(query, prefix_len);
             let mut result = data_value_to_json(&data);
 
             // Add CIDR info to the data object

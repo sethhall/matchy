@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Domains found:");
     for match_item in extractor.extract_from_line(line) {
         if let matchy::extractor::ExtractedItem::Domain(domain) = match_item.item {
-            println!("     - {}", domain);
+            println!("     - {domain}");
         }
     }
     println!();
@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   IPs found:");
     for match_item in extractor.extract_from_line(line) {
         if let matchy::extractor::ExtractedItem::Ipv4(ip) = match_item.item {
-            println!("     - {}", ip);
+            println!("     - {ip}");
         }
     }
     println!();
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   IPv6 addresses found:");
     for match_item in extractor.extract_from_line(line) {
         if let matchy::extractor::ExtractedItem::Ipv6(ip) = match_item.item {
-            println!("     - {}", ip);
+            println!("     - {ip}");
         }
     }
     println!();
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Emails found:");
     for match_item in extractor.extract_from_line(line) {
         if let matchy::extractor::ExtractedItem::Email(email) = match_item.item {
-            println!("     - {}", email);
+            println!("     - {email}");
         }
     }
     println!();
@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Unicode domains found:");
     for match_item in extractor.extract_from_line(line) {
         if let matchy::extractor::ExtractedItem::Domain(domain) = match_item.item {
-            println!("     - {} (contains UTF-8)", domain);
+            println!("     - {domain} (contains UTF-8)");
         }
     }
     println!();
@@ -142,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   ASCII patterns extracted:");
     for match_item in extractor.extract_from_line(&binary_log) {
         if let matchy::extractor::ExtractedItem::Domain(domain) = match_item.item {
-            println!("     - {}", domain);
+            println!("     - {domain}");
         }
     }
     println!();

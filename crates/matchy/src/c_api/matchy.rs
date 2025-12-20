@@ -121,29 +121,29 @@ struct MatchyInternal {
 // Conversion helpers for opaque types
 impl matchy_builder_t {
     fn from_internal(internal: Box<MatchyBuilderInternal>) -> *mut Self {
-        Box::into_raw(internal) as *mut Self
+        Box::into_raw(internal).cast::<Self>()
     }
 
     unsafe fn into_internal(ptr: *mut Self) -> Box<MatchyBuilderInternal> {
-        Box::from_raw(ptr as *mut MatchyBuilderInternal)
+        Box::from_raw(ptr.cast::<MatchyBuilderInternal>())
     }
 
     unsafe fn as_internal_mut(ptr: *mut Self) -> &'static mut MatchyBuilderInternal {
-        &mut *(ptr as *mut MatchyBuilderInternal)
+        &mut *ptr.cast::<MatchyBuilderInternal>()
     }
 }
 
 impl matchy_t {
     fn from_internal(internal: Box<MatchyInternal>) -> *mut Self {
-        Box::into_raw(internal) as *mut Self
+        Box::into_raw(internal).cast::<Self>()
     }
 
     unsafe fn into_internal(ptr: *mut Self) -> Box<MatchyInternal> {
-        Box::from_raw(ptr as *mut MatchyInternal)
+        Box::from_raw(ptr.cast::<MatchyInternal>())
     }
 
     unsafe fn as_internal(ptr: *const Self) -> &'static MatchyInternal {
-        &*(ptr as *const MatchyInternal)
+        &*ptr.cast::<MatchyInternal>()
     }
 }
 
@@ -548,7 +548,7 @@ pub unsafe extern "C" fn matchy_builder_build(
 
     // Allocate buffer using libc::malloc so C can free it
     let buf_size = bytes.len();
-    let buf_ptr = libc::malloc(buf_size) as *mut u8;
+    let buf_ptr = libc::malloc(buf_size).cast::<u8>();
     if buf_ptr.is_null() {
         return MATCHY_ERROR_OUT_OF_MEMORY;
     }
@@ -793,9 +793,9 @@ pub unsafe extern "C" fn matchy_open_with_options(
     if opts.auto_update {
         opener = opener
             .auto_update()
-            .update_interval(std::time::Duration::from_secs(
-                opts.update_interval_secs as u64,
-            ));
+            .update_interval(std::time::Duration::from_secs(u64::from(
+                opts.update_interval_secs,
+            )));
 
         if !opts.cache_dir.is_null() {
             if let Ok(dir) = CStr::from_ptr(opts.cache_dir).to_str() {
@@ -1153,7 +1153,9 @@ pub unsafe extern "C" fn matchy_free_string(string: *mut c_char) {
 #[no_mangle]
 pub extern "C" fn matchy_version() -> *const c_char {
     // Use the version from Cargo.toml, automatically updated at compile time
-    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
+    concat!(env!("CARGO_PKG_VERSION"), "\0")
+        .as_ptr()
+        .cast::<c_char>()
 }
 
 /// Get database format description
@@ -1176,7 +1178,7 @@ pub unsafe extern "C" fn matchy_format(db: *const matchy_t) -> *const c_char {
 
     let internal = matchy_t::as_internal(db);
     let format_str = internal.database.format();
-    format_str.as_ptr() as *const c_char
+    format_str.as_ptr().cast::<c_char>()
 }
 
 /// Check if database supports IP address lookups
@@ -1486,7 +1488,7 @@ pub struct matchy_entry_data_list_t {
     /// The entry data for this node
     pub entry_data: matchy_entry_data_t,
     /// Pointer to the next node in the list (NULL if last)
-    pub next: *mut matchy_entry_data_list_t,
+    pub next: *mut Self,
 }
 
 impl matchy_entry_data_t {
@@ -1517,7 +1519,7 @@ impl matchy_entry_data_t {
                 (
                     MATCHY_DATA_TYPE_UTF8_STRING,
                     matchy_entry_data_value_u { utf8_string: ptr },
-                    s.len() as u32,
+                    u32::try_from(s.len()).unwrap_or(u32::MAX),
                 )
             }
             DataValue::Double(d) => (
@@ -1530,7 +1532,7 @@ impl matchy_entry_data_t {
                 (
                     MATCHY_DATA_TYPE_BYTES,
                     matchy_entry_data_value_u { bytes: ptr },
-                    b.len() as u32,
+                    u32::try_from(b.len()).unwrap_or(u32::MAX),
                 )
             }
             DataValue::Uint16(n) => (
@@ -1546,7 +1548,7 @@ impl matchy_entry_data_t {
             DataValue::Map(m) => (
                 MATCHY_DATA_TYPE_MAP,
                 matchy_entry_data_value_u { uint32: 0 },
-                m.len() as u32,
+                u32::try_from(m.len()).unwrap_or(u32::MAX),
             ),
             DataValue::Int32(n) => (
                 MATCHY_DATA_TYPE_INT32,
@@ -1569,7 +1571,7 @@ impl matchy_entry_data_t {
             DataValue::Array(a) => (
                 MATCHY_DATA_TYPE_ARRAY,
                 matchy_entry_data_value_u { uint32: 0 },
-                a.len() as u32,
+                u32::try_from(a.len()).unwrap_or(u32::MAX),
             ),
             DataValue::Bool(b) => (
                 MATCHY_DATA_TYPE_BOOLEAN,
@@ -2185,15 +2187,15 @@ struct MatchesInternal {
 
 impl matchy_extractor_t {
     fn from_internal(internal: Box<Extractor>) -> *mut Self {
-        Box::into_raw(internal) as *mut Self
+        Box::into_raw(internal).cast::<Self>()
     }
 
     unsafe fn to_internal(ptr: *mut Self) -> Box<Extractor> {
-        Box::from_raw(ptr as *mut Extractor)
+        Box::from_raw(ptr.cast::<Extractor>())
     }
 
     unsafe fn as_internal(ptr: *const Self) -> &'static Extractor {
-        &*(ptr as *const Extractor)
+        &*ptr.cast::<Extractor>()
     }
 }
 
@@ -2336,7 +2338,7 @@ pub unsafe extern "C" fn matchy_extractor_extract_chunk(
 
     (*matches).items = internal.matches.as_ptr();
     (*matches).count = internal.matches.len();
-    (*matches)._internal = Box::into_raw(internal) as *mut c_void;
+    (*matches)._internal = Box::into_raw(internal).cast::<c_void>();
 
     MATCHY_SUCCESS
 }
@@ -2355,7 +2357,7 @@ pub unsafe extern "C" fn matchy_matches_free(matches: *mut matchy_matches_t) {
     }
 
     if !(*matches)._internal.is_null() {
-        let _ = Box::from_raw((*matches)._internal as *mut MatchesInternal);
+        let _ = Box::from_raw((*matches)._internal.cast::<MatchesInternal>());
         (*matches)._internal = ptr::null_mut();
         (*matches).items = ptr::null();
         (*matches).count = 0;
@@ -2418,5 +2420,5 @@ pub extern "C" fn matchy_item_type_name(item_type: u8) -> *const c_char {
         MATCHY_ITEM_TYPE_MONERO => MONERO,
         _ => UNKNOWN,
     };
-    name.as_ptr() as *const c_char
+    name.as_ptr().cast::<c_char>()
 }

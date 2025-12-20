@@ -4,7 +4,7 @@ mod literal;
 mod pattern;
 
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use combined::bench_combined_database;
 pub use ip::bench_ip_database;
@@ -26,27 +26,24 @@ pub struct BenchConfig<'a> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_bench(
-    db_type: String,
+    db_type: &str,
     count: usize,
-    output: Option<PathBuf>,
+    output: Option<&Path>,
     keep: bool,
     load_iterations: usize,
     query_count: usize,
     hit_rate: usize,
     cache_size: usize,
     cache_hit_rate: usize,
-    pattern_style: String,
+    pattern_style: &str,
 ) -> Result<()> {
     println!("=== Matchy Database Benchmark ===\n");
     println!("Configuration:");
-    println!("  Database type:     {}", db_type);
+    println!("  Database type:     {db_type}");
     println!("  Entry count:       {}", format_number(count));
-    println!("  Load iterations:   {}", load_iterations);
+    println!("  Load iterations:   {load_iterations}");
     println!("  Query iterations:  {}", format_number(query_count));
-    println!(
-        "  Match rate:        {}% (queries that find entries)",
-        hit_rate
-    );
+    println!("  Match rate:        {hit_rate}% (queries that find entries)");
     println!(
         "  Cache size:        {}",
         if cache_size == 0 {
@@ -65,18 +62,18 @@ pub fn cmd_bench(
         }
     );
     if db_type == "pattern" {
-        println!("  Pattern style:     {}", pattern_style);
+        println!("  Pattern style:     {pattern_style}");
     }
     println!();
 
     // Determine output file
-    let temp_file = output.clone().unwrap_or_else(|| {
+    let temp_file = output.map(Path::to_path_buf).unwrap_or_else(|| {
         let mut temp_dir = std::env::temp_dir();
-        temp_dir.push(format!("matchy_bench_{}_{}.mxy", db_type, count));
+        temp_dir.push(format!("matchy_bench_{db_type}_{count}.mxy"));
         temp_dir
     });
 
-    match db_type.as_str() {
+    match db_type {
         "ip" => bench_ip_database(
             count,
             &temp_file,
@@ -86,7 +83,7 @@ pub fn cmd_bench(
             cache_size,
             cache_hit_rate,
         ),
-        "literal" => bench_literal_database(BenchConfig {
+        "literal" => bench_literal_database(&BenchConfig {
             count,
             temp_file: &temp_file,
             keep,
@@ -105,7 +102,7 @@ pub fn cmd_bench(
             hit_rate,
             cache_size,
             cache_hit_rate,
-            &pattern_style,
+            pattern_style,
         ),
         "combined" => bench_combined_database(
             count,
@@ -118,8 +115,7 @@ pub fn cmd_bench(
         ),
         _ => {
             anyhow::bail!(
-                "Unknown database type: {}. Use 'ip', 'literal', 'pattern', or 'combined'",
-                db_type
+                "Unknown database type: {db_type}. Use 'ip', 'literal', 'pattern', or 'combined'"
             );
         }
     }

@@ -26,12 +26,12 @@ pub fn bench_ip_database(
 
     let empty_data = HashMap::new();
     for i in 0..count {
-        let ip_num = i as u32;
+        let ip_num = u32::try_from(i).unwrap_or(u32::MAX);
         let octet1 = (ip_num >> 24) & 0xFF;
         let octet2 = (ip_num >> 16) & 0xFF;
         let octet3 = (ip_num >> 8) & 0xFF;
         let octet4 = ip_num & 0xFF;
-        let ip_str = format!("{}.{}.{}.{}", octet1, octet2, octet3, octet4);
+        let ip_str = format!("{octet1}.{octet2}.{octet3}.{octet4}");
         builder.add_ip(&ip_str, empty_data.clone())?;
 
         if count > 100_000 && (i + 1) % 1_000_000 == 0 {
@@ -73,7 +73,8 @@ pub fn bench_ip_database(
             load_time.as_micros() as f64 / 1000.0
         );
     }
-    let avg_load = load_times.iter().sum::<std::time::Duration>() / load_iterations as u32;
+    let avg_load = load_times.iter().sum::<std::time::Duration>()
+        / u32::try_from(load_iterations).unwrap_or(1);
     println!("  Average:  {:.3}ms", avg_load.as_micros() as f64 / 1000.0);
     println!();
 
@@ -100,7 +101,7 @@ pub fn bench_ip_database(
     let mut found = 0;
 
     for i in 0..query_count {
-        let ip_num = ((i * 43) % unique_queries.min(count)) as u32;
+        let ip_num = u32::try_from((i * 43) % unique_queries.min(count)).unwrap_or(u32::MAX);
         let octet1 = (ip_num >> 24) & 0xFF;
         let octet2 = (ip_num >> 16) & 0xFF;
         let octet3 = (ip_num >> 8) & 0xFF;
@@ -114,7 +115,7 @@ pub fn bench_ip_database(
 
     let bench_time = bench_start.elapsed();
     let qps = query_count as f64 / bench_time.as_secs_f64();
-    let avg_query = bench_time / query_count as u32;
+    let avg_query = bench_time / u32::try_from(query_count).unwrap_or(1);
 
     println!("  Query count: {}", format_number(query_count));
     println!("  Total time:  {:.2}s", bench_time.as_secs_f64());
@@ -130,11 +131,11 @@ pub fn bench_ip_database(
     );
     println!();
 
-    if !keep {
+    if keep {
+        println!("✓ Benchmark complete (file kept: {})", temp_file.display());
+    } else {
         std::fs::remove_file(temp_file)?;
         println!("✓ Benchmark complete (temp file removed)");
-    } else {
-        println!("✓ Benchmark complete (file kept: {})", temp_file.display());
     }
 
     Ok(())

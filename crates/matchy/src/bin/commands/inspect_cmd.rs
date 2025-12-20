@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use matchy::{DataValue, Database};
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::Path;
 
 use crate::cli_utils::{
     data_value_to_json, extract_uint_from_datavalue, format_data_value, format_unix_timestamp,
 };
 
-pub fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Result<()> {
+pub fn cmd_inspect(database: &Path, json_output: bool, verbose: bool) -> Result<()> {
     // Load database using fluent API
     let db = Database::from(database.to_str().unwrap())
         .open()
@@ -53,22 +53,22 @@ pub fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Resul
         } else {
             "Empty database"
         };
-        println!("Format:   {}", actual_format);
+        println!("Format:   {actual_format}");
         println!();
         println!("Capabilities:");
         // Only show IP lookups as available if there are actual IP entries
         if ip_count > 0 {
             println!("  IP lookups:      ✓");
-            println!("    Entries:       {}", ip_count);
+            println!("    Entries:       {ip_count}");
         } else {
             println!("  IP lookups:      ✗");
         }
         println!("  String lookups:  {}", if has_string { "✓" } else { "✗" });
         if has_literals {
-            println!("    Literals:      ✓ ({} strings)", literal_count);
+            println!("    Literals:      ✓ ({literal_count} strings)");
         }
         if has_globs {
-            println!("    Globs:         ✓ ({} patterns)", glob_count);
+            println!("    Globs:         ✓ ({glob_count} patterns)");
         }
 
         if let Some(meta) = metadata {
@@ -78,7 +78,7 @@ pub fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Resul
 
                 // Show database_type if present
                 if let Some(DataValue::String(db_type)) = map.get("database_type") {
-                    println!("  Database type:   {}", db_type);
+                    println!("  Database type:   {db_type}");
                 }
 
                 // Show description if present
@@ -86,7 +86,7 @@ pub fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Resul
                     println!("  Description:");
                     for (lang, desc_value) in desc_map {
                         if let DataValue::String(desc) = desc_value {
-                            println!("    {}: {}", lang, desc);
+                            println!("    {lang}: {desc}");
                         }
                     }
                 }
@@ -95,14 +95,14 @@ pub fn cmd_inspect(database: PathBuf, json_output: bool, verbose: bool) -> Resul
                 if let Some(build_epoch) = map.get("build_epoch") {
                     if let Some(epoch) = extract_uint_from_datavalue(build_epoch) {
                         let timestamp_str = format_unix_timestamp(epoch);
-                        println!("  Build time:      {} ({})", timestamp_str, epoch);
+                        println!("  Build time:      {timestamp_str} ({epoch})");
                     }
                 }
 
                 // Show IP version if present
                 if let Some(ip_version) = map.get("ip_version") {
                     if let Some(ver) = extract_uint_from_datavalue(ip_version) {
-                        println!("  IP version:      IPv{}", ver);
+                        println!("  IP version:      IPv{ver}");
                     }
                 }
 

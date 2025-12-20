@@ -160,25 +160,22 @@ impl PatternType {
 
     fn id(&self) -> u32 {
         match self {
-            Self::Literal { id, .. } => *id,
-            Self::Glob { id, .. } => *id,
-            Self::PureWildcard { id, .. } => *id,
+            Self::Literal { id, .. } | Self::Glob { id, .. } | Self::PureWildcard { id, .. } => *id,
         }
     }
 
     fn pattern(&self) -> &str {
         match self {
             Self::Literal { text, .. } => text,
-            Self::Glob { pattern, .. } => pattern,
-            Self::PureWildcard { pattern, .. } => pattern,
+            Self::Glob { pattern, .. } | Self::PureWildcard { pattern, .. } => pattern,
         }
     }
 
     fn data(&self) -> Option<&DataValue> {
         match self {
-            Self::Literal { data, .. } => data.as_ref(),
-            Self::Glob { data, .. } => data.as_ref(),
-            Self::PureWildcard { data, .. } => data.as_ref(),
+            Self::Literal { data, .. }
+            | Self::Glob { data, .. }
+            | Self::PureWildcard { data, .. } => data.as_ref(),
         }
     }
 }
@@ -222,6 +219,7 @@ impl ParaglobBuilder {
     ///
     /// # Arguments
     /// * `mode` - Case sensitivity mode for pattern matching
+    #[must_use]
     pub fn new(mode: MatchMode) -> Self {
         Self {
             patterns: Vec::new(),
@@ -290,7 +288,9 @@ impl ParaglobBuilder {
             }
         }
 
-        let id = self.patterns.len() as u32;
+        let id = u32::try_from(self.patterns.len()).map_err(|_| {
+            ParaglobError::InvalidPattern("Pattern count exceeds u32::MAX".to_string())
+        })?;
         let pat_type = PatternType::new_with_data(pattern, id, data)?;
         self.pattern_set.insert(pattern.to_string());
         self.patterns.push(pat_type);
@@ -382,7 +382,9 @@ impl ParaglobBuilder {
             let segments = Self::serialize_glob_segments(pattern_str, mode)?;
 
             let first_segment_offset_placeholder = segment_headers.len();
-            let segment_count = segments.len() as u16;
+            let segment_count = u16::try_from(segments.len()).map_err(|_| {
+                ParaglobError::InvalidPattern("Segment count exceeds u16::MAX".into())
+            })?;
 
             // Process each segment
             for segment in segments {
@@ -395,8 +397,8 @@ impl ParaglobBuilder {
                             segment_type: 0,
                             flags: 0,
                             reserved: 0,
-                            data_len: s.len() as u32,
-                            data_offset: data_offset as u32, // Will be adjusted later
+                            data_len: u32::try_from(s.len()).unwrap_or(u32::MAX),
+                            data_offset: u32::try_from(data_offset).unwrap_or(u32::MAX),
                         });
                     }
                     GlobSegment::Star => {
@@ -447,15 +449,19 @@ impl ParaglobBuilder {
                             segment_type: 3,
                             flags: if negated { 1 } else { 0 },
                             reserved: 0,
-                            data_len: (char_count * mem::size_of::<CharClassItemEncoded>()) as u32,
-                            data_offset: data_offset as u32, // Will be adjusted later
+                            data_len: u32::try_from(
+                                char_count * mem::size_of::<CharClassItemEncoded>(),
+                            )
+                            .unwrap_or(u32::MAX),
+                            data_offset: u32::try_from(data_offset).unwrap_or(u32::MAX),
                         });
                     }
                 }
             }
 
             indices.push(GlobSegmentIndex {
-                first_segment_offset: first_segment_offset_placeholder as u32,
+                first_segment_offset: u32::try_from(first_segment_offset_placeholder)
+                    .unwrap_or(u32::MAX),
                 segment_count,
                 reserved: 0,
             });
@@ -487,8 +493,8 @@ impl ParaglobBuilder {
                 data_len: header.data_len,
                 data_offset: if header.data_len > 0 {
                     match header.segment_type {
-                        0 => strings_offset as u32 + header.data_offset, // Literal string
-                        3 => char_classes_offset as u32 + header.data_offset, // CharClass
+                        0 => u32::try_from(strings_offset).unwrap_or(0) + header.data_offset,
+                        3 => u32::try_from(char_classes_offset).unwrap_or(0) + header.data_offset,
                         _ => 0,
                     }
                 } else {
@@ -513,9 +519,10 @@ impl ParaglobBuilder {
         // Adjust first_segment_offset in indices
         for index in indices.iter_mut() {
             // Calculate actual offset: base + (segment index * sizeof(header))
-            let segment_idx = index.first_segment_offset as usize;
+            let segment_idx = usize::try_from(index.first_segment_offset).unwrap_or(0);
             index.first_segment_offset =
-                (headers_offset + segment_idx * mem::size_of::<GlobSegmentHeader>()) as u32;
+                u32::try_from(headers_offset + segment_idx * mem::size_of::<GlobSegmentHeader>())
+                    .unwrap_or(u32::MAX);
         }
 
         Ok((indices, segment_data, total_size, header_count))
@@ -572,13 +579,16 @@ impl ParaglobBuilder {
         }
 
         // Build AC automaton and get node count
-        let (ac_automaton, ac_node_count) = if !ac_literals.is_empty() {
-            let ac_refs: Vec<&str> = ac_literals.iter().map(|s| s.as_str()).collect();
+        let (ac_automaton, ac_node_count) = if ac_literals.is_empty() {
+            (ACAutomaton::new(self.mode), 0)
+        } else {
+            let ac_refs: Vec<&str> = ac_literals
+                .iter()
+                .map(std::string::String::as_str)
+                .collect();
             let automaton = ACAutomaton::build(&ac_refs, self.mode)?;
             let node_count = automaton.node_count();
             (automaton, node_count)
-        } else {
-            (ACAutomaton::new(self.mode), 0)
         };
 
         // Build mapping from AC literal ID to pattern IDs
@@ -586,7 +596,9 @@ impl ParaglobBuilder {
         let mut ac_literal_to_patterns = HashMap::new();
         for (literal_id, literal_str) in ac_literals.iter().enumerate() {
             if let Some(pattern_ids) = literal_to_patterns.get(literal_str) {
-                ac_literal_to_patterns.insert(literal_id as u32, pattern_ids.clone());
+                if let Ok(lid) = u32::try_from(literal_id) {
+                    ac_literal_to_patterns.insert(lid, pattern_ids.clone());
+                }
             }
         }
 
@@ -680,7 +692,7 @@ impl ParaglobBuilder {
         for (literal_id, pattern_ids) in &ac_literal_to_patterns {
             ac_hash_builder.add_mapping(*literal_id, pattern_ids.clone());
         }
-        let ac_hash_bytes = ac_hash_builder.build()?;
+        let ac_hash_bytes = ac_hash_builder.build();
         let ac_literal_map_size = ac_hash_bytes.len();
 
         // Glob segments section (v5) - pre-serialize all glob patterns
@@ -721,37 +733,38 @@ impl ParaglobBuilder {
             MatchMode::CaseSensitive => 0,
             MatchMode::CaseInsensitive => 1,
         };
-        header.ac_node_count = ac_node_count as u32;
-        header.ac_nodes_offset = ac_start as u32; // Points to aligned AC buffer
-        header.ac_edges_size = ac_size as u32;
-        header.pattern_count = self.patterns.len() as u32;
-        header.patterns_offset = patterns_start as u32;
-        header.pattern_strings_offset = pattern_strings_start as u32;
-        header.pattern_strings_size = pattern_strings_size as u32;
-        header.wildcard_count = pure_wildcards.len() as u32;
-        header.total_buffer_size = total_size as u32;
+        header.ac_node_count = u32::try_from(ac_node_count).unwrap_or(u32::MAX);
+        header.ac_nodes_offset = u32::try_from(ac_start).unwrap_or(u32::MAX);
+        header.ac_edges_size = u32::try_from(ac_size).unwrap_or(u32::MAX);
+        header.pattern_count = u32::try_from(self.patterns.len()).unwrap_or(u32::MAX);
+        header.patterns_offset = u32::try_from(patterns_start).unwrap_or(u32::MAX);
+        header.pattern_strings_offset = u32::try_from(pattern_strings_start).unwrap_or(u32::MAX);
+        header.pattern_strings_size = u32::try_from(pattern_strings_size).unwrap_or(u32::MAX);
+        header.wildcard_count = u32::try_from(pure_wildcards.len()).unwrap_or(u32::MAX);
+        header.total_buffer_size = u32::try_from(total_size).unwrap_or(u32::MAX);
         // header.reserved is already initialized to [0; 3] in new()
 
         // v2 fields (if we have data)
         if data_section_size > 0 {
-            header.data_section_offset = data_section_start as u32;
-            header.data_section_size = data_section_size as u32;
-            header.mapping_table_offset = mappings_start as u32;
-            header.mapping_count = pattern_data_mappings.len() as u32;
+            header.data_section_offset = u32::try_from(data_section_start).unwrap_or(u32::MAX);
+            header.data_section_size = u32::try_from(data_section_size).unwrap_or(u32::MAX);
+            header.mapping_table_offset = u32::try_from(mappings_start).unwrap_or(u32::MAX);
+            header.mapping_count = u32::try_from(pattern_data_mappings.len()).unwrap_or(u32::MAX);
             header.data_flags = 0x1; // Inline data flag
         }
 
         // v3 fields (AC literal mapping - always present)
-        header.ac_literal_map_offset = ac_literal_map_start as u32;
-        header.ac_literal_map_count = ac_literal_to_patterns.len() as u32;
+        header.ac_literal_map_offset = u32::try_from(ac_literal_map_start).unwrap_or(u32::MAX);
+        header.ac_literal_map_count =
+            u32::try_from(ac_literal_to_patterns.len()).unwrap_or(u32::MAX);
 
         // v5 fields (glob segments - always present)
-        header.glob_segments_offset = glob_segments_start as u32;
-        header.glob_segments_size = glob_segments_size as u32;
+        header.glob_segments_offset = u32::try_from(glob_segments_start).unwrap_or(u32::MAX);
+        header.glob_segments_size = u32::try_from(glob_segments_size).unwrap_or(u32::MAX);
 
         // SAFETY: buffer is freshly allocated with correct size, ptr is aligned for ParaglobHeader
         unsafe {
-            let ptr = buffer.as_mut_ptr() as *mut ParaglobHeader;
+            let ptr = buffer.as_mut_ptr().cast::<ParaglobHeader>();
             ptr.write(header);
         }
 
@@ -763,7 +776,8 @@ impl ParaglobBuilder {
         // Write pattern entries
         for (i, pat) in self.patterns.iter().enumerate() {
             let entry_offset = patterns_start + i * pattern_entry_size;
-            let string_offset = (pattern_strings_start + pattern_string_offsets[i]) as u32;
+            let string_offset = u32::try_from(pattern_strings_start + pattern_string_offsets[i])
+                .unwrap_or(u32::MAX);
 
             let pattern_type = match pat {
                 PatternType::Literal { .. } => 0u8,
@@ -772,11 +786,11 @@ impl ParaglobBuilder {
 
             let mut entry = PatternEntry::new(pat.id(), pattern_type);
             entry.pattern_string_offset = string_offset;
-            entry.pattern_string_length = pat.pattern().len() as u32;
+            entry.pattern_string_length = u32::try_from(pat.pattern().len()).unwrap_or(u32::MAX);
 
             // SAFETY: entry_offset is within buffer bounds, PatternEntry is repr(C)
             unsafe {
-                let ptr = buffer.as_mut_ptr().add(entry_offset) as *mut PatternEntry;
+                let ptr = buffer.as_mut_ptr().add(entry_offset).cast::<PatternEntry>();
                 ptr.write(entry);
             }
         }
@@ -790,16 +804,20 @@ impl ParaglobBuilder {
         // Write pure wildcard entries
         for (i, pat) in pure_wildcards.iter().enumerate() {
             let wildcard_offset = wildcards_start + i * wildcard_entry_size;
-            let string_offset = pattern_strings_start + pattern_string_offsets[pat.id() as usize];
+            let pat_id_usize = usize::try_from(pat.id()).unwrap_or(0);
+            let string_offset = pattern_strings_start + pattern_string_offsets[pat_id_usize];
 
             let wildcard = SingleWildcard {
                 pattern_id: pat.id(),
-                pattern_string_offset: string_offset as u32,
+                pattern_string_offset: u32::try_from(string_offset).unwrap_or(u32::MAX),
             };
 
             // SAFETY: wildcard_offset is within buffer bounds, SingleWildcard is repr(C)
             unsafe {
-                let ptr = buffer.as_mut_ptr().add(wildcard_offset) as *mut SingleWildcard;
+                let ptr = buffer
+                    .as_mut_ptr()
+                    .add(wildcard_offset)
+                    .cast::<SingleWildcard>();
                 ptr.write(wildcard);
             }
         }
@@ -815,7 +833,10 @@ impl ParaglobBuilder {
             let mapping_offset = mappings_start + i * mapping_entry_size;
             // SAFETY: mapping_offset is within buffer bounds, PatternDataMapping is repr(C)
             unsafe {
-                let ptr = buffer.as_mut_ptr().add(mapping_offset) as *mut PatternDataMapping;
+                let ptr = buffer
+                    .as_mut_ptr()
+                    .add(mapping_offset)
+                    .cast::<PatternDataMapping>();
                 ptr.write(*mapping);
             }
         }
@@ -834,14 +855,17 @@ impl ParaglobBuilder {
                 glob_segments_start + i * mem::size_of::<crate::offset_format::GlobSegmentIndex>();
             // Adjust offsets to be relative to buffer start
             let adjusted_index = crate::offset_format::GlobSegmentIndex {
-                first_segment_offset: glob_segments_start as u32 + index.first_segment_offset,
+                first_segment_offset: u32::try_from(glob_segments_start).unwrap_or(0)
+                    + index.first_segment_offset,
                 segment_count: index.segment_count,
                 reserved: index.reserved,
             };
             // SAFETY: index_offset is within buffer bounds, GlobSegmentIndex is repr(C)
             unsafe {
-                let ptr = buffer.as_mut_ptr().add(index_offset)
-                    as *mut crate::offset_format::GlobSegmentIndex;
+                let ptr = buffer
+                    .as_mut_ptr()
+                    .add(index_offset)
+                    .cast::<crate::offset_format::GlobSegmentIndex>();
                 ptr.write(adjusted_index);
             }
         }
@@ -870,8 +894,9 @@ impl ParaglobBuilder {
                     // Note: offsets in segment_data include index_size, but indices are written
                     // separately, so we need to subtract index_size then add glob_index_end
                     if header.data_len > 0 && header.data_offset > 0 {
-                        header.data_offset =
-                            header.data_offset - glob_index_size as u32 + glob_index_end as u32;
+                        let idx_size = u32::try_from(glob_index_size).unwrap_or(0);
+                        let idx_end = u32::try_from(glob_index_end).unwrap_or(0);
+                        header.data_offset = header.data_offset - idx_size + idx_end;
                     }
 
                     // SAFETY: header_offset_in_data is bounds-checked above, GlobSegmentHeader is repr(C)
@@ -879,7 +904,7 @@ impl ParaglobBuilder {
                         let ptr = adjusted_segment_data
                             .as_mut_ptr()
                             .add(header_offset_in_data)
-                            as *mut crate::offset_format::GlobSegmentHeader;
+                            .cast::<crate::offset_format::GlobSegmentHeader>();
                         ptr.write(header);
                     }
                 }
@@ -904,8 +929,8 @@ enum BufferStorage {
 impl BufferStorage {
     fn as_slice(&self) -> &[u8] {
         match self {
-            BufferStorage::Owned(vec) => vec.as_slice(),
-            BufferStorage::Borrowed(slice) => slice,
+            Self::Owned(vec) => vec.as_slice(),
+            Self::Borrowed(slice) => slice,
         }
     }
 }
@@ -961,11 +986,13 @@ unsafe impl Sync for Paraglob {}
 
 impl Paraglob {
     /// Create a new empty Paraglob
+    #[must_use]
     pub fn new() -> Self {
         Self::with_mode(MatchMode::CaseSensitive)
     }
 
     /// Create with specified match mode
+    #[must_use]
     pub fn with_mode(mode: MatchMode) -> Self {
         Self {
             buffer: BufferStorage::Owned(Vec::new()),
@@ -976,6 +1003,7 @@ impl Paraglob {
     }
 
     /// Get the match mode
+    #[must_use]
     pub fn mode(&self) -> MatchMode {
         self.mode
     }
@@ -1023,7 +1051,7 @@ impl Paraglob {
         let mut builder = ParaglobBuilder::new(mode);
 
         for (i, pattern) in patterns.iter().enumerate() {
-            let pattern_data = data.and_then(|d| d.get(i).and_then(|v| v.clone()));
+            let pattern_data = data.and_then(|d| d.get(i).and_then(std::clone::Clone::clone));
             builder.add_pattern_with_data(pattern, pattern_data)?;
         }
 
@@ -1031,6 +1059,7 @@ impl Paraglob {
     }
 
     /// Find all matching pattern IDs
+    #[must_use]
     pub fn find_all(&self, text: &str) -> Vec<u32> {
         let buffer = self.buffer.as_slice();
         if buffer.is_empty() {
@@ -1042,7 +1071,7 @@ impl Paraglob {
             if buffer.len() < mem::size_of::<ParaglobHeader>() {
                 return Vec::new();
             }
-            let ptr = buffer.as_ptr() as *const ParaglobHeader;
+            let ptr = buffer.as_ptr().cast::<ParaglobHeader>();
             ptr.read()
         };
 
@@ -1234,7 +1263,7 @@ impl Paraglob {
                     if current_offset + mem::size_of::<ACNodeHot>() > ac_buffer.len() {
                         break;
                     }
-                    let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNodeHot;
+                    let ptr = ac_buffer.as_ptr().add(current_offset).cast::<ACNodeHot>();
                     ptr.read()
                 };
                 current_offset = node.failure_offset as usize;
@@ -1249,7 +1278,7 @@ impl Paraglob {
                 if current_offset + mem::size_of::<ACNodeHot>() > ac_buffer.len() {
                     continue;
                 }
-                let ptr = ac_buffer.as_ptr().add(current_offset) as *const ACNodeHot;
+                let ptr = ac_buffer.as_ptr().add(current_offset).cast::<ACNodeHot>();
                 ptr.read()
             };
 
@@ -1260,7 +1289,7 @@ impl Paraglob {
                 // SAFETY: Read u32 array directly - HOT PATH (4-byte aligned)
                 unsafe {
                     if patterns_offset + pattern_count * 4 <= ac_buffer.len() {
-                        let ids_ptr = ac_buffer.as_ptr().add(patterns_offset) as *const u32;
+                        let ids_ptr = ac_buffer.as_ptr().add(patterns_offset).cast::<u32>();
                         for i in 0..pattern_count {
                             let pattern_id = ids_ptr.add(i).read();
                             matches.insert(pattern_id);
@@ -1285,7 +1314,7 @@ impl Paraglob {
             if node_offset + mem::size_of::<ACNodeHot>() > ac_buffer.len() {
                 return None;
             }
-            let ptr = ac_buffer.as_ptr().add(node_offset) as *const ACNodeHot;
+            let ptr = ac_buffer.as_ptr().add(node_offset).cast::<ACNodeHot>();
             ptr.read()
         };
 
@@ -1317,7 +1346,7 @@ impl Paraglob {
                     if edges_offset + count * edge_size > ac_buffer.len() {
                         return None;
                     }
-                    let edge_ptr = ac_buffer.as_ptr().add(edges_offset) as *const ACEdge;
+                    let edge_ptr = ac_buffer.as_ptr().add(edges_offset).cast::<ACEdge>();
 
                     for i in 0..count {
                         let edge = edge_ptr.add(i).read();
@@ -1359,6 +1388,7 @@ impl Paraglob {
     }
 
     /// Get the buffer (for serialization)
+    #[must_use]
     pub fn buffer(&self) -> &[u8] {
         self.buffer.as_slice()
     }
@@ -1766,6 +1796,7 @@ impl Paraglob {
     }
 
     /// Get pattern count
+    #[must_use]
     pub fn pattern_count(&self) -> usize {
         let buffer = self.buffer.as_slice();
         if buffer.len() < mem::size_of::<ParaglobHeader>() {
@@ -1786,6 +1817,7 @@ impl Paraglob {
     ///
     /// Note: Returns owned DataValue (not reference) for lazy loading from buffer.
     /// Uses binary search through pattern data mapping table.
+    #[must_use]
     pub fn get_pattern_data(&self, pattern_id: u32) -> Option<DataValue> {
         self.find_pattern_data(pattern_id)
     }
@@ -1844,6 +1876,7 @@ impl Paraglob {
     }
 
     /// Check if this Paraglob has data section support (v2 format)
+    #[must_use]
     pub fn has_data_section(&self) -> bool {
         let buffer = self.buffer.as_slice();
         if buffer.len() < mem::size_of::<ParaglobHeader>() {
@@ -1859,6 +1892,7 @@ impl Paraglob {
     }
 
     /// Get pattern string by ID
+    #[must_use]
     pub fn get_pattern(&self, pattern_id: u32) -> Option<String> {
         let buffer = self.buffer.as_slice();
         if buffer.len() < mem::size_of::<ParaglobHeader>() {
@@ -1879,7 +1913,7 @@ impl Paraglob {
 
         read_cstring(buffer, entry.pattern_string_offset as usize)
             .ok()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
     }
 }
 

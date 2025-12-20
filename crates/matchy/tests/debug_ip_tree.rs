@@ -25,7 +25,7 @@ fn debug_simple_sparse_ips() {
 
     // Test each IP from 0.0.0.0 to 0.0.0.7
     for i in 0..8 {
-        let ip_str = format!("0.0.0.{}", i);
+        let ip_str = format!("0.0.0.{i}");
         let ip = ip_str.parse().unwrap();
         let result = db.lookup_ip(ip).unwrap();
 
@@ -54,7 +54,7 @@ fn debug_simple_sparse_ips() {
                     "    Details: data_offset={}, prefix_len={}",
                     match res {
                         matchy::database::QueryResult::Ip { prefix_len, .. } =>
-                            format!("{}", prefix_len),
+                            format!("{prefix_len}"),
                         _ => "N/A".to_string(),
                     },
                     match res {

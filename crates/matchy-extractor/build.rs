@@ -50,8 +50,9 @@ fn main() {
     }
 
     // Calculate table size (next power of 2 >= entry_count * 1.25)
-    let entry_count = suffixes.len() as u32;
-    let min_size = (entry_count as f64 * 1.25) as u32;
+    let entry_count = u32::try_from(suffixes.len()).expect("PSL has more entries than u32::MAX");
+    // Safe: entry_count * 1.25 fits in u32 since entry_count is u32
+    let min_size = entry_count + entry_count / 4;
     let table_size = min_size.next_power_of_two();
     let table_mask = table_size - 1;
 
@@ -63,13 +64,13 @@ fn main() {
         let bytes = suffix.as_bytes();
         let hash = xxh64(bytes, 0);
 
-        // Store string in pool
-        let string_offset = string_pool.len() as u32;
-        let string_len = bytes.len() as u32;
+        let string_offset =
+            u32::try_from(string_pool.len()).expect("PSL string pool exceeds u32::MAX bytes");
+        let string_len = u32::try_from(bytes.len()).expect("PSL suffix length exceeds u32::MAX");
         string_pool.extend_from_slice(bytes);
 
-        // Find slot using linear probing
-        let mut slot = (hash as u32 & table_mask) as usize;
+        // Find slot using linear probing (hash masked to table_size always fits in usize)
+        let mut slot = usize::try_from(hash & u64::from(table_mask)).unwrap();
         loop {
             if table[slot].1 == EMPTY_SLOT {
                 table[slot] = (hash, string_offset, string_len);
@@ -101,8 +102,5 @@ fn main() {
 
     // Report stats
     let total_size = 16 + (table_size as usize * 16) + string_pool.len();
-    println!(
-        "cargo:warning=PSL hash table: {} entries, {} bytes total",
-        entry_count, total_size
-    );
+    println!("cargo:warning=PSL hash table: {entry_count} entries, {total_size} bytes total");
 }

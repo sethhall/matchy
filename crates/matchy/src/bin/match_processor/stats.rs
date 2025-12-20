@@ -52,7 +52,7 @@ impl ProcessingStats {
     }
 
     /// Add another stats object to this one (for aggregation)
-    pub fn add(&mut self, other: &ProcessingStats) {
+    pub fn add(&mut self, other: &Self) {
         self.lines_processed += other.lines_processed;
         self.candidates_tested += other.candidates_tested;
         self.lines_with_matches += other.lines_with_matches;

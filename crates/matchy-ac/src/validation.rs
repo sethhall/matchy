@@ -35,7 +35,7 @@ impl ACValidationResult {
             errors: Vec::new(),
             warnings: Vec::new(),
             stats: ACStats {
-                node_count: node_count as u32,
+                node_count: u32::try_from(node_count).unwrap_or(u32::MAX),
                 state_encoding_distribution: [0; 4],
                 orphaned_count: 0,
             },
@@ -43,6 +43,7 @@ impl ACValidationResult {
     }
 
     /// Check if validation passed (no errors)
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
     }
@@ -75,6 +76,7 @@ fn validate_range(offset: usize, size: usize, buffer_len: usize) -> bool {
 /// # Returns
 ///
 /// A `ACValidationResult` with errors, warnings, and statistics
+#[must_use]
 pub fn validate_ac_structure(
     buffer: &[u8],
     nodes_offset: usize,
@@ -92,14 +94,14 @@ pub fn validate_ac_structure(
         let node_offset = nodes_offset + i * mem::size_of::<ACNodeHot>();
 
         if node_offset + mem::size_of::<ACNodeHot>() > buffer.len() {
-            result.errors.push(format!("AC node {} out of bounds", i));
+            result.errors.push(format!("AC node {i} out of bounds"));
             continue;
         }
 
         let node = match ACNodeHot::read_from_prefix(&buffer[node_offset..]) {
             Ok((n, _)) => n,
             Err(_) => {
-                result.errors.push(format!("Failed to read AC node {}", i));
+                result.errors.push(format!("Failed to read AC node {i}"));
                 continue;
             }
         };
@@ -137,7 +139,7 @@ pub fn validate_ac_structure(
             if failure_node_offset == node_offset && node_offset != nodes_offset {
                 result
                     .errors
-                    .push(format!("AC node {} has self-referencing failure link", i));
+                    .push(format!("AC node {i} has self-referencing failure link"));
             }
         }
 
@@ -168,8 +170,7 @@ pub fn validate_ac_structure(
                             .is_multiple_of(mem::size_of::<ACNodeHot>()))
                 {
                     result.errors.push(format!(
-                        "AC node {} (One) has invalid target offset: {}",
-                        i, target_offset
+                        "AC node {i} (One) has invalid target offset: {target_offset}"
                     ));
                 }
             }
@@ -182,11 +183,10 @@ pub fn validate_ac_structure(
                 if edge_count == 0 {
                     result
                         .errors
-                        .push(format!("AC node {} is Sparse but has no edges", i));
+                        .push(format!("AC node {i} is Sparse but has no edges"));
                 } else if !validate_range(edges_offset, edges_size, buffer.len()) {
                     result.errors.push(format!(
-                        "AC node {} edge array out of bounds: offset={}, count={}",
-                        i, edges_offset, edge_count
+                        "AC node {i} edge array out of bounds: offset={edges_offset}, count={edge_count}"
                     ));
                 } else if strict {
                     // Validate each edge
@@ -201,8 +201,7 @@ pub fn validate_ac_structure(
                                     .is_multiple_of(mem::size_of::<ACNodeHot>())
                             {
                                 result.errors.push(format!(
-                                    "AC node {} edge {} has invalid target: {}",
-                                    i, j, target_offset
+                                    "AC node {i} edge {j} has invalid target: {target_offset}"
                                 ));
                             }
                         }
@@ -216,8 +215,7 @@ pub fn validate_ac_structure(
 
                 if !validate_range(lookup_offset, lookup_size, buffer.len()) {
                     result.errors.push(format!(
-                        "AC node {} dense lookup out of bounds: offset={}",
-                        i, lookup_offset
+                        "AC node {i} dense lookup out of bounds: offset={lookup_offset}"
                     ));
                 }
                 // Note: Cache alignment check disabled - it's a performance optimization hint for developers,
@@ -250,8 +248,7 @@ pub fn validate_ac_structure(
                                         .is_multiple_of(mem::size_of::<ACNodeHot>()))
                             {
                                 result.errors.push(format!(
-                                    "AC node {} dense entry [{}] has invalid target: {}",
-                                    i, j, target_offset
+                                    "AC node {i} dense entry [{j}] has invalid target: {target_offset}"
                                 ));
                             }
                         }
@@ -265,12 +262,7 @@ pub fn validate_ac_structure(
             let patterns_offset = node.patterns_offset as usize;
             let patterns_size = (node.pattern_count as usize) * mem::size_of::<u32>();
 
-            if !validate_range(patterns_offset, patterns_size, buffer.len()) {
-                result.errors.push(format!(
-                    "AC node {} pattern IDs out of bounds: offset={}, count={}",
-                    i, patterns_offset, node.pattern_count
-                ));
-            } else {
+            if validate_range(patterns_offset, patterns_size, buffer.len()) {
                 // Validate each pattern ID references a valid pattern
                 for j in 0..(node.pattern_count as usize) {
                     let pid_offset = patterns_offset + j * mem::size_of::<u32>();
@@ -284,12 +276,16 @@ pub fn validate_ac_structure(
 
                         if pattern_id >= pattern_count {
                             result.errors.push(format!(
-                                "AC node {} pattern ID {} out of range: {} (max={})",
-                                i, j, pattern_id, pattern_count
+                                "AC node {i} pattern ID {j} out of range: {pattern_id} (max={pattern_count})"
                             ));
                         }
                     }
                 }
+            } else {
+                result.errors.push(format!(
+                    "AC node {} pattern IDs out of bounds: offset={}, count={}",
+                    i, patterns_offset, node.pattern_count
+                ));
             }
         }
     }
@@ -311,6 +307,7 @@ pub fn validate_ac_structure(
 /// # Returns
 ///
 /// A `ACValidationResult` with errors, warnings, and statistics
+#[must_use]
 pub fn validate_ac_reachability(
     buffer: &[u8],
     nodes_offset: usize,
@@ -441,12 +438,11 @@ pub fn validate_ac_reachability(
 
     // Count orphaned nodes
     let orphaned_count = reachable.iter().filter(|&&r| !r).count();
-    result.stats.orphaned_count = orphaned_count as u32;
+    result.stats.orphaned_count = u32::try_from(orphaned_count).unwrap_or(u32::MAX);
 
     if orphaned_count > 0 {
         result.warnings.push(format!(
-            "Found {} orphaned AC nodes (not reachable from root)",
-            orphaned_count
+            "Found {orphaned_count} orphaned AC nodes (not reachable from root)"
         ));
     }
 
@@ -471,6 +467,7 @@ pub fn validate_ac_reachability(
 /// # Returns
 ///
 /// A `ACValidationResult` with errors, warnings, and statistics
+#[must_use]
 pub fn validate_pattern_references(
     buffer: &[u8],
     nodes_offset: usize,
@@ -516,8 +513,7 @@ pub fn validate_pattern_references(
 
                         if pattern_id >= pattern_count {
                             result.errors.push(format!(
-                                "AC node {} references invalid pattern ID: {} (max={})",
-                                i, pattern_id, pattern_count
+                                "AC node {i} references invalid pattern ID: {pattern_id} (max={pattern_count})"
                             ));
                         } else {
                             patterns_referenced.insert(pattern_id);
@@ -541,8 +537,7 @@ pub fn validate_pattern_references(
 
         if unreferenced_literals > 0 {
             result.warnings.push(format!(
-                "Found {} literal patterns not referenced by any AC node",
-                unreferenced_literals
+                "Found {unreferenced_literals} literal patterns not referenced by any AC node"
             ));
         }
     }

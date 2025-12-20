@@ -61,7 +61,7 @@ pub enum DataValue {
     /// Unsigned 32-bit integer
     Uint32(u32),
     /// Key-value map (string keys only per MMDB spec)
-    Map(HashMap<String, DataValue>),
+    Map(HashMap<String, Self>),
     /// Signed 32-bit integer
     Int32(i32),
     /// Unsigned 64-bit integer
@@ -69,7 +69,7 @@ pub enum DataValue {
     /// Unsigned 128-bit integer
     Uint128(u128),
     /// Array of values
-    Array(Vec<DataValue>),
+    Array(Vec<Self>),
     /// Boolean value
     Bool(bool),
     /// IEEE 754 single precision float
@@ -83,21 +83,21 @@ impl serde::Serialize for DataValue {
         S: serde::Serializer,
     {
         match self {
-            DataValue::Pointer(_) => Err(serde::ser::Error::custom(
+            Self::Pointer(_) => Err(serde::ser::Error::custom(
                 "Pointer is an internal type and cannot be serialized to JSON",
             )),
-            DataValue::String(s) => serializer.serialize_str(s),
-            DataValue::Double(d) => serializer.serialize_f64(*d),
-            DataValue::Bytes(b) => serializer.serialize_bytes(b),
-            DataValue::Uint16(n) => serializer.serialize_u16(*n),
-            DataValue::Uint32(n) => serializer.serialize_u32(*n),
-            DataValue::Map(m) => m.serialize(serializer),
-            DataValue::Int32(n) => serializer.serialize_i32(*n),
-            DataValue::Uint64(n) => serializer.serialize_u64(*n),
-            DataValue::Uint128(n) => serializer.serialize_u128(*n),
-            DataValue::Array(a) => a.serialize(serializer),
-            DataValue::Bool(b) => serializer.serialize_bool(*b),
-            DataValue::Float(f) => serializer.serialize_f32(*f),
+            Self::String(s) => serializer.serialize_str(s),
+            Self::Double(d) => serializer.serialize_f64(*d),
+            Self::Bytes(b) => serializer.serialize_bytes(b),
+            Self::Uint16(n) => serializer.serialize_u16(*n),
+            Self::Uint32(n) => serializer.serialize_u32(*n),
+            Self::Map(m) => m.serialize(serializer),
+            Self::Int32(n) => serializer.serialize_i32(*n),
+            Self::Uint64(n) => serializer.serialize_u64(*n),
+            Self::Uint128(n) => serializer.serialize_u128(*n),
+            Self::Array(a) => a.serialize(serializer),
+            Self::Bool(b) => serializer.serialize_bool(*b),
+            Self::Float(f) => serializer.serialize_f32(*f),
         }
     }
 }
@@ -125,30 +125,40 @@ impl<'de> serde::Deserialize<'de> for DataValue {
                 Ok(DataValue::Int32(v))
             }
 
-            fn visit_i64<E>(self, v: i64) -> Result<DataValue, E> {
+            fn visit_i64<E>(self, v: i64) -> Result<DataValue, E>
+            where
+                E: serde::de::Error,
+            {
                 // Choose appropriate integer type based on value
                 if v >= 0 {
-                    if v <= u16::MAX as i64 {
-                        Ok(DataValue::Uint16(v as u16))
-                    } else if v <= u32::MAX as i64 {
-                        Ok(DataValue::Uint32(v as u32))
+                    if v <= i64::from(u16::MAX) {
+                        Ok(DataValue::Uint16(u16::try_from(v).unwrap()))
+                    } else if v <= i64::from(u32::MAX) {
+                        Ok(DataValue::Uint32(u32::try_from(v).unwrap()))
                     } else {
-                        Ok(DataValue::Uint64(v as u64))
+                        Ok(DataValue::Uint64(u64::try_from(v).unwrap()))
                     }
-                } else if v >= i32::MIN as i64 {
-                    Ok(DataValue::Int32(v as i32))
+                } else if v >= i64::from(i32::MIN) {
+                    Ok(DataValue::Int32(i32::try_from(v).unwrap()))
                 } else {
-                    // For very large negative numbers, store as Double
-                    Ok(DataValue::Double(v as f64))
+                    // MMDB format only supports Int32 for signed integers.
+                    // Values outside i32 range cannot be stored without precision loss.
+                    Err(serde::de::Error::custom(format!(
+                        "value {v} is outside the supported signed integer range \
+                         ({} to {}). MMDB format only supports Int32. \
+                         Consider using a string or unsigned integer instead.",
+                        i32::MIN,
+                        i32::MAX
+                    )))
                 }
             }
 
             fn visit_u64<E>(self, v: u64) -> Result<DataValue, E> {
                 // Choose appropriate unsigned integer type
-                if v <= u16::MAX as u64 {
-                    Ok(DataValue::Uint16(v as u16))
-                } else if v <= u32::MAX as u64 {
-                    Ok(DataValue::Uint32(v as u32))
+                if v <= u64::from(u16::MAX) {
+                    Ok(DataValue::Uint16(u16::try_from(v).unwrap()))
+                } else if v <= u64::from(u32::MAX) {
+                    Ok(DataValue::Uint32(u32::try_from(v).unwrap()))
                 } else {
                     Ok(DataValue::Uint64(v))
                 }
@@ -212,16 +222,15 @@ impl Hash for DataValue {
         std::mem::discriminant(self).hash(state);
 
         match self {
-            DataValue::Pointer(v) => v.hash(state),
-            DataValue::String(v) => v.hash(state),
-            DataValue::Double(v) => {
+            Self::Pointer(v) | Self::Uint32(v) => v.hash(state),
+            Self::String(v) => v.hash(state),
+            Self::Double(v) => {
                 // For floats, hash the bit representation to handle NaN consistently
                 v.to_bits().hash(state);
             }
-            DataValue::Bytes(v) => v.hash(state),
-            DataValue::Uint16(v) => v.hash(state),
-            DataValue::Uint32(v) => v.hash(state),
-            DataValue::Map(m) => {
+            Self::Bytes(v) => v.hash(state),
+            Self::Uint16(v) => v.hash(state),
+            Self::Map(m) => {
                 // Hash maps require sorted keys for deterministic hashing
                 let mut keys: Vec<&String> = m.keys().collect();
                 keys.sort_unstable();
@@ -231,17 +240,17 @@ impl Hash for DataValue {
                     m[key].hash(state);
                 }
             }
-            DataValue::Int32(v) => v.hash(state),
-            DataValue::Uint64(v) => v.hash(state),
-            DataValue::Uint128(v) => v.hash(state),
-            DataValue::Array(v) => {
+            Self::Int32(v) => v.hash(state),
+            Self::Uint64(v) => v.hash(state),
+            Self::Uint128(v) => v.hash(state),
+            Self::Array(v) => {
                 v.len().hash(state);
                 for item in v {
                     item.hash(state);
                 }
             }
-            DataValue::Bool(v) => v.hash(state),
-            DataValue::Float(v) => {
+            Self::Bool(v) => v.hash(state),
+            Self::Float(v) => {
                 // For floats, hash the bit representation to handle NaN consistently
                 v.to_bits().hash(state);
             }
@@ -267,6 +276,7 @@ pub struct DataEncoder {
 
 impl DataEncoder {
     /// Create a new encoder with string interning enabled
+    #[must_use]
     pub fn new() -> Self {
         Self {
             buffer: Vec::new(),
@@ -277,6 +287,7 @@ impl DataEncoder {
     }
 
     /// Create a new encoder without string interning (legacy behavior)
+    #[must_use]
     pub fn new_without_interning() -> Self {
         Self {
             buffer: Vec::new(),
@@ -311,18 +322,20 @@ impl DataEncoder {
         }
 
         // New value - encode with interning
-        let offset = self.buffer.len() as u32;
+        let offset = u32::try_from(self.buffer.len()).expect("Data section exceeds u32::MAX bytes");
         self.encode_value_interned(value);
         self.dedup_map.insert(temp, offset);
         offset
     }
 
     /// Get the final encoded data section
+    #[must_use]
     pub fn into_bytes(self) -> Vec<u8> {
         self.buffer
     }
 
     /// Get current buffer size
+    #[must_use]
     pub fn size(&self) -> usize {
         self.buffer.len()
     }
@@ -339,7 +352,8 @@ impl DataEncoder {
                     Self::encode_pointer(existing_offset, &mut self.buffer);
                 } else {
                     // First occurrence - encode the string and cache its offset
-                    let offset = self.buffer.len() as u32;
+                    let offset = u32::try_from(self.buffer.len())
+                        .expect("Data section exceeds u32::MAX bytes");
                     Self::encode_string(s, &mut self.buffer);
                     self.string_cache.insert(s.clone(), offset);
                 }
@@ -472,7 +486,8 @@ impl DataEncoder {
                 if let Some(&existing_offset) = self.string_cache.get(key) {
                     Self::encode_pointer(existing_offset, &mut self.buffer);
                 } else {
-                    let offset = self.buffer.len() as u32;
+                    let offset = u32::try_from(self.buffer.len())
+                        .expect("Data section exceeds u32::MAX bytes");
                     Self::encode_string(key, &mut self.buffer);
                     self.string_cache.insert(key.clone(), offset);
                 }
@@ -528,20 +543,20 @@ impl DataEncoder {
 
         // Control byte: type 0 << 5 | size bits
         if size < 29 {
-            self.buffer.push(size as u8);
+            self.buffer.push(u8::try_from(size).unwrap());
         } else if size < 29 + 256 {
             self.buffer.push(29);
-            self.buffer.push((size - 29) as u8);
+            self.buffer.push(u8::try_from(size - 29).unwrap());
         } else if size < 29 + 256 + 65536 {
             self.buffer.push(30);
             let adjusted = size - 29 - 256;
             self.buffer
-                .extend_from_slice(&(adjusted as u16).to_be_bytes());
+                .extend_from_slice(&u16::try_from(adjusted).unwrap().to_be_bytes());
         } else {
             self.buffer.push(31);
             let adjusted = size - 29 - 256 - 65536;
             self.buffer
-                .extend_from_slice(&(adjusted as u32).to_be_bytes()[1..]);
+                .extend_from_slice(&u32::try_from(adjusted).unwrap().to_be_bytes()[1..]);
         }
 
         // Extended type byte
@@ -562,18 +577,18 @@ impl DataEncoder {
 
         // Control byte: type 0 << 5 | size bits
         if size < 29 {
-            buffer.push(size as u8); // Type 0, size in lower 5 bits
+            buffer.push(u8::try_from(size).unwrap());
         } else if size < 29 + 256 {
-            buffer.push(29); // Type 0, size = 29
-            buffer.push((size - 29) as u8);
+            buffer.push(29);
+            buffer.push(u8::try_from(size - 29).unwrap());
         } else if size < 29 + 256 + 65536 {
-            buffer.push(30); // Type 0, size = 30
+            buffer.push(30);
             let adjusted = size - 29 - 256;
-            buffer.extend_from_slice(&(adjusted as u16).to_be_bytes());
+            buffer.extend_from_slice(&u16::try_from(adjusted).unwrap().to_be_bytes());
         } else {
-            buffer.push(31); // Type 0, size = 31
+            buffer.push(31);
             let adjusted = size - 29 - 256 - 65536;
-            buffer.extend_from_slice(&(adjusted as u32).to_be_bytes()[1..]); // 3 bytes
+            buffer.extend_from_slice(&u32::try_from(adjusted).unwrap().to_be_bytes()[1..]);
         }
 
         // Extended type byte
@@ -606,18 +621,18 @@ impl DataEncoder {
         let type_bits = type_id << 5;
 
         if size < 29 {
-            buffer.push(type_bits | (size as u8));
+            buffer.push(type_bits | u8::try_from(size).unwrap());
         } else if size < 29 + 256 {
             buffer.push(type_bits | 29);
-            buffer.push((size - 29) as u8);
+            buffer.push(u8::try_from(size - 29).unwrap());
         } else if size < 29 + 256 + 65536 {
             buffer.push(type_bits | 30);
             let adjusted = size - 29 - 256;
-            buffer.extend_from_slice(&(adjusted as u16).to_be_bytes());
+            buffer.extend_from_slice(&u16::try_from(adjusted).unwrap().to_be_bytes());
         } else {
             buffer.push(type_bits | 31);
             let adjusted = size - 29 - 256 - 65536;
-            buffer.extend_from_slice(&(adjusted as u32).to_be_bytes()[1..]); // 3 bytes
+            buffer.extend_from_slice(&u32::try_from(adjusted).unwrap().to_be_bytes()[1..]);
         }
     }
 }
@@ -643,6 +658,7 @@ impl<'a> DataDecoder<'a> {
     /// # Arguments
     /// * `buffer` - The encoded data buffer
     /// * `base_offset` - Base offset for pointer calculations (0 for standalone data)
+    #[must_use]
     pub fn new(buffer: &'a [u8], base_offset: usize) -> Self {
         Self {
             buffer,
@@ -726,8 +742,8 @@ impl<'a> DataDecoder<'a> {
                 if *cursor >= self.buffer.len() {
                     return Err("Pointer data truncated");
                 }
-                let low_3_bits = (payload & 0x7) as u32;
-                let next_byte = self.buffer[*cursor] as u32;
+                let low_3_bits = u32::from(payload & 0x7);
+                let next_byte = u32::from(self.buffer[*cursor]);
                 *cursor += 1;
                 (low_3_bits << 8) | next_byte
             }
@@ -736,9 +752,9 @@ impl<'a> DataDecoder<'a> {
                 if *cursor + 1 >= self.buffer.len() {
                     return Err("Pointer data truncated");
                 }
-                let low_3_bits = (payload & 0x7) as u32;
-                let b0 = self.buffer[*cursor] as u32;
-                let b1 = self.buffer[*cursor + 1] as u32;
+                let low_3_bits = u32::from(payload & 0x7);
+                let b0 = u32::from(self.buffer[*cursor]);
+                let b1 = u32::from(self.buffer[*cursor + 1]);
                 *cursor += 2;
                 2048 + ((low_3_bits << 16) | (b0 << 8) | b1)
             }
@@ -747,10 +763,10 @@ impl<'a> DataDecoder<'a> {
                 if *cursor + 2 >= self.buffer.len() {
                     return Err("Pointer data truncated");
                 }
-                let low_3_bits = (payload & 0x7) as u32;
-                let b0 = self.buffer[*cursor] as u32;
-                let b1 = self.buffer[*cursor + 1] as u32;
-                let b2 = self.buffer[*cursor + 2] as u32;
+                let low_3_bits = u32::from(payload & 0x7);
+                let b0 = u32::from(self.buffer[*cursor]);
+                let b1 = u32::from(self.buffer[*cursor + 1]);
+                let b2 = u32::from(self.buffer[*cursor + 2]);
                 *cursor += 3;
                 526336 + ((low_3_bits << 24) | (b0 << 16) | (b1 << 8) | b2)
             }
@@ -823,7 +839,7 @@ impl<'a> DataDecoder<'a> {
         // Read variable number of bytes and convert to u16
         let mut value = 0u16;
         for i in 0..size {
-            value = (value << 8) | (self.buffer[*cursor + i] as u16);
+            value = (value << 8) | u16::from(self.buffer[*cursor + i]);
         }
         *cursor += size;
 
@@ -844,7 +860,7 @@ impl<'a> DataDecoder<'a> {
         // Read variable number of bytes and convert to u32
         let mut value = 0u32;
         for i in 0..size {
-            value = (value << 8) | (self.buffer[*cursor + i] as u32);
+            value = (value << 8) | u32::from(self.buffer[*cursor + i]);
         }
         *cursor += size;
 
@@ -900,7 +916,7 @@ impl<'a> DataDecoder<'a> {
             }
 
             for i in 0..size {
-                value = (value << 8) | (self.buffer[*cursor + i] as i32);
+                value = (value << 8) | i32::from(self.buffer[*cursor + i]);
             }
         }
         *cursor += size;
@@ -922,7 +938,7 @@ impl<'a> DataDecoder<'a> {
         // Read variable number of bytes and convert to u64
         let mut value = 0u64;
         for i in 0..size {
-            value = (value << 8) | (self.buffer[*cursor + i] as u64);
+            value = (value << 8) | u64::from(self.buffer[*cursor + i]);
         }
         *cursor += size;
 
@@ -943,7 +959,7 @@ impl<'a> DataDecoder<'a> {
         // Read variable number of bytes and convert to u128
         let mut value = 0u128;
         for i in 0..size {
-            value = (value << 8) | (self.buffer[*cursor + i] as u128);
+            value = (value << 8) | u128::from(self.buffer[*cursor + i]);
         }
         *cursor += size;
 
@@ -1355,7 +1371,24 @@ mod tests {
                 Some(&DataValue::String("shared_value".to_string()))
             );
         } else {
-            panic!("Expected Map, got {:?}", decoded);
+            panic!("Expected Map, got {decoded:?}");
         }
+    }
+
+    #[test]
+    fn test_large_negative_integer_rejected() {
+        let json = format!("{}", i64::MIN);
+        let result: Result<DataValue, _> = serde_json::from_str(&json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("outside the supported signed integer range"));
+    }
+
+    #[test]
+    fn test_i32_min_accepted() {
+        let json = format!("{}", i32::MIN);
+        let result: Result<DataValue, _> = serde_json::from_str(&json);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), DataValue::Int32(i32::MIN));
     }
 }

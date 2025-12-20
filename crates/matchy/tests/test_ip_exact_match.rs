@@ -93,7 +93,7 @@ fn test_sequential_ips_no_range_expansion() {
 
     for i in 0..10 {
         builder
-            .add_ip(&format!("10.0.0.{}", i), empty_data.clone())
+            .add_ip(&format!("10.0.0.{i}"), empty_data.clone())
             .unwrap();
     }
 
@@ -102,27 +102,25 @@ fn test_sequential_ips_no_range_expansion() {
 
     // Inserted IPs should match
     for i in 0..10 {
-        let ip = format!("10.0.0.{}", i).parse().unwrap();
+        let ip = format!("10.0.0.{i}").parse().unwrap();
         assert!(
             matches!(
                 db.lookup_ip(ip).unwrap(),
                 Some(matchy::database::QueryResult::Ip { .. })
             ),
-            "10.0.0.{} should be found",
-            i
+            "10.0.0.{i} should be found"
         );
     }
 
     // IPs beyond our range should NOT match
     for i in 10..20 {
-        let ip = format!("10.0.0.{}", i).parse().unwrap();
+        let ip = format!("10.0.0.{i}").parse().unwrap();
         assert!(
             matches!(
                 db.lookup_ip(ip).unwrap(),
                 Some(matchy::database::QueryResult::NotFound) | None
             ),
-            "10.0.0.{} should NOT be found (not inserted)",
-            i
+            "10.0.0.{i} should NOT be found (not inserted)"
         );
     }
 
@@ -222,12 +220,11 @@ fn test_cidr_vs_individual_ips() {
 
     // CIDR range should match
     for i in 0..4 {
-        let ip = format!("10.0.0.{}", i).parse().unwrap();
+        let ip = format!("10.0.0.{i}").parse().unwrap();
         let result = db.lookup_ip(ip).unwrap();
         assert!(
             matches!(result, Some(matchy::database::QueryResult::Ip { .. })),
-            "10.0.0.{} should match CIDR",
-            i
+            "10.0.0.{i} should match CIDR"
         );
     }
 

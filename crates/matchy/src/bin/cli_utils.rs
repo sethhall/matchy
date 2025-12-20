@@ -121,7 +121,7 @@ pub fn format_cidr_into(ip_str: &str, prefix_len: u8, buf: &mut String) {
                 };
                 let network_int = ip_int & mask;
                 let network = std::net::Ipv4Addr::from(network_int);
-                let _ = write!(buf, "{}/{}", network, prefix_len);
+                let _ = write!(buf, "{network}/{prefix_len}");
             }
             IpAddr::V6(ipv6) => {
                 let ip_int = u128::from(ipv6);
@@ -132,11 +132,11 @@ pub fn format_cidr_into(ip_str: &str, prefix_len: u8, buf: &mut String) {
                 };
                 let network_int = ip_int & mask;
                 let network = std::net::Ipv6Addr::from(network_int);
-                let _ = write!(buf, "{}/{}", network, prefix_len);
+                let _ = write!(buf, "{network}/{prefix_len}");
             }
         }
     } else {
-        let _ = write!(buf, "{}/{}", ip_str, prefix_len);
+        let _ = write!(buf, "{ip_str}/{prefix_len}");
     }
 }
 
@@ -154,7 +154,7 @@ pub fn format_number(n: usize) -> String {
 
 pub fn format_bytes(bytes: usize) -> String {
     if bytes < 1024 {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     } else if bytes < 1024 * 1024 {
         format!("{:.2} KB", bytes as f64 / 1024.0)
     } else if bytes < 1024 * 1024 * 1024 {
@@ -170,7 +170,7 @@ pub fn format_qps(qps: f64) -> String {
     } else if qps >= 1_000.0 {
         format!("{:.2}K", qps / 1_000.0)
     } else {
-        format!("{:.2}", qps)
+        format!("{qps:.2}")
     }
 }
 
@@ -216,7 +216,11 @@ pub fn json_to_data_value(json: &serde_json::Value) -> Result<DataValue> {
         serde_json::Value::Bool(b) => Ok(DataValue::Bool(*b)),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(DataValue::Int32(i as i32))
+                Ok(DataValue::Int32(i32::try_from(i).unwrap_or(if i < 0 {
+                    i32::MIN
+                } else {
+                    i32::MAX
+                })))
             } else if let Some(u) = n.as_u64() {
                 Ok(DataValue::Uint64(u))
             } else if let Some(f) = n.as_f64() {
@@ -245,8 +249,8 @@ pub fn json_to_data_value(json: &serde_json::Value) -> Result<DataValue> {
 
 pub fn extract_uint_from_datavalue(data: &DataValue) -> Option<u64> {
     match data {
-        DataValue::Uint16(u) => Some(*u as u64),
-        DataValue::Uint32(u) => Some(*u as u64),
+        DataValue::Uint16(u) => Some(u64::from(*u)),
+        DataValue::Uint32(u) => Some(u64::from(*u)),
         DataValue::Uint64(u) => Some(*u),
         _ => None,
     }
@@ -273,12 +277,9 @@ pub fn format_unix_timestamp(timestamp: u64) -> String {
             // Calculate date from days since epoch (1970-01-01)
             let (year, month, day) = days_to_ymd(days);
 
-            format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
-                year, month, day, hours, minutes, seconds
-            )
+            format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02} UTC")
         }
-        Err(_) => format!("Invalid timestamp: {}", timestamp),
+        Err(_) => format!("Invalid timestamp: {timestamp}"),
     }
 }
 
@@ -321,16 +322,16 @@ fn is_leap_year(year: u64) -> bool {
 
 pub fn format_data_value(data: &DataValue, indent: &str) -> String {
     match data {
-        DataValue::String(s) => format!("\"{}\"", s),
-        DataValue::Double(d) => format!("{}", d),
-        DataValue::Bytes(b) => format!("{:?}", b),
-        DataValue::Uint16(u) => format!("{}", u),
-        DataValue::Uint32(u) => format!("{}", u),
-        DataValue::Uint64(u) => format!("{}", u),
-        DataValue::Uint128(u) => format!("{}", u),
-        DataValue::Int32(i) => format!("{}", i),
-        DataValue::Bool(b) => format!("{}", b),
-        DataValue::Float(f) => format!("{}", f),
+        DataValue::String(s) => format!("\"{s}\""),
+        DataValue::Double(d) => format!("{d}"),
+        DataValue::Bytes(b) => format!("{b:?}"),
+        DataValue::Uint16(u) => format!("{u}"),
+        DataValue::Uint32(u) => format!("{u}"),
+        DataValue::Uint64(u) => format!("{u}"),
+        DataValue::Uint128(u) => format!("{u}"),
+        DataValue::Int32(i) => format!("{i}"),
+        DataValue::Bool(b) => format!("{b}"),
+        DataValue::Float(f) => format!("{f}"),
         DataValue::Map(entries) => {
             if entries.is_empty() {
                 "{}".to_string()
@@ -341,10 +342,10 @@ pub fn format_data_value(data: &DataValue, indent: &str) -> String {
                         "{}  {}: {},\n",
                         indent,
                         k,
-                        format_data_value(v, &format!("{}  ", indent))
+                        format_data_value(v, &format!("{indent}  "))
                     ));
                 }
-                result.push_str(&format!("{}}}", indent));
+                result.push_str(&format!("{indent}}}"));
                 result
             }
         }

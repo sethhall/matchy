@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load MISP JSON files
     println!("📁 Loading MISP JSON files:");
     for file in json_files {
-        println!("   • {}", file);
+        println!("   • {file}");
     }
     println!();
 
@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Save to file
     let output_file = "misp_threat_intel.mmdb";
     fs::write(output_file, &database_bytes)?;
-    println!("✅ Database saved to: {}\n", output_file);
+    println!("✅ Database saved to: {output_file}\n");
 
     // Demonstrate database usage
     println!("🔍 Testing database queries...\n");
@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = &db_result {
         println!("   ℹ️  Note: Pattern-only databases require direct Paraglob loading");
         println!("   (This is normal when there are no IP addresses in the data)");
-        println!("   Error: {:?}\n", e);
+        println!("   Error: {e:?}\n");
 
         println!("╔════════════════════════════════════════════════════════════════╗");
         println!("║  Database built successfully!                                  ║");
@@ -110,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for (query, description) in test_queries {
-        print!("   Query: {} ({})", query, description);
+        print!("   Query: {query} ({description})");
 
         match db.lookup(query)? {
             Some(result) => match result {
@@ -120,10 +120,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("      Type: {:?}", map.get("type"));
                         println!("      Event: {:?}", map.get("event_info"));
                         if let Some(tags) = map.get("tags") {
-                            println!("      Tags: {:?}", tags);
+                            println!("      Tags: {tags:?}");
                         }
                         if let Some(threat) = map.get("threat_level") {
-                            println!("      Threat Level: {:?}", threat);
+                            println!("      Threat Level: {threat:?}");
                         }
                     }
                 }
@@ -133,10 +133,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("      Type: {:?}", map.get("type"));
                         println!("      Event: {:?}", map.get("event_info"));
                         if let Some(tags) = map.get("tags") {
-                            println!("      Tags: {:?}", tags);
+                            println!("      Tags: {tags:?}");
                         }
                         if let Some(threat) = map.get("threat_level") {
-                            println!("      Threat Level: {:?}", threat);
+                            println!("      Threat Level: {threat:?}");
                         }
                     }
                 }

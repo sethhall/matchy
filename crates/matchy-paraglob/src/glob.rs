@@ -26,7 +26,7 @@ pub enum GlobError {
 impl fmt::Display for GlobError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GlobError::InvalidPattern(msg) => write!(f, "Invalid glob pattern: {}", msg),
+            Self::InvalidPattern(msg) => write!(f, "Invalid glob pattern: {msg}"),
         }
     }
 }
@@ -355,8 +355,7 @@ impl GlobPattern {
                             let end = class_ch;
                             if start > end {
                                 return Err(GlobError::InvalidPattern(format!(
-                                    "Invalid character range: {}-{}",
-                                    start, end
+                                    "Invalid character range: {start}-{end}"
                                 )));
                             }
                             class_items.push(CharClassItem::Range(start, end));

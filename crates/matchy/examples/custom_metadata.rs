@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_file = "custom_metadata.mmdb";
     std::fs::write(output_file, &database_bytes)?;
 
-    println!("✓ Database created: {}", output_file);
+    println!("✓ Database created: {output_file}");
     println!("  Size: {} bytes", database_bytes.len());
     println!("\nMetadata:");
     println!("  Database Type: MyCompany-ThreatIntel");
@@ -75,12 +75,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("    [fr] Base de données de renseignements sur les menaces");
 
     println!("\nYou can query it with:");
-    println!("  paraglob query {} 198.51.100.50 --data", output_file);
-    println!(
-        "  paraglob query {} malware.phishing-site.com --data",
-        output_file
-    );
-    println!("  mmdblookup --file {} --ip 198.51.100.50", output_file);
+    println!("  paraglob query {output_file} 198.51.100.50 --data");
+    println!("  paraglob query {output_file} malware.phishing-site.com --data");
+    println!("  mmdblookup --file {output_file} --ip 198.51.100.50");
 
     Ok(())
 }

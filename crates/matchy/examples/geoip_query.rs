@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = &args[1];
 
     // Open the GeoIP database
-    println!("Loading database: {}", db_path);
+    println!("Loading database: {db_path}");
     let db = Database::from(db_path).open()?;
     println!("Database format: {}\n", db.format());
 
@@ -46,15 +46,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn query_ip(db: &Database, ip: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Querying IP: {}", ip);
+    println!("Querying IP: {ip}");
 
     match db.lookup(ip)? {
         Some(QueryResult::Ip {
             data, prefix_len, ..
         }) => {
             println!("  ✓ Found in database");
-            println!("  Prefix length: /{}", prefix_len);
-            println!("  Data: {:#?}", data);
+            println!("  Prefix length: /{prefix_len}");
+            println!("  Data: {data:#?}");
         }
         Some(QueryResult::NotFound) => {
             println!("  ✗ Not found in database (e.g., private/reserved IP)");

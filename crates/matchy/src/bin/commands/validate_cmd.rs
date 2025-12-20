@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use matchy::validation::{validate_database, ValidationLevel};
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
 
 pub fn cmd_validate(
-    database: PathBuf,
-    level_str: String,
+    database: &Path,
+    level_str: &str,
     json_output: bool,
     verbose: bool,
 ) -> Result<()> {
@@ -15,16 +15,13 @@ pub fn cmd_validate(
         "standard" => ValidationLevel::Standard,
         "strict" => ValidationLevel::Strict,
         _ => {
-            anyhow::bail!(
-                "Invalid validation level: '{}'. Must be: standard or strict",
-                level_str
-            );
+            anyhow::bail!("Invalid validation level: '{level_str}'. Must be: standard or strict");
         }
     };
 
     // Validate the database
     let start = Instant::now();
-    let report = validate_database(&database, level)
+    let report = validate_database(database, level)
         .with_context(|| format!("Validation failed: {}", database.display()))?;
     let duration = start.elapsed();
 
@@ -58,7 +55,7 @@ pub fn cmd_validate(
     } else {
         // Human-readable output
         println!("Validating: {}", database.display());
-        println!("Level:      {}", level_str);
+        println!("Level:      {level_str}");
         println!();
 
         // Statistics
@@ -71,7 +68,7 @@ pub fn cmd_validate(
         if !report.errors.is_empty() {
             println!("❌ ERRORS ({}):", report.errors.len());
             for error in &report.errors {
-                println!("  • {}", error);
+                println!("  • {error}");
             }
             println!();
         }
@@ -80,7 +77,7 @@ pub fn cmd_validate(
         if !report.warnings.is_empty() && verbose {
             println!("⚠️  WARNINGS ({}):", report.warnings.len());
             for warning in &report.warnings {
-                println!("  • {}", warning);
+                println!("  • {warning}");
             }
             println!();
         } else if !report.warnings.is_empty() {
@@ -95,7 +92,7 @@ pub fn cmd_validate(
         if verbose && !report.info.is_empty() {
             println!("ℹ️  INFORMATION ({}):", report.info.len());
             for info in &report.info {
-                println!("  • {}", info);
+                println!("  • {info}");
             }
             println!();
         }

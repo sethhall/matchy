@@ -113,7 +113,7 @@ fn bench_domain_extraction(c: &mut Criterion) {
 
             group.throughput(Throughput::Bytes(text_bytes.len() as u64));
             group.bench_with_input(
-                BenchmarkId::new(format!("size_{}", size), density),
+                BenchmarkId::new(format!("size_{size}"), density),
                 &text_bytes,
                 |b, bytes| {
                     b.iter(|| {

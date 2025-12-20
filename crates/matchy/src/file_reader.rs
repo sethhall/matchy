@@ -113,6 +113,7 @@ pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Box<dyn BufRead + Send>> {
 /// let reader = file_reader::from_file(file, true);
 /// # Ok::<(), std::io::Error>(())
 /// ```
+#[must_use]
 pub fn from_file(file: File, is_gzip: bool) -> Box<dyn BufRead + Send> {
     if is_gzip {
         let decoder = GzDecoder::new(file);

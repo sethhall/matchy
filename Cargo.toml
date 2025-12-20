@@ -68,7 +68,43 @@ tempfile = "3.8"
 proptest = "1.9"
 
 [workspace.lints.clippy]
+# Safety
 undocumented_unsafe_blocks = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+ptr_as_ptr = "warn"
+
+# Correctness
+must_use_candidate = "warn"
+return_self_not_must_use = "warn"
+redundant_closure_for_method_calls = "warn"
+
+# Idiomatic Rust
+uninlined_format_args = "warn"
+use_self = "warn"
+semicolon_if_nothing_returned = "warn"
+if_not_else = "warn"
+match_same_arms = "allow"  # Keep explicit arms for documentation
+cloned_instead_of_copied = "warn"
+flat_map_option = "warn"
+unnecessary_wraps = "warn"
+needless_pass_by_value = "warn"
+implicit_clone = "warn"
+inconsistent_struct_constructor = "warn"
+trivially_copy_pass_by_ref = "warn"
+
+# Performance
+cast_lossless = "warn"
+
+# Too noisy - disable explicitly
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+struct_excessive_bools = "allow"
 
 [profile.release]
 opt-level = 3

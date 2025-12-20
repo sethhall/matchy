@@ -56,8 +56,7 @@ fn test_ip_specific_before_subnet() {
         // Should match the /32 entry (most specific)
         assert_eq!(
             prefix_len, 32,
-            "Expected /32 prefix length, got /{}",
-            prefix_len
+            "Expected /32 prefix length, got /{prefix_len}"
         );
 
         let category = match &data {
@@ -77,8 +76,7 @@ fn test_ip_specific_before_subnet() {
         // Should match the /32 entry, not the /24
         assert_eq!(
             category, "single ip address!!!",
-            "Expected longest prefix match (/32), but got: {}",
-            category
+            "Expected longest prefix match (/32), but got: {category}"
         );
     }
 }
@@ -130,8 +128,7 @@ fn test_ip_specific_after_subnet() {
         // Should match the /32 entry (most specific)
         assert_eq!(
             prefix_len, 32,
-            "Expected /32 prefix length, got /{}",
-            prefix_len
+            "Expected /32 prefix length, got /{prefix_len}"
         );
 
         let category = match &data {
@@ -151,8 +148,7 @@ fn test_ip_specific_after_subnet() {
         // Should match the /32 entry
         assert_eq!(
             category, "single ip address!!!",
-            "Expected longest prefix match (/32), but got: {}",
-            category
+            "Expected longest prefix match (/32), but got: {category}"
         );
     }
 }

@@ -47,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for (description, line) in &test_cases {
-        println!("📋 {}", description);
+        println!("📋 {description}");
         println!("   Input: {}", String::from_utf8_lossy(line));
 
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     HashType::Sha384 => "SHA384",
                     HashType::Sha512 => "SHA512",
                 };
-                println!("   ✅ {}: {}", type_str, hash);
+                println!("   ✅ {type_str}: {hash}");
             }
         }
         println!();
@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for (description, line) in &rejection_cases {
-        println!("❌ {} - REJECTED", description);
+        println!("❌ {description} - REJECTED");
         println!("   Input: {}", String::from_utf8_lossy(line));
 
         let matches: Vec<_> = extractor.extract_from_line(line).collect();
@@ -155,7 +155,7 @@ Line 6: Uppercase SHA1 2FD4E1C67A2D28FCED849EE1BB76E7391B93EB12
             HashType::Sha384 => "SHA384",
             HashType::Sha512 => "SHA512",
         };
-        println!("   {} {}", type_str, hash);
+        println!("   {type_str} {hash}");
     }
 
     println!("\n=== Algorithm Details ===");

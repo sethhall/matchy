@@ -18,11 +18,11 @@ pub struct ExtractorConfig {
 }
 
 impl ExtractorConfig {
-    pub fn from_arg(arg: Option<String>) -> Self {
+    pub fn from_arg(arg: Option<&str>) -> Self {
         let mut overrides = HashMap::new();
         let mut has_enables = false;
 
-        if let Some(ref extractors_str) = arg {
+        if let Some(extractors_str) = arg {
             for extractor in extractors_str.split(',') {
                 let extractor = extractor.trim();
                 let (is_disable, name) = if let Some(name) = extractor.strip_prefix('-') {
@@ -85,7 +85,7 @@ pub use matchy::processing::DataBatch;
 /// Reader count is determined dynamically by the library based on workload simulation
 fn auto_tune_worker_count() -> usize {
     std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(std::num::NonZero::get)
         .unwrap_or(4)
         .max(1)
 }
@@ -113,7 +113,7 @@ pub use matchy::processing::WorkerStats;
 /// - File types (compressed vs uncompressed)
 #[allow(clippy::too_many_arguments)]
 pub fn process_parallel(
-    inputs: Vec<PathBuf>,
+    inputs: &[PathBuf],
     db: Arc<matchy::Database>,
     num_threads: usize,
     explicit_readers: Option<usize>,
@@ -122,7 +122,7 @@ pub fn process_parallel(
     _show_stats: bool,
     _show_progress: bool,
     _overall_start: Instant,
-    extractor_config: ExtractorConfig,
+    extractor_config: &ExtractorConfig,
     debug_routing: bool,
 ) -> Result<(
     ProcessingStats,
@@ -166,7 +166,7 @@ pub fn process_parallel(
 
             // Create extractor
             let extractor = create_extractor_for_db(&db_clone, &ext_config)
-                .map_err(|e| format!("Extractor init failed: {}", e))?;
+                .map_err(|e| format!("Extractor init failed: {e}"))?;
 
             // Create worker with shared database
             let worker = matchy::processing::Worker::builder()
@@ -192,7 +192,7 @@ pub fn process_parallel(
         }),
         debug_routing, // Pass debug flag to library
     )
-    .map_err(|e| anyhow::anyhow!("Parallel processing failed: {}", e))?;
+    .map_err(|e| anyhow::anyhow!("Parallel processing failed: {e}"))?;
 
     // Print newline after progress if it was shown
     if _show_progress {

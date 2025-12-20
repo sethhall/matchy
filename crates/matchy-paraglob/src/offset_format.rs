@@ -195,17 +195,18 @@ pub enum StateKind {
 
 impl StateKind {
     /// Lookup table for fast u8 -> StateKind conversion
-    const LOOKUP: [Option<StateKind>; 256] = {
+    const LOOKUP: [Option<Self>; 256] = {
         let mut table = [None; 256];
-        table[0] = Some(StateKind::Empty);
-        table[1] = Some(StateKind::One);
-        table[2] = Some(StateKind::Sparse);
-        table[3] = Some(StateKind::Dense);
+        table[0] = Some(Self::Empty);
+        table[1] = Some(Self::One);
+        table[2] = Some(Self::Sparse);
+        table[3] = Some(Self::Dense);
         table
     };
 
     /// Convert from u8 (for deserialization) - O(1) lookup
     #[inline(always)]
+    #[must_use]
     pub const fn from_u8(value: u8) -> Option<Self> {
         Self::LOOKUP[value as usize]
     }
@@ -483,6 +484,7 @@ impl Default for ParaglobHeader {
 
 impl PatternDataMapping {
     /// Create a new pattern-to-data mapping
+    #[must_use]
     pub fn new(pattern_id: u32, data_offset: u32, data_size: u32) -> Self {
         Self {
             pattern_id,
@@ -494,6 +496,7 @@ impl PatternDataMapping {
 
 impl ParaglobHeader {
     /// Create a new v3 header with magic and version
+    #[must_use]
     pub fn new() -> Self {
         Self {
             magic: *MAGIC,
@@ -609,23 +612,27 @@ impl ParaglobHeader {
     }
 
     /// Check if this file has a data section
+    #[must_use]
     pub fn has_data_section(&self) -> bool {
         self.data_section_size > 0
     }
 
     /// Check if this file has a pre-built AC literal mapping (v3+)
+    #[must_use]
     pub fn has_ac_literal_mapping(&self) -> bool {
         self.ac_literal_map_count > 0 && self.ac_literal_map_offset > 0
     }
 
     /// Check if data is inline (true) or external references (false)
     #[allow(dead_code)] // Reserved for future use
+    #[must_use]
     pub fn has_inline_data(&self) -> bool {
         (self.data_flags & 0x1) != 0
     }
 
     /// Check if this file has pre-built glob segments (v5+)
     #[allow(dead_code)] // Reserved for v5 format implementation
+    #[must_use]
     pub fn has_glob_segments(&self) -> bool {
         self.glob_segments_size > 0 && self.glob_segments_offset > 0
     }
@@ -634,6 +641,7 @@ impl ParaglobHeader {
 impl ACNode {
     /// Create a new node with default EMPTY encoding
     #[allow(dead_code)]
+    #[must_use]
     pub fn new(node_id: u32, depth: u8) -> Self {
         Self {
             node_id,
@@ -657,6 +665,7 @@ impl ACNode {
 impl ACEdge {
     /// Create a new edge
     #[allow(dead_code)] // Used by builder code in other crates
+    #[must_use]
     pub fn new(character: u8, target_offset: u32) -> Self {
         Self {
             character,
@@ -668,6 +677,7 @@ impl ACEdge {
 
 impl PatternEntry {
     /// Create a new pattern entry
+    #[must_use]
     pub fn new(pattern_id: u32, pattern_type: u8) -> Self {
         Self {
             pattern_id,
@@ -688,9 +698,10 @@ impl PatternEntry {
 /// - Buffer is properly aligned for T
 /// - Bytes represent a valid T
 #[allow(dead_code)]
+#[must_use]
 pub unsafe fn read_struct<T: Copy>(buffer: &[u8], offset: usize) -> T {
     debug_assert!(offset + mem::size_of::<T>() <= buffer.len());
-    let ptr = buffer.as_ptr().add(offset) as *const T;
+    let ptr = buffer.as_ptr().add(offset).cast::<T>();
     ptr.read_unaligned()
 }
 
@@ -702,9 +713,10 @@ pub unsafe fn read_struct<T: Copy>(buffer: &[u8], offset: usize) -> T {
 /// - offset + `size_of::<T>`() * count <= buffer.len()
 /// - Buffer contains valid T values
 #[allow(dead_code)]
+#[must_use]
 pub unsafe fn read_struct_slice<T: Copy>(buffer: &[u8], offset: usize, count: usize) -> &[T] {
     debug_assert!(offset + mem::size_of::<T>() * count <= buffer.len());
-    let ptr = buffer.as_ptr().add(offset) as *const T;
+    let ptr = buffer.as_ptr().add(offset).cast::<T>();
     std::slice::from_raw_parts(ptr, count)
 }
 
@@ -770,6 +782,7 @@ pub unsafe fn read_cstring_with_len(
 /// - Length is correct
 #[inline]
 #[allow(dead_code)]
+#[must_use]
 pub unsafe fn read_str_unchecked(buffer: &[u8], offset: usize, length: usize) -> &str {
     debug_assert!(offset + length <= buffer.len());
     // SAFETY: Caller guarantees valid UTF-8
@@ -887,7 +900,7 @@ mod tests {
         // SAFETY: buffer is exactly 112 bytes (v5 header size), properly allocated,
         // and ParaglobHeader is #[repr(C)] with size 112.
         unsafe {
-            let ptr = buffer.as_mut_ptr() as *mut ParaglobHeader;
+            let ptr = buffer.as_mut_ptr().cast::<ParaglobHeader>();
             ptr.write(header);
         }
 

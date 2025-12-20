@@ -64,11 +64,11 @@ pub struct AnalysisConfig {
 pub fn analyze_performance(
     stats: &ProcessingStats,
     total_time: Duration,
-    config: AnalysisConfig,
+    config: &AnalysisConfig,
 ) -> PerformanceAnalysis {
     // Get available parallelism (more reliable than gdt_cpus, especially on ARM)
     let physical_cores = std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(std::num::NonZero::get)
         .unwrap_or(1);
     let total_secs = total_time.as_secs_f64();
 
@@ -205,8 +205,7 @@ pub fn analyze_performance(
                 ));
             } else {
                 recs.push(format!(
-                    "Already at {} cores (hardware limit)",
-                    physical_cores
+                    "Already at {physical_cores} cores (hardware limit)"
                 ));
             }
 
@@ -277,7 +276,7 @@ mod tests {
             num_readers: 4,
         };
 
-        let analysis = analyze_performance(&stats, total_time, config);
+        let analysis = analyze_performance(&stats, total_time, &config);
 
         // Should detect I/O saturation, NOT recommend more workers
         assert!(matches!(analysis.bottleneck, Bottleneck::DiskRead { .. }));
@@ -312,7 +311,7 @@ mod tests {
             num_readers: 1,
         };
 
-        let analysis = analyze_performance(&stats, total_time, config);
+        let analysis = analyze_performance(&stats, total_time, &config);
 
         // Should detect CPU bottleneck
         assert!(matches!(
@@ -356,7 +355,7 @@ mod tests {
             num_readers: 2,
         };
 
-        let analysis = analyze_performance(&stats, total_time, config);
+        let analysis = analyze_performance(&stats, total_time, &config);
 
         // Should detect reader starvation
         assert!(matches!(

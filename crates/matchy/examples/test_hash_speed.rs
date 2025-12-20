@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_truncation)]
+
 use matchy::MatchMode;
 use matchy_literal_hash::LiteralHashBuilder;
 use std::time::Instant;
@@ -9,10 +11,10 @@ fn main() {
         .unwrap_or(10_000);
 
     let patterns: Vec<String> = (0..count)
-        .map(|i| format!("test_pattern_number_{}", i))
+        .map(|i| format!("test_pattern_number_{i}"))
         .collect();
 
-    println!("Testing hash table build with {} literals...", count);
+    println!("Testing hash table build with {count} literals...");
 
     let start = Instant::now();
 
@@ -26,7 +28,7 @@ fn main() {
     let result = builder.build(&data_offsets).unwrap();
 
     let elapsed = start.elapsed();
-    println!("Built hash table in: {:?}", elapsed);
+    println!("Built hash table in: {elapsed:?}");
     println!("Per pattern: {:?}", elapsed / count);
     println!("Table size: {} bytes", result.len());
 }

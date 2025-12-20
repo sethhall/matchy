@@ -30,6 +30,7 @@ pub struct SearchTree<'a> {
 
 impl<'a> SearchTree<'a> {
     /// Create a new search tree
+    #[must_use]
     pub fn new(data: &'a [u8], header: &'a MmdbHeader) -> Self {
         Self { data, header }
     }
@@ -105,7 +106,7 @@ impl<'a> SearchTree<'a> {
                 (bits.1 >> (127 - bit_index)) & 1
             };
 
-            let record = self.read_record(node as usize, bit as u8)?;
+            let record = self.read_record(node as usize, u8::try_from(bit).unwrap())?;
 
             if record == self.header.node_count {
                 return Ok(None);
@@ -130,7 +131,7 @@ impl<'a> SearchTree<'a> {
     /// - 0 = left record (for IP bit 0)
     /// - 1 = right record (for IP bit 1)
     fn read_record(&self, node: usize, side: u8) -> Result<u32, MmdbError> {
-        if node as u32 >= self.header.node_count {
+        if node >= usize::try_from(self.header.node_count).unwrap_or(usize::MAX) {
             return Err(MmdbError::InvalidFormat(format!(
                 "Node index {} exceeds node count {}",
                 node, self.header.node_count
@@ -157,9 +158,9 @@ impl<'a> SearchTree<'a> {
         }
 
         // Read 3 bytes in big-endian order
-        let b0 = self.data[record_offset] as u32;
-        let b1 = self.data[record_offset + 1] as u32;
-        let b2 = self.data[record_offset + 2] as u32;
+        let b0 = u32::from(self.data[record_offset]);
+        let b1 = u32::from(self.data[record_offset + 1]);
+        let b2 = u32::from(self.data[record_offset + 2]);
 
         Ok((b0 << 16) | (b1 << 8) | b2)
     }
@@ -182,13 +183,15 @@ impl<'a> SearchTree<'a> {
 
         if side == 0 {
             // Left record: bytes[0..3] with 4 high bits from middle byte
-            let high_bits = ((bytes[3] >> 4) & 0x0F) as u32;
-            let low_bits = ((bytes[0] as u32) << 16) | ((bytes[1] as u32) << 8) | (bytes[2] as u32);
+            let high_bits = u32::from((bytes[3] >> 4) & 0x0F);
+            let low_bits =
+                (u32::from(bytes[0]) << 16) | (u32::from(bytes[1]) << 8) | u32::from(bytes[2]);
             Ok((high_bits << 24) | low_bits)
         } else {
             // Right record: bytes[4..7] with 4 low bits from middle byte
-            let high_bits = (bytes[3] & 0x0F) as u32;
-            let low_bits = ((bytes[4] as u32) << 16) | ((bytes[5] as u32) << 8) | (bytes[6] as u32);
+            let high_bits = u32::from(bytes[3] & 0x0F);
+            let low_bits =
+                (u32::from(bytes[4]) << 16) | (u32::from(bytes[5]) << 8) | u32::from(bytes[6]);
             Ok((high_bits << 24) | low_bits)
         }
     }
@@ -206,10 +209,10 @@ impl<'a> SearchTree<'a> {
         }
 
         // Read 4 bytes in big-endian order
-        let b0 = self.data[record_offset] as u32;
-        let b1 = self.data[record_offset + 1] as u32;
-        let b2 = self.data[record_offset + 2] as u32;
-        let b3 = self.data[record_offset + 3] as u32;
+        let b0 = u32::from(self.data[record_offset]);
+        let b1 = u32::from(self.data[record_offset + 1]);
+        let b2 = u32::from(self.data[record_offset + 2]);
+        let b3 = u32::from(self.data[record_offset + 3]);
 
         Ok((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
     }
@@ -280,23 +283,23 @@ impl<'a> SearchTree<'a> {
 /// Convert IPv4 address to 32-bit integer
 fn ipv4_to_bits(addr: Ipv4Addr) -> u32 {
     let octets = addr.octets();
-    ((octets[0] as u32) << 24)
-        | ((octets[1] as u32) << 16)
-        | ((octets[2] as u32) << 8)
-        | (octets[3] as u32)
+    (u32::from(octets[0]) << 24)
+        | (u32::from(octets[1]) << 16)
+        | (u32::from(octets[2]) << 8)
+        | u32::from(octets[3])
 }
 
 /// Convert IPv6 address to 128-bit integer (as two u64s)
 fn ipv6_to_bits(addr: Ipv6Addr) -> (u64, u64) {
     let segments = addr.segments();
-    let high = ((segments[0] as u64) << 48)
-        | ((segments[1] as u64) << 32)
-        | ((segments[2] as u64) << 16)
-        | (segments[3] as u64);
-    let low = ((segments[4] as u64) << 48)
-        | ((segments[5] as u64) << 32)
-        | ((segments[6] as u64) << 16)
-        | (segments[7] as u64);
+    let high = (u64::from(segments[0]) << 48)
+        | (u64::from(segments[1]) << 32)
+        | (u64::from(segments[2]) << 16)
+        | u64::from(segments[3]);
+    let low = (u64::from(segments[4]) << 48)
+        | (u64::from(segments[5]) << 32)
+        | (u64::from(segments[6]) << 16)
+        | u64::from(segments[7]);
     (high, low)
 }
 

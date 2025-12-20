@@ -3,7 +3,7 @@
 //! Internal module providing background file watching and optional HTTP updates.
 //! This functionality is exposed through the unified `Database` type.
 
-use crate::database::{next_cache_generation, Database, DatabaseError, DatabaseOptions};
+use crate::database::{next_cache_generation, Database, DatabaseOptions};
 use arc_swap::ArcSwap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -126,10 +126,10 @@ pub(crate) struct LiveOptions {
 impl LiveOptions {
     pub(crate) fn start_updater(
         &self,
-        path: PathBuf,
+        path: &Path,
         initial_db: Database,
         cache_capacity: Option<usize>,
-    ) -> Result<LiveState, DatabaseError> {
+    ) -> LiveState {
         let initial_gen = next_cache_generation();
 
         #[cfg(feature = "auto-update")]
@@ -151,7 +151,7 @@ impl LiveOptions {
         let thread_previous = Arc::clone(&previous);
         let thread_generation = Arc::clone(&generation);
         let thread_shutdown = Arc::clone(&shutdown);
-        let thread_path = path.clone();
+        let thread_path = path.to_path_buf();
         let thread_callback = self.reload_callback.clone();
         let thread_cache_capacity = cache_capacity;
         let poll_interval = self
@@ -165,7 +165,7 @@ impl LiveOptions {
         #[cfg(feature = "auto-update")]
         let thread_cache_dir = cache_dir;
         #[cfg(feature = "auto-update")]
-        let thread_original_path = path;
+        let thread_original_path = path.to_path_buf();
 
         let handle = thread::spawn(move || {
             let mut last_mtime: Option<SystemTime> = get_file_mtime(&thread_path);
@@ -281,7 +281,7 @@ impl LiveOptions {
             }
         });
 
-        Ok(LiveState {
+        LiveState {
             current,
             previous,
             generation,
@@ -290,7 +290,7 @@ impl LiveOptions {
                 shutdown,
                 handle: Some(handle),
             },
-        })
+        }
     }
 }
 
@@ -337,7 +337,7 @@ pub(crate) fn check_for_update(
     use ureq::AgentBuilder;
 
     if let Err(e) = std::fs::create_dir_all(cache_dir) {
-        return UpdateCheckResult::Error(format!("Failed to create cache dir: {}", e));
+        return UpdateCheckResult::Error(format!("Failed to create cache dir: {e}"));
     }
 
     let agent = AgentBuilder::new()
@@ -358,7 +358,7 @@ pub(crate) fn check_for_update(
 
             let new_etag = response
                 .header("ETag")
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .unwrap_or_else(|| {
                     SystemTime::now()
                         .duration_since(SystemTime::UNIX_EPOCH)
@@ -382,8 +382,7 @@ pub(crate) fn check_for_update(
                                 if total_bytes > MAX_DOWNLOAD_SIZE {
                                     let _ = std::fs::remove_file(&temp_path);
                                     return UpdateCheckResult::Error(format!(
-                                        "Download exceeds maximum size of {} bytes",
-                                        MAX_DOWNLOAD_SIZE
+                                        "Download exceeds maximum size of {MAX_DOWNLOAD_SIZE} bytes"
                                     ));
                                 }
                                 if file.write_all(&buffer[..n]).is_err() {
@@ -393,7 +392,7 @@ pub(crate) fn check_for_update(
                             }
                             Err(e) => {
                                 let _ = std::fs::remove_file(&temp_path);
-                                return UpdateCheckResult::Error(format!("Read failed: {}", e));
+                                return UpdateCheckResult::Error(format!("Read failed: {e}"));
                             }
                         }
                     }
@@ -408,11 +407,11 @@ pub(crate) fn check_for_update(
                         path: cached_path,
                     }
                 }
-                Err(e) => UpdateCheckResult::Error(format!("Failed to create temp file: {}", e)),
+                Err(e) => UpdateCheckResult::Error(format!("Failed to create temp file: {e}")),
             }
         }
         Err(ureq::Error::Status(304, _)) => UpdateCheckResult::NotModified,
-        Err(e) => UpdateCheckResult::Error(format!("HTTP request failed: {}", e)),
+        Err(e) => UpdateCheckResult::Error(format!("HTTP request failed: {e}")),
     }
 }
 
@@ -683,7 +682,7 @@ mod auto_update_tests {
                 let db_content = fs::read(&path).unwrap();
                 assert_eq!(db_content, db_bytes);
             }
-            other => panic!("Expected NewVersion, got {:?}", other),
+            other => panic!("Expected NewVersion, got {other:?}"),
         }
     }
 
@@ -709,7 +708,7 @@ mod auto_update_tests {
 
         match result {
             UpdateCheckResult::NotModified => {}
-            other => panic!("Expected NotModified, got {:?}", other),
+            other => panic!("Expected NotModified, got {other:?}"),
         }
     }
 
@@ -740,7 +739,7 @@ mod auto_update_tests {
             UpdateCheckResult::NewVersion { etag, .. } => {
                 assert_eq!(etag, "\"v2\"");
             }
-            other => panic!("Expected NewVersion, got {:?}", other),
+            other => panic!("Expected NewVersion, got {other:?}"),
         }
     }
 
@@ -755,7 +754,7 @@ mod auto_update_tests {
 
         match result {
             UpdateCheckResult::Error(_) => {}
-            other => panic!("Expected Error, got {:?}", other),
+            other => panic!("Expected Error, got {other:?}"),
         }
     }
 
@@ -784,7 +783,7 @@ mod auto_update_tests {
             UpdateCheckResult::NewVersion { etag, .. } => {
                 assert!(!etag.is_empty(), "Should generate fallback etag");
             }
-            other => panic!("Expected NewVersion, got {:?}", other),
+            other => panic!("Expected NewVersion, got {other:?}"),
         }
     }
 
@@ -855,8 +854,7 @@ mod auto_update_tests {
         let reloads = reload_count.load(Ordering::SeqCst);
         assert!(
             reloads >= 1,
-            "Should have reloaded at least once, got {}",
-            reloads
+            "Should have reloaded at least once, got {reloads}"
         );
 
         assert!(
@@ -889,8 +887,7 @@ mod auto_update_tests {
                 let err = e.to_string();
                 assert!(
                     err.contains("update URL") || err.contains("auto-update"),
-                    "Error should mention missing update URL: {}",
-                    err
+                    "Error should mention missing update URL: {err}"
                 );
             }
         }
@@ -947,8 +944,7 @@ mod auto_update_tests {
         let reloads = reload_count.load(Ordering::SeqCst);
         assert_eq!(
             reloads, 0,
-            "Should NOT reload when server returns 304, got {} reloads",
-            reloads
+            "Should NOT reload when server returns 304, got {reloads} reloads"
         );
 
         assert!(

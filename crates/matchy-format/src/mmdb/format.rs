@@ -45,13 +45,14 @@ impl MmdbHeader {
         let decoder = DataDecoder::new(metadata_bytes, 0);
         let metadata_value = decoder
             .decode(0)
-            .map_err(|e| MmdbError::InvalidMetadata(format!("Failed to decode metadata: {}", e)))?;
+            .map_err(|e| MmdbError::InvalidMetadata(format!("Failed to decode metadata: {e}")))?;
 
         // Extract required fields (temporary allocation during parsing)
         let (node_count, record_size_bits, ip_version_num) = match metadata_value {
             DataValue::Map(ref map) => {
                 let node_count = extract_uint(map, "node_count")?;
-                let record_size = extract_uint(map, "record_size")? as u16;
+                let record_size = u16::try_from(extract_uint(map, "record_size")?)
+                    .map_err(|_| MmdbError::InvalidMetadata("record_size too large".to_string()))?;
                 let ip_version = extract_uint(map, "ip_version")?;
                 (node_count, record_size, ip_version)
             }
@@ -69,17 +70,20 @@ impl MmdbHeader {
             6 => IpVersion::V6,
             _ => {
                 return Err(MmdbError::InvalidMetadata(format!(
-                    "Invalid IP version: {}",
-                    ip_version_num
+                    "Invalid IP version: {ip_version_num}"
                 )))
             }
         };
 
         // Calculate tree size
-        let tree_size = (node_count as usize) * record_size.node_bytes();
+        let node_count_u32 = u32::try_from(node_count)
+            .map_err(|_| MmdbError::InvalidMetadata("node_count exceeds u32::MAX".to_string()))?;
+        let tree_size = usize::try_from(node_count)
+            .map_err(|_| MmdbError::InvalidMetadata("node_count exceeds usize".to_string()))?
+            * record_size.node_bytes();
 
-        Ok(MmdbHeader {
-            node_count: node_count as u32,
+        Ok(Self {
+            node_count: node_count_u32,
             record_size,
             ip_version,
             tree_size,
@@ -156,16 +160,14 @@ fn extract_uint(
     key: &str,
 ) -> Result<u64, MmdbError> {
     match map.get(key) {
-        Some(DataValue::Uint16(n)) => Ok(*n as u64),
-        Some(DataValue::Uint32(n)) => Ok(*n as u64),
+        Some(DataValue::Uint16(n)) => Ok(u64::from(*n)),
+        Some(DataValue::Uint32(n)) => Ok(u64::from(*n)),
         Some(DataValue::Uint64(n)) => Ok(*n),
         Some(_) => Err(MmdbError::InvalidMetadata(format!(
-            "Field '{}' is not an unsigned integer",
-            key
+            "Field '{key}' is not an unsigned integer"
         ))),
         None => Err(MmdbError::InvalidMetadata(format!(
-            "Required field '{}' not found",
-            key
+            "Required field '{key}' not found"
         ))),
     }
 }
@@ -182,7 +184,7 @@ mod tests {
 
         let offset = marker_offset.unwrap();
         println!("Total file size: {} bytes", data.len());
-        println!("Marker found at offset: {}", offset);
+        println!("Marker found at offset: {offset}");
         println!(
             "Marker: {:?}",
             &data[offset..offset + METADATA_MARKER.len()]
@@ -218,7 +220,7 @@ mod tests {
         let data = include_bytes!("../../tests/data/GeoLite2-Country.mmdb");
         let header = MmdbHeader::from_file(data);
         if let Err(ref e) = header {
-            println!("Error parsing header: {}", e);
+            println!("Error parsing header: {e}");
         }
         assert!(header.is_ok(), "Should parse header successfully");
 
@@ -236,7 +238,7 @@ mod tests {
             IpVersion::V4 | IpVersion::V6 => {}
         }
 
-        println!("Header: {:?}", header);
+        println!("Header: {header:?}");
         println!("Heap usage: ~{} bytes", std::mem::size_of_val(&header));
     }
 
@@ -261,11 +263,11 @@ mod tests {
             // Check build_epoch
             if let Some(epoch_value) = map.get("build_epoch") {
                 let epoch_num = match epoch_value {
-                    DataValue::Uint32(n) => *n as u64,
+                    DataValue::Uint32(n) => u64::from(*n),
                     DataValue::Uint64(n) => *n,
                     _ => panic!("build_epoch has unexpected type"),
                 };
-                println!("Build epoch: {}", epoch_num);
+                println!("Build epoch: {epoch_num}");
                 assert!(epoch_num > 0);
             }
         } else {

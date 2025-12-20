@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let matched_text = item.as_str(log_line);
                 let match_type = item.item.type_name();
 
-                print!("  ⚠️  THREAT: {} ({})", matched_text, match_type);
+                print!("  ⚠️  THREAT: {matched_text} ({match_type})");
 
                 // Extract threat intel data
                 match result {
@@ -80,14 +80,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ..
                     } => {
                         if let Some(DataValue::String(desc)) = map.get("threat") {
-                            print!(" - {}", desc);
+                            print!(" - {desc}");
                         }
                     }
                     matchy::QueryResult::Pattern { data, .. } => {
                         for d in data.iter().flatten() {
                             if let DataValue::Map(map) = d {
                                 if let Some(DataValue::String(desc)) = map.get("threat") {
-                                    print!(" - {}", desc);
+                                    print!(" - {desc}");
                                 }
                             }
                         }

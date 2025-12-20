@@ -5,8 +5,8 @@ use std::time::Instant;
 use crate::cli_utils::{format_bytes, format_number, format_qps};
 use crate::commands::bench::BenchConfig;
 
-pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
-    let BenchConfig {
+pub fn bench_literal_database(config: &BenchConfig) -> Result<()> {
+    let &BenchConfig {
         count,
         temp_file,
         keep,
@@ -48,17 +48,17 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
                 let cat = categories[i % categories.len()];
                 let svc = services[(i / 10) % services.len()];
                 let tld = tlds[i % tlds.len()];
-                format!("{}-{}-{}.example.{}", cat, svc, i, tld)
+                format!("{cat}-{svc}-{i}.example.{tld}")
             }
             1 => {
                 // URL path literals
                 let cat = categories[i % categories.len()];
-                format!("/api/v2/{}/endpoint/{}/resource", cat, i)
+                format!("/api/v2/{cat}/endpoint/{i}/resource")
             }
             2 => {
                 // File path literals
                 let svc = services[i % services.len()];
-                format!("/var/log/{}/application-{}.log", svc, i)
+                format!("/var/log/{svc}/application-{i}.log")
             }
             3 => {
                 // Email-style literals
@@ -81,7 +81,7 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
                 // Database table.column literals
                 let cat = categories[i % categories.len()];
                 let svc = services[i % services.len()];
-                format!("{}_table_{}.{}_column", cat, i, svc)
+                format!("{cat}_table_{i}.{svc}_column")
             }
             6 => {
                 // API key style literals
@@ -101,13 +101,13 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
             8 => {
                 // Git branch/tag literals
                 let cat = categories[i % categories.len()];
-                format!("feature/{}-implementation-{}", cat, i)
+                format!("feature/{cat}-implementation-{i}")
             }
             _ => {
                 // Simple identifier literals
                 let cat = categories[i % categories.len()];
                 let svc = services[i % services.len()];
-                format!("{}_{}_{}", cat, svc, i)
+                format!("{cat}_{svc}_{i}")
             }
         };
         builder.add_literal(&literal, empty_data.clone())?;
@@ -151,7 +151,8 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
             load_time.as_micros() as f64 / 1000.0
         );
     }
-    let avg_load = load_times.iter().sum::<std::time::Duration>() / load_iterations as u32;
+    let avg_load = load_times.iter().sum::<std::time::Duration>()
+        / u32::try_from(load_iterations).unwrap_or(1);
     println!("  Average:  {:.3}ms", avg_load.as_micros() as f64 / 1000.0);
     println!();
 
@@ -195,10 +196,7 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
         // Determine if this query should hit (match) based on hit_rate
         let should_hit = (query_idx * 100 / unique_queries) < hit_rate;
 
-        let test_str = if !should_hit {
-            // Generate non-matching query
-            format!("nomatch-query-string-{}", query_idx)
-        } else {
+        let test_str = if should_hit {
             // Generate matching query - must exactly match one of the patterns
             let pattern_id = (query_idx * 43) % count;
 
@@ -207,15 +205,15 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
                     let cat = categories[pattern_id % categories.len()];
                     let svc = services[(pattern_id / 10) % services.len()];
                     let tld = tlds[pattern_id % tlds.len()];
-                    format!("{}-{}-{}.example.{}", cat, svc, pattern_id, tld)
+                    format!("{cat}-{svc}-{pattern_id}.example.{tld}")
                 }
                 1 => {
                     let cat = categories[pattern_id % categories.len()];
-                    format!("/api/v2/{}/endpoint/{}/resource", cat, pattern_id)
+                    format!("/api/v2/{cat}/endpoint/{pattern_id}/resource")
                 }
                 2 => {
                     let svc = services[pattern_id % services.len()];
-                    format!("/var/log/{}/application-{}.log", svc, pattern_id)
+                    format!("/var/log/{svc}/application-{pattern_id}.log")
                 }
                 3 => {
                     let cat = categories[pattern_id % categories.len()];
@@ -239,7 +237,7 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
                 5 => {
                     let cat = categories[pattern_id % categories.len()];
                     let svc = services[pattern_id % services.len()];
-                    format!("{}_table_{}.{}_column", cat, pattern_id, svc)
+                    format!("{cat}_table_{pattern_id}.{svc}_column")
                 }
                 6 => format!("sk_live_{:016x}_{:016x}", pattern_id, pattern_id * 7),
                 7 => {
@@ -254,14 +252,17 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
                 }
                 8 => {
                     let cat = categories[pattern_id % categories.len()];
-                    format!("feature/{}-implementation-{}", cat, pattern_id)
+                    format!("feature/{cat}-implementation-{pattern_id}")
                 }
                 _ => {
                     let cat = categories[pattern_id % categories.len()];
                     let svc = services[pattern_id % services.len()];
-                    format!("{}_{}_{}", cat, svc, pattern_id)
+                    format!("{cat}_{svc}_{pattern_id}")
                 }
             }
+        } else {
+            // Generate non-matching query
+            format!("nomatch-query-string-{query_idx}")
         };
 
         if let Some(matchy::QueryResult::Pattern { pattern_ids, .. }) = db.lookup(&test_str)? {
@@ -273,7 +274,7 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
 
     let bench_time = bench_start.elapsed();
     let qps = query_count as f64 / bench_time.as_secs_f64();
-    let avg_query = bench_time / query_count as u32;
+    let avg_query = bench_time / u32::try_from(query_count).unwrap_or(1);
 
     println!("  Query count: {}", format_number(query_count));
     println!("  Total time:  {:.2}s", bench_time.as_secs_f64());
@@ -289,11 +290,11 @@ pub fn bench_literal_database(config: BenchConfig) -> Result<()> {
     );
     println!();
 
-    if !keep {
+    if keep {
+        println!("✓ Benchmark complete (file kept: {})", temp_file.display());
+    } else {
         std::fs::remove_file(temp_file)?;
         println!("✓ Benchmark complete (temp file removed)");
-    } else {
-        println!("✓ Benchmark complete (file kept: {})", temp_file.display());
     }
 
     Ok(())

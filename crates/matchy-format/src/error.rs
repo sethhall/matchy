@@ -26,14 +26,14 @@ pub enum FormatError {
 impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FormatError::InvalidIpAddress(msg) => write!(f, "Invalid IP address: {}", msg),
-            FormatError::InvalidPattern(msg) => write!(f, "Invalid pattern: {}", msg),
-            FormatError::IpTreeError(msg) => write!(f, "IP tree error: {}", msg),
-            FormatError::PatternError(msg) => write!(f, "Pattern error: {}", msg),
-            FormatError::LiteralHashError(msg) => write!(f, "Literal hash error: {}", msg),
-            FormatError::IoError(msg) => write!(f, "I/O error: {}", msg),
-            FormatError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
-            FormatError::Other(msg) => write!(f, "{}", msg),
+            Self::InvalidIpAddress(msg) => write!(f, "Invalid IP address: {msg}"),
+            Self::InvalidPattern(msg) => write!(f, "Invalid pattern: {msg}"),
+            Self::IpTreeError(msg) => write!(f, "IP tree error: {msg}"),
+            Self::PatternError(msg) => write!(f, "Pattern error: {msg}"),
+            Self::LiteralHashError(msg) => write!(f, "Literal hash error: {msg}"),
+            Self::IoError(msg) => write!(f, "I/O error: {msg}"),
+            Self::ValidationError(msg) => write!(f, "Validation error: {msg}"),
+            Self::Other(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -43,37 +43,37 @@ impl std::error::Error for FormatError {}
 // Conversions from component errors
 impl From<matchy_paraglob::error::ParaglobError> for FormatError {
     fn from(err: matchy_paraglob::error::ParaglobError) -> Self {
-        FormatError::PatternError(err.to_string())
+        Self::PatternError(err.to_string())
     }
 }
 
 impl From<matchy_literal_hash::LiteralHashError> for FormatError {
     fn from(err: matchy_literal_hash::LiteralHashError) -> Self {
-        FormatError::LiteralHashError(err.to_string())
+        Self::LiteralHashError(err.to_string())
     }
 }
 
 impl From<matchy_ip_trie::IpTreeError> for FormatError {
     fn from(err: matchy_ip_trie::IpTreeError) -> Self {
-        FormatError::IpTreeError(err.to_string())
+        Self::IpTreeError(err.to_string())
     }
 }
 
 impl From<std::io::Error> for FormatError {
     fn from(err: std::io::Error) -> Self {
-        FormatError::IoError(err.to_string())
+        Self::IoError(err.to_string())
     }
 }
 
 impl From<String> for FormatError {
     fn from(s: String) -> Self {
-        FormatError::Other(s)
+        Self::Other(s)
     }
 }
 
 impl From<&str> for FormatError {
     fn from(s: &str) -> Self {
-        FormatError::Other(s.to_string())
+        Self::Other(s.to_string())
     }
 }
 
@@ -83,17 +83,16 @@ impl From<&str> for FormatError {
 // so the caller can handle both types uniformly.
 impl From<FormatError> for matchy_paraglob::error::ParaglobError {
     fn from(err: FormatError) -> Self {
-        use matchy_paraglob::error::ParaglobError;
         match err {
             FormatError::InvalidIpAddress(msg) | FormatError::InvalidPattern(msg) => {
-                ParaglobError::InvalidPattern(msg)
+                Self::InvalidPattern(msg)
             }
-            FormatError::IoError(msg) => ParaglobError::Io(msg),
+            FormatError::IoError(msg) => Self::Io(msg),
             FormatError::IpTreeError(msg)
             | FormatError::PatternError(msg)
             | FormatError::LiteralHashError(msg)
             | FormatError::ValidationError(msg)
-            | FormatError::Other(msg) => ParaglobError::Other(msg),
+            | FormatError::Other(msg) => Self::Other(msg),
         }
     }
 }

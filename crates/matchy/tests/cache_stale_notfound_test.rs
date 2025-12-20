@@ -84,15 +84,10 @@ fn test_stale_notfound_does_not_persist() {
         // Verify DB_A doesn't have the IP
         assert!(
             !is_match(&result_a),
-            "DB_A should NOT match {}, but got: {:?}",
-            test_ip,
-            result_a
+            "DB_A should NOT match {test_ip}, but got: {result_a:?}"
         );
 
-        println!(
-            "DB_A lookup for {}: {:?} (expected NotFound)",
-            test_ip, result_a
-        );
+        println!("DB_A lookup for {test_ip}: {result_a:?} (expected NotFound)");
 
         // DB_A goes out of scope and is dropped here
     }
@@ -112,22 +107,17 @@ fn test_stale_notfound_does_not_persist() {
         // this assertion will FAIL
         assert!(
             is_match(&result_b),
-            "BUG: DB_B SHOULD match {} but got {:?} - stale NotFound from DB_A persisted!",
-            test_ip,
-            result_b
+            "BUG: DB_B SHOULD match {test_ip} but got {result_b:?} - stale NotFound from DB_A persisted!"
         );
 
-        println!(
-            "DB_B lookup for {}: {:?} (expected match)",
-            test_ip, result_b
-        );
+        println!("DB_B lookup for {test_ip}: {result_b:?} (expected match)");
 
         // Verify we got the right data
         if let Some(QueryResult::Ip {
             data, prefix_len, ..
         }) = result_b
         {
-            println!("  Matched with prefix_len={}, data={:?}", prefix_len, data);
+            println!("  Matched with prefix_len={prefix_len}, data={data:?}");
         }
     }
 
@@ -186,15 +176,10 @@ fn test_stale_match_does_not_persist() {
 
         assert!(
             is_match(&result_a),
-            "DB_A should match {}, but got: {:?}",
-            test_ip,
-            result_a
+            "DB_A should match {test_ip}, but got: {result_a:?}"
         );
 
-        println!(
-            "DB_A lookup for {}: {:?} (expected match)",
-            test_ip, result_a
-        );
+        println!("DB_A lookup for {test_ip}: {result_a:?} (expected match)");
     }
 
     // Step 2: Open DB_B and query the SAME IP - should NOT MATCH
@@ -212,15 +197,10 @@ fn test_stale_match_does_not_persist() {
         // this assertion will FAIL
         assert!(
             !is_match(&result_b),
-            "BUG: DB_B should NOT match {} but got {:?} - stale match from DB_A persisted!",
-            test_ip,
-            result_b
+            "BUG: DB_B should NOT match {test_ip} but got {result_b:?} - stale match from DB_A persisted!"
         );
 
-        println!(
-            "DB_B lookup for {}: {:?} (expected NotFound)",
-            test_ip, result_b
-        );
+        println!("DB_B lookup for {test_ip}: {result_b:?} (expected NotFound)");
     }
 
     println!("SUCCESS: Stale match did NOT persist across database instances");
@@ -325,7 +305,7 @@ fn test_same_path_reload_gets_fresh_results() {
 
         let result = db.lookup(test_ip).expect("Lookup failed");
         assert!(!is_match(&result), "Initial DB should NOT match");
-        println!("Initial lookup: {:?}", result);
+        println!("Initial lookup: {result:?}");
     }
 
     // OVERWRITE the same file with new content that HAS the IP
@@ -355,12 +335,10 @@ fn test_same_path_reload_gets_fresh_results() {
         // THIS IS THE CRITICAL TEST for reload scenario
         assert!(
             is_match(&result),
-            "BUG: Reloaded DB should match {} but got {:?} - stale cache from previous open!",
-            test_ip,
-            result
+            "BUG: Reloaded DB should match {test_ip} but got {result:?} - stale cache from previous open!"
         );
 
-        println!("Reloaded lookup: {:?}", result);
+        println!("Reloaded lookup: {result:?}");
     }
 
     println!("SUCCESS: Same path reload gets fresh results");

@@ -139,6 +139,7 @@ impl SchemaValidator {
     }
 
     /// Get the schema name
+    #[must_use]
     pub fn schema_name(&self) -> &str {
         &self.schema_name
     }
@@ -146,6 +147,7 @@ impl SchemaValidator {
     /// Get the canonical database_type that should be set in metadata
     ///
     /// Returns None if this validator was created from custom JSON (not a built-in type)
+    #[must_use]
     pub fn database_type(&self) -> Option<&'static str> {
         get_schema_info(&self.schema_name).map(|info| info.database_type)
     }
@@ -167,6 +169,7 @@ impl SchemaValidator {
     }
 
     /// Validate and return a detailed result (useful for collecting all errors)
+    #[must_use]
     pub fn validate_detailed(
         &self,
         data: &HashMap<String, DataValue>,
@@ -197,8 +200,7 @@ fn validate_threatdb(data: &HashMap<String, DataValue>) -> Vec<ValidationErrorDe
                 errors.push(ValidationErrorDetail {
                     path: "/threat_level".to_string(),
                     message: format!(
-                        "\"{}\" is not one of [\"critical\", \"high\", \"medium\", \"low\", \"unknown\"]",
-                        s
+                        "\"{s}\" is not one of [\"critical\", \"high\", \"medium\", \"low\", \"unknown\"]"
                     ),
                 });
             }
@@ -262,7 +264,7 @@ fn validate_threatdb(data: &HashMap<String, DataValue>) -> Vec<ValidationErrorDe
                 if *n > 100 {
                     errors.push(ValidationErrorDetail {
                         path: "/confidence".to_string(),
-                        message: format!("{} is greater than the maximum of 100", n),
+                        message: format!("{n} is greater than the maximum of 100"),
                     });
                 }
             }
@@ -270,12 +272,12 @@ fn validate_threatdb(data: &HashMap<String, DataValue>) -> Vec<ValidationErrorDe
                 if *n < 0 {
                     errors.push(ValidationErrorDetail {
                         path: "/confidence".to_string(),
-                        message: format!("{} is less than the minimum of 0", n),
+                        message: format!("{n} is less than the minimum of 0"),
                     });
                 } else if *n > 100 {
                     errors.push(ValidationErrorDetail {
                         path: "/confidence".to_string(),
-                        message: format!("{} is greater than the maximum of 100", n),
+                        message: format!("{n} is greater than the maximum of 100"),
                     });
                 }
             }
@@ -283,7 +285,7 @@ fn validate_threatdb(data: &HashMap<String, DataValue>) -> Vec<ValidationErrorDe
                 if *n > 100 {
                     errors.push(ValidationErrorDetail {
                         path: "/confidence".to_string(),
-                        message: format!("{} is greater than the maximum of 100", n),
+                        message: format!("{n} is greater than the maximum of 100"),
                     });
                 }
             }
@@ -291,7 +293,7 @@ fn validate_threatdb(data: &HashMap<String, DataValue>) -> Vec<ValidationErrorDe
                 if *n > 100 {
                     errors.push(ValidationErrorDetail {
                         path: "/confidence".to_string(),
-                        message: format!("{} is greater than the maximum of 100", n),
+                        message: format!("{n} is greater than the maximum of 100"),
                     });
                 }
             }
@@ -312,8 +314,7 @@ fn validate_threatdb(data: &HashMap<String, DataValue>) -> Vec<ValidationErrorDe
                     errors.push(ValidationErrorDetail {
                         path: "/tlp".to_string(),
                         message: format!(
-                            "\"{}\" is not one of [\"CLEAR\", \"GREEN\", \"AMBER\", \"AMBER+STRICT\", \"RED\"]",
-                            s
+                            "\"{s}\" is not one of [\"CLEAR\", \"GREEN\", \"AMBER\", \"AMBER+STRICT\", \"RED\"]"
                         ),
                     });
                 }
@@ -334,7 +335,7 @@ fn validate_threatdb(data: &HashMap<String, DataValue>) -> Vec<ValidationErrorDe
                 for (i, item) in arr.iter().enumerate() {
                     if !matches!(item, DataValue::String(_)) {
                         errors.push(ValidationErrorDetail {
-                            path: format!("/tags/{}", i),
+                            path: format!("/tags/{i}"),
                             message: "expected string type".to_string(),
                         });
                     }
@@ -374,7 +375,7 @@ fn validate_threatdb(data: &HashMap<String, DataValue>) -> Vec<ValidationErrorDe
         if let Some(v) = data.get(*field) {
             if !matches!(v, DataValue::String(_)) {
                 errors.push(ValidationErrorDetail {
-                    path: format!("/{}", field),
+                    path: format!("/{field}"),
                     message: "expected string type".to_string(),
                 });
             }
@@ -397,7 +398,7 @@ impl EntryValidator for SchemaValidator {
         data: &HashMap<String, DataValue>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.validate(data).map_err(|e| {
-            let error_msg = format!("Entry '{}': {}", key, e);
+            let error_msg = format!("Entry '{key}': {e}");
             Box::new(SchemaValidationError {
                 errors: vec![ValidationErrorDetail {
                     path: String::new(),
@@ -486,11 +487,10 @@ mod tests {
         let err = result.unwrap_err();
         assert!(!err.errors.is_empty());
         // Should mention missing required properties
-        let error_text = format!("{}", err);
+        let error_text = format!("{err}");
         assert!(
             error_text.contains("category") || error_text.contains("source"),
-            "Error should mention missing field: {}",
-            error_text
+            "Error should mention missing field: {error_text}"
         );
     }
 
@@ -506,11 +506,10 @@ mod tests {
         let result = validator.validate(&data);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let error_text = format!("{}", err);
+        let error_text = format!("{err}");
         assert!(
             error_text.contains("threat_level"),
-            "Error should mention invalid enum: {}",
-            error_text
+            "Error should mention invalid enum: {error_text}"
         );
     }
 
@@ -523,11 +522,10 @@ mod tests {
         let result = validator.validate(&data);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let error_text = format!("{}", err);
+        let error_text = format!("{err}");
         assert!(
             error_text.contains("confidence") || error_text.contains("maximum"),
-            "Error should mention confidence range: {}",
-            error_text
+            "Error should mention confidence range: {error_text}"
         );
     }
 
@@ -611,7 +609,7 @@ mod tests {
             ],
         };
 
-        let display = format!("{}", err);
+        let display = format!("{err}");
         assert!(display.contains("2 errors"));
         assert!(display.contains("threat_level"));
         assert!(display.contains("confidence"));

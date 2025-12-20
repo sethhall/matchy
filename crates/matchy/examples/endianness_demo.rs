@@ -71,11 +71,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n4. Testing queries...");
 
     if let Some(result) = db.lookup("test.example.com")? {
-        println!("   ✓ Match found: test.example.com -> {:?}", result);
+        println!("   ✓ Match found: test.example.com -> {result:?}");
     }
 
     if let Some(result) = db.lookup("test_file.txt")? {
-        println!("   ✓ Match found: test_file.txt -> {:?}", result);
+        println!("   ✓ Match found: test_file.txt -> {result:?}");
     }
 
     // Performance note

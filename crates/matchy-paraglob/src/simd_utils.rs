@@ -57,7 +57,10 @@ unsafe fn ascii_lowercase_simd_x86(text: &[u8], output: &mut Vec<u8>) {
     let simd_end = len - (len % 16);
 
     // Constants for SIMD lowercase
+    // SAFETY: 'A' (65) and 'Z' (90) are well within i8 range (-128..127)
+    #[allow(clippy::cast_possible_wrap)]
     let upper_a = _mm_set1_epi8(b'A' as i8 - 1); // 0x40
+    #[allow(clippy::cast_possible_wrap)]
     let upper_z = _mm_set1_epi8(b'Z' as i8 + 1); // 0x5B
     let to_lower = _mm_set1_epi8(32); // Add 32 to convert to lowercase
 
@@ -65,7 +68,7 @@ unsafe fn ascii_lowercase_simd_x86(text: &[u8], output: &mut Vec<u8>) {
     let mut i = 0;
     while i < simd_end {
         // Load 16 bytes (unaligned is fine on modern x86)
-        let chunk = _mm_loadu_si128(text.as_ptr().add(i) as *const __m128i);
+        let chunk = _mm_loadu_si128(text.as_ptr().add(i).cast::<__m128i>());
 
         // Check if byte > 'A'-1 (>= 'A')
         let gt_a = _mm_cmpgt_epi8(chunk, upper_a);
@@ -83,7 +86,10 @@ unsafe fn ascii_lowercase_simd_x86(text: &[u8], output: &mut Vec<u8>) {
         // so we have capacity for all SIMD writes. We write before set_len to
         // ensure the bytes are initialized before we claim they exist.
         let old_len = output.len();
-        _mm_storeu_si128(output.as_mut_ptr().add(old_len) as *mut __m128i, lowercased);
+        _mm_storeu_si128(
+            output.as_mut_ptr().add(old_len).cast::<__m128i>(),
+            lowercased,
+        );
         output.set_len(old_len + 16);
 
         i += 16;

@@ -278,10 +278,8 @@ mod tests {
         assert!(MATCHY_VERSION_PATCH.parse::<u32>().is_ok());
 
         // Verify full version matches format
-        let expected = format!(
-            "{}.{}.{}",
-            MATCHY_VERSION_MAJOR, MATCHY_VERSION_MINOR, MATCHY_VERSION_PATCH
-        );
+        let expected =
+            format!("{MATCHY_VERSION_MAJOR}.{MATCHY_VERSION_MINOR}.{MATCHY_VERSION_PATCH}");
         assert_eq!(MATCHY_VERSION, expected);
     }
 }

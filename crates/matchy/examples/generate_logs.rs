@@ -2,6 +2,8 @@
 //!
 //! Generates realistic-looking log files with embedded IP addresses and domains.
 
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+
 use std::io::{self, Write};
 
 fn main() -> io::Result<()> {
@@ -12,7 +14,7 @@ fn main() -> io::Result<()> {
         1.0
     };
 
-    eprintln!("Generating {:.2} GB of log data...", size_gb);
+    eprintln!("Generating {size_gb:.2} GB of log data...");
 
     let target_bytes = (size_gb * 1024.0 * 1024.0 * 1024.0) as usize;
     let mut bytes_written = 0;
@@ -56,17 +58,14 @@ fn main() -> io::Result<()> {
 
         let line = match line_num % 4 {
             0 => format!(
-                "2025-10-14 05:45:00 INFO Connection from {} to {} succeeded\n",
-                ip, domain
+                "2025-10-14 05:45:00 INFO Connection from {ip} to {domain} succeeded\n"
             ),
-            1 => format!("2025-10-14 05:45:01 WARN Authentication failure from {}\n", ip),
+            1 => format!("2025-10-14 05:45:01 WARN Authentication failure from {ip}\n"),
             2 => format!(
-                "2025-10-14 05:45:02 ERROR Failed to resolve {} for client {}\n",
-                domain, ip
+                "2025-10-14 05:45:02 ERROR Failed to resolve {domain} for client {ip}\n"
             ),
             _ => format!(
-                "2025-10-14 05:45:03 DEBUG Processing request from {} to https://{}/api/v1/endpoint\n",
-                ip, domain
+                "2025-10-14 05:45:03 DEBUG Processing request from {ip} to https://{domain}/api/v1/endpoint\n"
             ),
         };
 

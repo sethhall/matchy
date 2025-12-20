@@ -20,7 +20,7 @@ impl OutputFormat {
             "json" => Ok(Self::Json),
             "csv" => Ok(Self::Csv),
             "text" => Ok(Self::Text),
-            _ => anyhow::bail!("Invalid format '{}', expected: json, csv, or text", s),
+            _ => anyhow::bail!("Invalid format '{s}', expected: json, csv, or text"),
         }
     }
 }
@@ -38,9 +38,9 @@ struct ExtractionStats {
 
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_extract(
-    inputs: Vec<PathBuf>,
-    format: String,
-    types: Option<String>,
+    inputs: &[PathBuf],
+    format: &str,
+    types: Option<&str>,
     min_labels: usize,
     no_boundaries: bool,
     unique: bool,
@@ -48,13 +48,13 @@ pub fn cmd_extract(
     show_candidates: bool,
 ) -> Result<()> {
     // Parse format
-    let output_format = OutputFormat::from_str(&format)?;
+    let output_format = OutputFormat::from_str(format)?;
 
     // Parse extraction types
     let (extract_ipv4, extract_ipv6, extract_domains, extract_emails) =
         if let Some(type_str) = types {
             let types_lower = type_str.to_lowercase();
-            let parts: Vec<&str> = types_lower.split(',').map(|s| s.trim()).collect();
+            let parts: Vec<&str> = types_lower.split(',').map(str::trim).collect();
 
             let mut ipv4 = false;
             let mut ipv6 = false;
@@ -78,8 +78,7 @@ pub fn cmd_extract(
                         emails = true;
                     }
                     _ => anyhow::bail!(
-                    "Unknown extraction type '{}', expected: ipv4, ipv6, ip, domain, email, all",
-                    part
+                    "Unknown extraction type '{part}', expected: ipv4, ipv6, ip, domain, email, all"
                 ),
                 }
             }
@@ -122,10 +121,10 @@ pub fn cmd_extract(
 
         eprintln!("[INFO] Extracting: {}", enabled.join(", "));
         if extract_domains {
-            eprintln!("[INFO] Min domain labels: {}", min_labels);
+            eprintln!("[INFO] Min domain labels: {min_labels}");
         }
         eprintln!("[INFO] Word boundaries: {}", !no_boundaries);
-        eprintln!("[INFO] Unique mode: {}", unique);
+        eprintln!("[INFO] Unique mode: {unique}");
     }
 
     let start_time = Instant::now();
@@ -145,7 +144,7 @@ pub fn cmd_extract(
     }
 
     // Process each input file
-    for input_path in &inputs {
+    for input_path in inputs {
         process_file(
             input_path,
             &extractor,
@@ -266,7 +265,7 @@ fn process_file<W: Write>(
                     )?;
                 }
                 OutputFormat::Text => {
-                    writeln!(writer, "{}", matched_text)?;
+                    writeln!(writer, "{matched_text}")?;
                 }
             }
 
@@ -277,10 +276,10 @@ fn process_file<W: Write>(
                 ExtractedItem::Ipv6(_) => stats.ipv6_count += 1,
                 ExtractedItem::Domain(_) => stats.domain_count += 1,
                 ExtractedItem::Email(_) => stats.email_count += 1,
-                ExtractedItem::Hash(_, _) => {} // Hashes don't have separate stats yet
-                ExtractedItem::Bitcoin(_) => {}
-                ExtractedItem::Ethereum(_) => {}
-                ExtractedItem::Monero(_) => {}
+                ExtractedItem::Hash(_, _)
+                | ExtractedItem::Bitcoin(_)
+                | ExtractedItem::Ethereum(_)
+                | ExtractedItem::Monero(_) => {}
             }
         }
     }

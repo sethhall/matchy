@@ -118,9 +118,10 @@ impl ACLiteralHashBuilder {
     }
 
     /// Build the hash table
-    pub fn build(self) -> Result<Vec<u8>, ParaglobError> {
+    #[must_use]
+    pub fn build(self) -> Vec<u8> {
         if self.mappings.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         // Calculate table size (125% of entries for ~0.8 load factor)
@@ -142,15 +143,17 @@ impl ACLiteralHashBuilder {
 
         for (literal_id, pattern_ids) in &self.mappings {
             let hash = compute_hash(*literal_id);
-            let mut slot = (hash as usize) % table_size;
+            let mut slot = usize::try_from(hash).unwrap_or(0) % table_size;
 
             // Linear probing to find empty slot
             loop {
                 if table[slot].is_empty() {
                     table[slot] = ACHashEntry {
                         literal_id: *literal_id,
-                        patterns_offset: pattern_offsets[literal_id] as u32,
-                        pattern_count: pattern_ids.len() as u32,
+                        patterns_offset: u32::try_from(pattern_offsets[literal_id])
+                            .expect("Pattern offset exceeds u32::MAX"),
+                        pattern_count: u32::try_from(pattern_ids.len())
+                            .expect("Pattern count exceeds u32::MAX"),
                         reserved: 0,
                     };
                     break;
@@ -172,10 +175,11 @@ impl ACLiteralHashBuilder {
         let header = ACLiteralHashHeader {
             magic: *AC_LITERAL_HASH_MAGIC,
             version: MATCHY_AC_LITERAL_HASH_VERSION,
-            entry_count: self.mappings.len() as u32,
-            table_size: table_size as u32,
-            patterns_offset: patterns_offset as u32,
-            patterns_size: patterns_size as u32,
+            entry_count: u32::try_from(self.mappings.len()).expect("Entry count exceeds u32::MAX"),
+            table_size: u32::try_from(table_size).expect("Table size exceeds u32::MAX"),
+            patterns_offset: u32::try_from(patterns_offset)
+                .expect("Patterns offset exceeds u32::MAX"),
+            patterns_size: u32::try_from(patterns_size).expect("Patterns size exceeds u32::MAX"),
         };
 
         buffer.extend_from_slice(&header.magic);
@@ -196,7 +200,7 @@ impl ACLiteralHashBuilder {
         // Pattern lists
         buffer.extend_from_slice(&pattern_lists);
 
-        Ok(buffer)
+        buffer
     }
 }
 
@@ -262,8 +266,8 @@ impl<'a> ACLiteralHash<'a> {
     /// This is O(1) average case with linear probing.
     pub fn lookup(&self, literal_id: u32) -> Option<Vec<u32>> {
         let hash = compute_hash(literal_id);
-        let table_size = self.header.table_size as usize;
-        let mut slot = (hash as usize) % table_size;
+        let table_size = usize::try_from(self.header.table_size).ok()?;
+        let mut slot = usize::try_from(hash).unwrap_or(0) % table_size;
 
         let entry_size = mem::size_of::<ACHashEntry>();
 

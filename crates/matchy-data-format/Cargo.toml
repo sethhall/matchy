@@ -11,5 +11,8 @@ publish = false  # Internal crate for now
 [dependencies]
 serde.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

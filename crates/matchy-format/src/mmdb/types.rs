@@ -30,13 +30,13 @@ pub enum MmdbError {
 impl fmt::Display for MmdbError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MmdbError::InvalidFormat(msg) => write!(f, "Invalid MMDB format: {}", msg),
-            MmdbError::MetadataNotFound => write!(f, "MMDB metadata marker not found"),
-            MmdbError::InvalidMetadata(msg) => write!(f, "Invalid metadata: {}", msg),
-            MmdbError::DecodeError(msg) => write!(f, "Data decode error: {}", msg),
-            MmdbError::IoError(msg) => write!(f, "IO error: {}", msg),
-            MmdbError::InvalidIpAddress(msg) => write!(f, "Invalid IP address: {}", msg),
-            MmdbError::LookupError(msg) => write!(f, "Lookup error: {}", msg),
+            Self::InvalidFormat(msg) => write!(f, "Invalid MMDB format: {msg}"),
+            Self::MetadataNotFound => write!(f, "MMDB metadata marker not found"),
+            Self::InvalidMetadata(msg) => write!(f, "Invalid metadata: {msg}"),
+            Self::DecodeError(msg) => write!(f, "Data decode error: {msg}"),
+            Self::IoError(msg) => write!(f, "IO error: {msg}"),
+            Self::InvalidIpAddress(msg) => write!(f, "Invalid IP address: {msg}"),
+            Self::LookupError(msg) => write!(f, "Lookup error: {msg}"),
         }
     }
 }
@@ -46,7 +46,7 @@ impl std::error::Error for MmdbError {}
 // Convert data_section errors to MmdbError
 impl From<String> for MmdbError {
     fn from(msg: String) -> Self {
-        MmdbError::DecodeError(msg)
+        Self::DecodeError(msg)
     }
 }
 
@@ -69,8 +69,7 @@ pub fn record_size_from_bits(bits: u16) -> Result<RecordSize, MmdbError> {
         28 => Ok(RecordSize::Bits28),
         32 => Ok(RecordSize::Bits32),
         _ => Err(MmdbError::InvalidFormat(format!(
-            "Invalid record size: {} bits",
-            bits
+            "Invalid record size: {bits} bits"
         ))),
     }
 }

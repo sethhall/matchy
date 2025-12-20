@@ -44,6 +44,7 @@ impl IpTreeValidationResult {
     }
 
     /// Check if validation passed (no errors)
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
     }
@@ -69,6 +70,7 @@ impl IpTreeValidationResult {
 /// # Returns
 ///
 /// A `IpTreeValidationResult` with errors, warnings, and statistics
+#[must_use]
 pub fn validate_ip_tree(
     buffer: &[u8],
     tree_size: usize,
@@ -89,7 +91,7 @@ pub fn validate_ip_tree(
         _ => {
             result
                 .errors
-                .push(format!("Invalid IP version: {}", ip_version));
+                .push(format!("Invalid IP version: {ip_version}"));
             return result;
         }
     };
@@ -116,12 +118,13 @@ pub fn validate_ip_tree(
     );
 
     if let Err(e) = traverse_result {
-        result.errors.push(format!("Tree traversal error: {}", e));
+        result.errors.push(format!("Tree traversal error: {e}"));
     }
 
-    // Gather statistics
-    result.stats.nodes_visited = all_visited.len() as u32;
-    result.stats.orphaned_count = node_count.saturating_sub(all_visited.len() as u32);
+    // Gather statistics (saturate at u32::MAX for display purposes)
+    result.stats.nodes_visited = u32::try_from(all_visited.len()).unwrap_or(u32::MAX);
+    result.stats.orphaned_count =
+        node_count.saturating_sub(u32::try_from(all_visited.len()).unwrap_or(u32::MAX));
     result.stats.cycle_detected = cycle_detected;
     result.stats.invalid_pointers = invalid_pointers;
 
@@ -142,8 +145,7 @@ pub fn validate_ip_tree(
 
     if invalid_pointers > 0 {
         result.errors.push(format!(
-            "CRITICAL: {} invalid node pointers detected!",
-            invalid_pointers
+            "CRITICAL: {invalid_pointers} invalid node pointers detected!"
         ));
     }
 
@@ -171,7 +173,7 @@ fn traverse_ip_tree_node(
     // Check for cycles - only an error if this node is an ancestor in current path
     if path.contains(&node_index) {
         *cycle_detected = true;
-        return Err(format!("Cycle detected at node {}", node_index));
+        return Err(format!("Cycle detected at node {node_index}"));
     }
 
     // Skip if already fully validated (legitimate node sharing/reuse)
@@ -182,8 +184,7 @@ fn traverse_ip_tree_node(
     // Check depth (shouldn't exceed IP bit count)
     if depth > max_depth {
         return Err(format!(
-            "Tree depth {} exceeds maximum {} for this IP version",
-            depth, max_depth
+            "Tree depth {depth} exceeds maximum {max_depth} for this IP version"
         ));
     }
 
@@ -191,8 +192,7 @@ fn traverse_ip_tree_node(
     if node_index >= node_count {
         *invalid_pointers += 1;
         return Err(format!(
-            "Node index {} exceeds node count {}",
-            node_index, node_count
+            "Node index {node_index} exceeds node count {node_count}"
         ));
     }
 
@@ -205,26 +205,25 @@ fn traverse_ip_tree_node(
     if node_offset + node_bytes > tree_size {
         path.remove(&node_index);
         return Err(format!(
-            "Node {} offset {} exceeds tree size {}",
-            node_index, node_offset, tree_size
+            "Node {node_index} offset {node_offset} exceeds tree size {tree_size}"
         ));
     }
 
     if node_offset + node_bytes > buffer.len() {
         path.remove(&node_index);
-        return Err(format!("Node {} would read beyond buffer", node_index));
+        return Err(format!("Node {node_index} would read beyond buffer"));
     }
 
     // Read both records (left and right)
     let (left_record, right_record) = match node_bytes {
         6 => {
             // 24-bit records (3 bytes each)
-            let left = (buffer[node_offset] as u32) << 16
-                | (buffer[node_offset + 1] as u32) << 8
-                | (buffer[node_offset + 2] as u32);
-            let right = (buffer[node_offset + 3] as u32) << 16
-                | (buffer[node_offset + 4] as u32) << 8
-                | (buffer[node_offset + 5] as u32);
+            let left = u32::from(buffer[node_offset]) << 16
+                | u32::from(buffer[node_offset + 1]) << 8
+                | u32::from(buffer[node_offset + 2]);
+            let right = u32::from(buffer[node_offset + 3]) << 16
+                | u32::from(buffer[node_offset + 4]) << 8
+                | u32::from(buffer[node_offset + 5]);
             (left, right)
         }
         7 => {
@@ -232,16 +231,16 @@ fn traverse_ip_tree_node(
             // Layout: | left[23..0] | left[27..24]:right[27..24] | right[23..0] |
             // Bytes:  |  0  1  2    |            3               |   4  5  6    |
             let middle = buffer[node_offset + 3];
-            let left_low = (buffer[node_offset] as u32) << 16
-                | (buffer[node_offset + 1] as u32) << 8
-                | (buffer[node_offset + 2] as u32);
-            let left_high = ((middle >> 4) & 0x0F) as u32;
+            let left_low = u32::from(buffer[node_offset]) << 16
+                | u32::from(buffer[node_offset + 1]) << 8
+                | u32::from(buffer[node_offset + 2]);
+            let left_high = u32::from((middle >> 4) & 0x0F);
             let left = (left_high << 24) | left_low;
 
-            let right_low = (buffer[node_offset + 4] as u32) << 16
-                | (buffer[node_offset + 5] as u32) << 8
-                | (buffer[node_offset + 6] as u32);
-            let right_high = (middle & 0x0F) as u32;
+            let right_low = u32::from(buffer[node_offset + 4]) << 16
+                | u32::from(buffer[node_offset + 5]) << 8
+                | u32::from(buffer[node_offset + 6]);
+            let right_high = u32::from(middle & 0x0F);
             let right = (right_high << 24) | right_low;
             (left, right)
         }
@@ -263,7 +262,7 @@ fn traverse_ip_tree_node(
         }
         _ => {
             path.remove(&node_index);
-            return Err(format!("Invalid node_bytes: {}", node_bytes));
+            return Err(format!("Invalid node_bytes: {node_bytes}"));
         }
     };
 

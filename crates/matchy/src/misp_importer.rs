@@ -72,8 +72,7 @@ where
         Value::String(s) => Ok(s),
         Value::Number(n) => Ok(n.to_string()),
         Value::Bool(b) => Ok(b.to_string()),
-        Value::Null => Ok(String::new()), // Treat null as empty string
-        Value::Array(_) | Value::Object(_) => Ok(String::new()), // Skip complex types
+        Value::Null | Value::Array(_) | Value::Object(_) => Ok(String::new()),
     }
 }
 
@@ -286,7 +285,7 @@ impl MispImporter {
     /// Create importer from MISP JSON string
     pub fn from_json(json: &str) -> Result<Self, ParaglobError> {
         let doc: MispDocument = serde_json::from_str(json).map_err(|e| {
-            ParaglobError::InvalidPattern(format!("Failed to parse MISP JSON: {}", e))
+            ParaglobError::InvalidPattern(format!("Failed to parse MISP JSON: {e}"))
         })?;
 
         Ok(Self {
@@ -313,9 +312,8 @@ impl MispImporter {
 
         for path in paths {
             let path_ref = path.as_ref();
-            let json = fs::read_to_string(path_ref).map_err(|e| {
-                ParaglobError::InvalidPattern(format!("Failed to read file: {}", e))
-            })?;
+            let json = fs::read_to_string(path_ref)
+                .map_err(|e| ParaglobError::InvalidPattern(format!("Failed to read file: {e}")))?;
 
             // Try to parse as MISP event document
             match serde_json::from_str::<MispDocument>(&json) {
@@ -348,8 +346,7 @@ impl MispImporter {
                     } else if json.trim_start().starts_with('{') && json.contains("\"Event\"") {
                         // Looks like it should be a MISP file but failed to parse - this is an error
                         return Err(ParaglobError::InvalidPattern(format!(
-                            "Failed to parse MISP JSON in {}: {}",
-                            filename, e
+                            "Failed to parse MISP JSON in {filename}: {e}"
                         )));
                     } else {
                         // Doesn't look like a MISP event file - skip with warning
@@ -363,7 +360,7 @@ impl MispImporter {
         if !skipped_files.is_empty() {
             eprintln!("Warning: Skipped {} non-MISP file(s):", skipped_files.len());
             for (filename, reason) in &skipped_files {
-                eprintln!("  - {}: {}", filename, reason);
+                eprintln!("  - {filename}: {reason}");
             }
         }
 
@@ -388,9 +385,8 @@ impl MispImporter {
 
         for path in paths {
             let path_ref = path.as_ref();
-            let json = fs::read_to_string(path_ref).map_err(|e| {
-                ParaglobError::InvalidPattern(format!("Failed to read file: {}", e))
-            })?;
+            let json = fs::read_to_string(path_ref)
+                .map_err(|e| ParaglobError::InvalidPattern(format!("Failed to read file: {e}")))?;
 
             // Try to parse as MISP event document
             match serde_json::from_str::<MispDocument>(&json) {
@@ -410,8 +406,7 @@ impl MispImporter {
                     } else if json.trim_start().starts_with('{') && json.contains("\"Event\"") {
                         // Looks like it should be a MISP file but failed to parse - this is an error
                         return Err(ParaglobError::InvalidPattern(format!(
-                            "Failed to parse MISP JSON in {}: {}",
-                            filename, e
+                            "Failed to parse MISP JSON in {filename}: {e}"
                         )));
                     } else {
                         // Doesn't look like a MISP event file - skip with warning
@@ -425,7 +420,7 @@ impl MispImporter {
         if !skipped_files.is_empty() {
             eprintln!("Warning: Skipped {} non-MISP file(s):", skipped_files.len());
             for (filename, reason) in &skipped_files {
-                eprintln!("  - {}: {}", filename, reason);
+                eprintln!("  - {filename}: {reason}");
             }
         }
 
@@ -565,7 +560,7 @@ impl MispImporter {
             // MISP date is YYYY-MM-DD, append time for ISO 8601
             metadata.insert(
                 "first_seen".to_string(),
-                DataValue::String(format!("{}T00:00:00Z", date)),
+                DataValue::String(format!("{date}T00:00:00Z")),
             );
         }
 
@@ -1105,7 +1100,7 @@ impl MispImporter {
         // Remove port if present
         let domain = if let Some(colon_pos) = domain.rfind(':') {
             // Check if it's actually a port (numbers after colon)
-            if domain[colon_pos + 1..].chars().all(|c| c.is_numeric()) {
+            if domain[colon_pos + 1..].chars().all(char::is_numeric) {
                 &domain[..colon_pos]
             } else {
                 domain
@@ -1122,6 +1117,7 @@ impl MispImporter {
     }
 
     /// Get statistics about the imported data
+    #[must_use]
     pub fn stats(&self) -> ImportStats {
         let mut stats = ImportStats::default();
 

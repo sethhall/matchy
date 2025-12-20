@@ -47,6 +47,7 @@ impl ParaglobValidationResult {
     }
 
     /// Check if validation passed (no errors)
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
     }
@@ -68,13 +69,14 @@ impl ParaglobValidationResult {
 /// # Returns
 ///
 /// A `ParaglobValidationResult` with errors, warnings, and statistics
+#[must_use]
 pub fn validate_patterns(
     buffer: &[u8],
     patterns_offset: usize,
     pattern_count: usize,
 ) -> ParaglobValidationResult {
     let mut result = ParaglobValidationResult::new();
-    result.stats.pattern_count = pattern_count as u32;
+    result.stats.pattern_count = u32::try_from(pattern_count).unwrap_or(u32::MAX);
 
     if pattern_count == 0 {
         return result;
@@ -89,7 +91,7 @@ pub fn validate_patterns(
         if entry_offset + mem::size_of::<PatternEntry>() > buffer.len() {
             result
                 .errors
-                .push(format!("Pattern entry {} out of bounds", i));
+                .push(format!("Pattern entry {i} out of bounds"));
             continue;
         }
 
@@ -98,7 +100,7 @@ pub fn validate_patterns(
             Err(_) => {
                 result
                     .errors
-                    .push(format!("Failed to read pattern entry {}", i));
+                    .push(format!("Failed to read pattern entry {i}"));
                 continue;
             }
         };
@@ -109,15 +111,17 @@ pub fn validate_patterns(
             1 => glob_count += 1,    // Glob
             t => result
                 .errors
-                .push(format!("Pattern {} has invalid type: {}", i, t)),
+                .push(format!("Pattern {i} has invalid type: {t}")),
         }
 
         // Pattern ID should match index (typically)
-        if entry.pattern_id != i as u32 {
-            result.warnings.push(format!(
-                "Pattern {} has mismatched ID: {} (expected {})",
-                i, entry.pattern_id, i
-            ));
+        if let Ok(expected_id) = u32::try_from(i) {
+            if entry.pattern_id != expected_id {
+                result.warnings.push(format!(
+                    "Pattern {} has mismatched ID: {} (expected {})",
+                    i, entry.pattern_id, i
+                ));
+            }
         }
     }
 
@@ -152,12 +156,12 @@ pub fn build_pattern_info(
     for i in 0..pattern_count {
         let entry_offset = patterns_offset + i * mem::size_of::<PatternEntry>();
         if entry_offset + mem::size_of::<PatternEntry>() > buffer.len() {
-            return Err(format!("Pattern entry {} out of bounds", i));
+            return Err(format!("Pattern entry {i} out of bounds"));
         }
 
         let entry = match PatternEntry::read_from_prefix(&buffer[entry_offset..]) {
             Ok((e, _)) => e,
-            Err(_) => return Err(format!("Failed to read pattern entry {}", i)),
+            Err(_) => return Err(format!("Failed to read pattern entry {i}")),
         };
 
         pattern_info.push((entry.pattern_id, entry.pattern_type));
@@ -180,6 +184,7 @@ pub fn build_pattern_info(
 /// # Returns
 ///
 /// A `ParaglobValidationResult` with errors, warnings, and statistics
+#[must_use]
 pub fn validate_ac_literal_mapping(
     buffer: &[u8],
     map_offset: usize,
@@ -192,7 +197,7 @@ pub fn validate_ac_literal_mapping(
     if let Err(e) = crate::literal_hash::ACLiteralHash::from_buffer(hash_buffer) {
         result
             .errors
-            .push(format!("Failed to load AC literal hash table: {}", e));
+            .push(format!("Failed to load AC literal hash table: {e}"));
         return result;
     }
 
@@ -233,7 +238,7 @@ pub fn validate_ac_literal_mapping(
         if entry_offset + entry_size > hash_buffer.len() {
             result
                 .errors
-                .push(format!("Hash table entry {} out of bounds", i));
+                .push(format!("Hash table entry {i} out of bounds"));
             break;
         }
 
@@ -269,8 +274,7 @@ pub fn validate_ac_literal_mapping(
             let pid_offset = abs_patterns_offset + j * 4;
             if pid_offset + 4 > hash_buffer.len() {
                 result.errors.push(format!(
-                    "Pattern list for literal {} truncated at pattern {}",
-                    literal_id, j
+                    "Pattern list for literal {literal_id} truncated at pattern {j}"
                 ));
                 break;
             }
@@ -284,8 +288,7 @@ pub fn validate_ac_literal_mapping(
 
             if pattern_id >= pattern_count {
                 result.errors.push(format!(
-                    "AC literal mapping entry {} references invalid pattern ID: {}",
-                    i, pattern_id
+                    "AC literal mapping entry {i} references invalid pattern ID: {pattern_id}"
                 ));
             } else {
                 referenced_patterns.insert(pattern_id);
@@ -315,6 +318,7 @@ pub fn validate_ac_literal_mapping(
 /// # Returns
 ///
 /// A `ParaglobValidationResult` with errors, warnings, and statistics
+#[must_use]
 pub fn validate_meta_word_mappings(
     buffer: &[u8],
     mapping_offset: usize,
@@ -322,7 +326,7 @@ pub fn validate_meta_word_mappings(
     pattern_count: u32,
 ) -> ParaglobValidationResult {
     let mut result = ParaglobValidationResult::new();
-    result.stats.meta_word_count = mapping_count as u32;
+    result.stats.meta_word_count = u32::try_from(mapping_count).unwrap_or(u32::MAX);
 
     let mut referenced_patterns = HashSet::new();
     let mut invalid_references = 0;
@@ -332,7 +336,7 @@ pub fn validate_meta_word_mappings(
         if entry_offset + mem::size_of::<MetaWordMapping>() > buffer.len() {
             result
                 .errors
-                .push(format!("Meta-word mapping {} out of bounds", i));
+                .push(format!("Meta-word mapping {i} out of bounds"));
             continue;
         }
 
@@ -341,7 +345,7 @@ pub fn validate_meta_word_mappings(
             Err(_) => {
                 result
                     .errors
-                    .push(format!("Failed to read meta-word mapping {}", i));
+                    .push(format!("Failed to read meta-word mapping {i}"));
                 continue;
             }
         };
@@ -383,8 +387,7 @@ pub fn validate_meta_word_mappings(
 
     if invalid_references > 0 {
         result.errors.push(format!(
-            "Meta-word mappings contain {} invalid references",
-            invalid_references
+            "Meta-word mappings contain {invalid_references} invalid references"
         ));
     }
 
@@ -443,12 +446,7 @@ pub fn get_pattern_data_offsets(
         let (mapping, _) = crate::offset_format::PatternDataMapping::read_from_prefix(
             mapping_bytes,
         )
-        .map_err(|_| {
-            format!(
-                "Failed to read PatternDataMapping at offset {}",
-                mapping_offset
-            )
-        })?;
+        .map_err(|_| format!("Failed to read PatternDataMapping at offset {mapping_offset}"))?;
 
         // Extract just the data_offset field (the yield value)
         offsets.push(mapping.data_offset);

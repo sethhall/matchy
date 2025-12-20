@@ -9,21 +9,21 @@ use tempfile::NamedTempFile;
 // Test data generators
 fn generate_patterns(count: usize, pattern_type: &str) -> Vec<String> {
     match pattern_type {
-        "literals" => (0..count).map(|i| format!("literal_{}", i)).collect(),
-        "globs" => (0..count).map(|i| format!("*.ext{}", i)).collect(),
+        "literals" => (0..count).map(|i| format!("literal_{i}")).collect(),
+        "globs" => (0..count).map(|i| format!("*.ext{i}")).collect(),
         "mixed" => (0..count)
             .map(|i| {
                 if i % 3 == 0 {
-                    format!("literal_{}", i)
+                    format!("literal_{i}")
                 } else if i % 3 == 1 {
-                    format!("*test_{}", i)
+                    format!("*test_{i}")
                 } else {
-                    format!("prefix_*_{}.txt", i)
+                    format!("prefix_*_{i}.txt")
                 }
             })
             .collect(),
         "complex" => (0..count)
-            .map(|i| format!("test_*_file_{}_*.txt", i))
+            .map(|i| format!("test_*_file_{i}_*.txt"))
             .collect(),
         _ => vec![],
     }
@@ -45,7 +45,7 @@ fn generate_text(size: usize, match_rate: &str) -> String {
         "none" => {
             // Text that won't match any patterns
             (0..size / 10)
-                .map(|i| format!("nomatch{} ", i))
+                .map(|i| format!("nomatch{i} "))
                 .collect::<String>()
         }
         "low" => {
@@ -55,7 +55,7 @@ fn generate_text(size: usize, match_rate: &str) -> String {
                     if i % 10 == 0 {
                         format!("literal_{} ", i % 100)
                     } else {
-                        format!("nomatch{} ", i)
+                        format!("nomatch{i} ")
                     }
                 })
                 .collect::<String>()
@@ -89,7 +89,7 @@ fn bench_build(c: &mut Criterion) {
     for count in [10, 50, 100, 500, 1000].iter() {
         for pattern_type in ["literals", "globs", "mixed", "complex"].iter() {
             let patterns = generate_patterns(*count, pattern_type);
-            let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+            let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
 
             group.throughput(Throughput::Elements(*count as u64));
             group.bench_with_input(
@@ -122,7 +122,7 @@ fn bench_match(c: &mut Criterion) {
 
     for &pattern_count in &pattern_counts {
         let patterns = generate_patterns(pattern_count, "mixed");
-        let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+        let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
         let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
 
         for &text_size in &text_sizes {
@@ -131,7 +131,7 @@ fn bench_match(c: &mut Criterion) {
 
                 group.throughput(Throughput::Bytes(text.len() as u64));
                 group.bench_with_input(
-                    BenchmarkId::new(format!("p{}_t{}", pattern_count, text_size), match_rate),
+                    BenchmarkId::new(format!("p{pattern_count}_t{text_size}"), match_rate),
                     &text,
                     |b, text| {
                         b.iter(|| {
@@ -153,7 +153,7 @@ fn bench_serialization(c: &mut Criterion) {
 
     for count in [10, 100, 1000].iter() {
         let patterns = generate_patterns(*count, "mixed");
-        let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+        let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
         let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
 
         // Benchmark save
@@ -179,7 +179,7 @@ fn bench_load(c: &mut Criterion) {
 
     for count in [10, 100, 1000, 5000].iter() {
         let patterns = generate_patterns(*count, "mixed");
-        let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+        let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
         let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
 
         // Create a temp file
@@ -211,7 +211,7 @@ fn bench_memory_efficiency(c: &mut Criterion) {
 
     for count in [10, 50, 100, 500, 1000].iter() {
         let patterns = generate_patterns(*count, "mixed");
-        let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+        let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
 
         group.bench_with_input(
             BenchmarkId::new("file_size", count),
@@ -245,7 +245,7 @@ fn bench_realistic_workload(c: &mut Criterion) {
     // - 500 patterns (mix of literals and globs)
     // - Processing 100 strings of varying sizes
     let patterns = generate_patterns(500, "mixed");
-    let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+    let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
     let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
 
     let test_strings: Vec<String> = (0..100)
@@ -270,7 +270,7 @@ fn bench_case_sensitivity(c: &mut Criterion) {
     let mut group = c.benchmark_group("case_sensitivity");
 
     let patterns = generate_patterns(100, "literals");
-    let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+    let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
 
     let text = generate_text(1000, "medium");
 
@@ -308,17 +308,17 @@ fn bench_dense_nodes(c: &mut Criterion) {
 
     // 26 patterns with common prefix -> creates dense node
     for ch in 'a'..='z' {
-        patterns.push(format!("prefix_{}suffix", ch));
+        patterns.push(format!("prefix_{ch}suffix"));
     }
 
     // 100 numeric patterns -> more dense nodes
     for i in 0..10 {
         for j in 0..10 {
-            patterns.push(format!("num_{}{}_end", i, j));
+            patterns.push(format!("num_{i}{j}_end"));
         }
     }
 
-    let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+    let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
     let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
 
     // Test traversing dense nodes

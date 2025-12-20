@@ -10,11 +10,11 @@ use std::time::Instant;
 fn main() {
     // Test with different sizes
     for size in [1_000, 10_000, 100_000, 1_000_000] {
-        println!("\n=== Building hash table with {} patterns ===", size);
+        println!("\n=== Building hash table with {size} patterns ===");
 
         let mut builder = LiteralHashBuilder::new(MatchMode::CaseSensitive);
         for i in 0..size {
-            let pattern = format!("pattern_{}_test", i);
+            let pattern = format!("pattern_{i}_test");
             builder.add_pattern(&pattern, i);
         }
 
@@ -24,11 +24,11 @@ fn main() {
         let bytes = builder.build(&pattern_data).expect("Build failed");
         let elapsed = start.elapsed();
 
-        println!("  Build time: {:?}", elapsed);
+        println!("  Build time: {elapsed:?}");
         println!("  Database size: {} MB", bytes.len() / 1_048_576);
         println!(
             "  Throughput: {:.0} patterns/sec",
-            size as f64 / elapsed.as_secs_f64()
+            f64::from(size) / elapsed.as_secs_f64()
         );
     }
 }

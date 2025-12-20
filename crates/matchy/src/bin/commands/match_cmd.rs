@@ -81,7 +81,11 @@ fn build_database_from_source(path: &Path, format: &str, show_stats: bool) -> Re
                         if !value.is_empty() {
                             // Try to parse as number, otherwise treat as string
                             let data_value = if let Ok(i) = value.parse::<i64>() {
-                                DataValue::Int32(i as i32)
+                                DataValue::Int32(i32::try_from(i).unwrap_or(if i < 0 {
+                                    i32::MIN
+                                } else {
+                                    i32::MAX
+                                }))
                             } else if let Ok(u) = value.parse::<u64>() {
                                 DataValue::Uint64(u)
                             } else if let Ok(f) = value.parse::<f64>() {
@@ -101,7 +105,7 @@ fn build_database_from_source(path: &Path, format: &str, show_stats: bool) -> Re
             }
 
             if show_stats {
-                eprintln!("[INFO] Loaded {} entries from CSV", total_entries);
+                eprintln!("[INFO] Loaded {total_entries} entries from CSV");
             }
         }
         "json" => {
@@ -117,7 +121,7 @@ fn build_database_from_source(path: &Path, format: &str, show_stats: bool) -> Re
                 let key = item
                     .get("key")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'key' field at index {}", i))?;
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'key' field at index {i}"))?;
 
                 let data = if let Some(data_json) = item.get("data") {
                     json_to_data_map(data_json)?
@@ -130,7 +134,7 @@ fn build_database_from_source(path: &Path, format: &str, show_stats: bool) -> Re
             }
 
             if show_stats {
-                eprintln!("[INFO] Loaded {} entries from JSON", total_entries);
+                eprintln!("[INFO] Loaded {total_entries} entries from JSON");
             }
         }
         "text" => {
@@ -150,11 +154,11 @@ fn build_database_from_source(path: &Path, format: &str, show_stats: bool) -> Re
             }
 
             if show_stats {
-                eprintln!("[INFO] Loaded {} entries from text file", total_entries);
+                eprintln!("[INFO] Loaded {total_entries} entries from text file");
             }
         }
         _ => {
-            anyhow::bail!("Unknown format: {}. Use 'json', 'csv', or 'text'", format);
+            anyhow::bail!("Unknown format: {format}. Use 'json', 'csv', or 'text'");
         }
     }
 
@@ -172,32 +176,32 @@ fn build_database_from_source(path: &Path, format: &str, show_stats: bool) -> Re
 
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_match(
-    database: PathBuf,
-    inputs: Vec<PathBuf>,
+    database: &Path,
+    inputs: &[PathBuf],
     follow: bool,
-    threads_arg: Option<String>,
+    threads_arg: Option<&str>,
     readers_arg: Option<usize>,
     batch_bytes: usize,
-    format: String,
+    format: &str,
     show_stats: bool,
     show_progress: bool,
     cache_size: usize,
-    extractors_arg: Option<String>,
+    extractors_arg: Option<&str>,
     debug_routing: bool,
     watch: bool,
     #[cfg(feature = "auto-update")] auto_update: bool,
     #[cfg(feature = "auto-update")] update_interval: u64,
-    #[cfg(feature = "auto-update")] cache_dir: Option<PathBuf>,
+    #[cfg(feature = "auto-update")] cache_dir: Option<&Path>,
 ) -> Result<()> {
     use matchy::extractor::Extractor;
     use matchy::Database;
 
     // Parse thread count: None = auto (0 triggers auto-tuning), "N" = N
-    let num_threads = match threads_arg.as_deref() {
+    let num_threads = match threads_arg {
         None | Some("auto") | Some("0") => 0, // 0 = auto-tune in process_parallel
-        Some(s) => s.parse::<usize>().with_context(|| {
-            format!("Invalid thread count '{}', expected a number or 'auto'", s)
-        })?,
+        Some(s) => s
+            .parse::<usize>()
+            .with_context(|| format!("Invalid thread count '{s}', expected a number or 'auto'"))?,
     };
 
     if show_stats && !follow {
@@ -208,20 +212,17 @@ pub fn cmd_match(
         } else {
             // Show reader/worker split
             if let Some(readers) = readers_arg {
-                eprintln!(
-                    "[INFO] Mode: Parallel ({} readers, {} workers)",
-                    readers, num_threads
-                );
+                eprintln!("[INFO] Mode: Parallel ({readers} readers, {num_threads} workers)");
             } else {
-                eprintln!("[INFO] Mode: Parallel (1 reader, {} workers)", num_threads);
+                eprintln!("[INFO] Mode: Parallel (1 reader, {num_threads} workers)");
             }
-            eprintln!("[INFO] Batch size: {} bytes", batch_bytes);
+            eprintln!("[INFO] Batch size: {batch_bytes} bytes");
         }
     }
 
     // Load database - either from compiled .mxy file or build from source (JSON/CSV)
     let load_start = Instant::now();
-    let is_from_source = is_source_file(&database);
+    let is_from_source = is_source_file(database);
 
     let db = if let Some(source_format) = is_from_source {
         // Build database in-memory from source file
@@ -231,7 +232,7 @@ pub fn cmd_match(
                 source_format.to_uppercase()
             );
         }
-        let db_bytes = build_database_from_source(&database, source_format, show_stats)?;
+        let db_bytes = build_database_from_source(database, source_format, show_stats)?;
         let mut opener = Database::from_bytes_builder(db_bytes);
         if cache_size == 0 {
             opener = opener.no_cache();
@@ -259,7 +260,7 @@ pub fn cmd_match(
             opener = opener
                 .auto_update()
                 .update_interval(std::time::Duration::from_secs(update_interval));
-            if let Some(ref dir) = cache_dir {
+            if let Some(dir) = cache_dir {
                 opener = opener.cache_dir(dir);
             }
         }
@@ -283,14 +284,14 @@ pub fn cmd_match(
             if cache_size == 0 {
                 "disabled".to_string()
             } else {
-                format!("{} entries", cache_size)
+                format!("{cache_size} entries")
             }
         );
     }
 
     // Parse extractor configuration from CLI flags
     use crate::match_processor::ExtractorConfig;
-    let extractor_config = ExtractorConfig::from_arg(extractors_arg.clone());
+    let extractor_config = ExtractorConfig::from_arg(extractors_arg);
 
     // Configure extractor based on database capabilities and CLI flags
     let has_ip = db.has_ip_data();
@@ -407,16 +408,13 @@ pub fn cmd_match(
         // Follow mode - use parallel or sequential based on thread count
         if num_threads > 1 {
             if show_stats {
-                eprintln!(
-                    "[INFO] Using parallel follow with {} worker threads",
-                    num_threads
-                );
+                eprintln!("[INFO] Using parallel follow with {num_threads} worker threads");
             }
             aggregate_stats = follow_files_parallel(
-                inputs.clone(),
+                inputs,
                 Arc::clone(&db),
                 num_threads,
-                &format,
+                format,
                 show_stats,
                 show_progress,
                 overall_start,
@@ -431,10 +429,10 @@ pub fn cmd_match(
                 eprintln!("[INFO] Using sequential follow (single-threaded)");
             }
             aggregate_stats = follow_files(
-                inputs.clone(),
+                inputs,
                 &db,
                 &extractor,
-                &format,
+                format,
                 show_stats,
                 show_progress,
                 overall_start,
@@ -449,16 +447,16 @@ pub fn cmd_match(
     } else if num_threads == 0 || num_threads > 1 {
         // Parallel mode (num_threads=0 means auto-tune, >1 means explicit count)
         let (stats, workers, readers, rstats) = process_parallel(
-            inputs.clone(),
+            inputs,
             Arc::clone(&db),
             num_threads,
             readers_arg,
             batch_bytes,
-            &format,
+            format,
             show_stats,
             show_progress,
             overall_start,
-            extractor_config,
+            &extractor_config,
             debug_routing,
         )?;
         aggregate_stats = stats;
@@ -481,7 +479,7 @@ pub fn cmd_match(
             None
         };
 
-        for input_path in &inputs {
+        for input_path in inputs {
             // Handle stdin (allow "-" only once)
             if input_path.to_str() == Some("-") {
                 if stdin_already_processed {
@@ -498,7 +496,7 @@ pub fn cmd_match(
                 input_path,
                 &db,
                 &extractor,
-                &format,
+                format,
                 show_stats,
                 &mut seq_stats,
                 &mut progress,
@@ -536,9 +534,9 @@ pub fn cmd_match(
         eprintln!();
         eprintln!("[INFO] === Processing Complete ===");
         if inputs.len() > 1 {
-            eprintln!("[INFO] Files processed: {}", files_processed);
+            eprintln!("[INFO] Files processed: {files_processed}");
             if files_failed > 0 {
-                eprintln!("[INFO] Files failed: {}", files_failed);
+                eprintln!("[INFO] Files failed: {files_failed}");
             }
         }
         eprintln!(
@@ -644,8 +642,8 @@ pub fn cmd_match(
         if actual_readers > 0 || actual_workers > 0 {
             eprintln!();
             eprintln!("[INFO] === Thread Allocation ===");
-            eprintln!("[INFO] Reader threads spawned: {}", actual_readers);
-            eprintln!("[INFO] Worker threads spawned: {}", actual_workers);
+            eprintln!("[INFO] Reader threads spawned: {actual_readers}");
+            eprintln!("[INFO] Worker threads spawned: {actual_workers}");
         }
 
         // Show routing statistics if available (parallel mode only)
@@ -683,14 +681,14 @@ pub fn cmd_match(
                 num_readers: actual_readers,
             };
 
-            let analysis = analyze_performance(&aggregate_stats, overall_elapsed, config);
+            let analysis = analyze_performance(&aggregate_stats, overall_elapsed, &config);
 
             // Show bottleneck and recommendations
             eprintln!();
             eprintln!("[INFO] {}", analysis.explanation);
             if !analysis.recommendations.is_empty() {
                 for rec in &analysis.recommendations {
-                    eprintln!("[INFO] → {}", rec);
+                    eprintln!("[INFO] → {rec}");
                 }
             }
         }
@@ -698,7 +696,7 @@ pub fn cmd_match(
 
     // Return error code if any files failed
     if files_failed > 0 {
-        anyhow::bail!("{} file(s) failed to process", files_failed);
+        anyhow::bail!("{files_failed} file(s) failed to process");
     }
 
     Ok(())

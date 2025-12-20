@@ -84,6 +84,7 @@ pub struct FormatValidationResult {
 
 impl FormatValidationResult {
     /// Create a new empty validation result
+    #[must_use]
     pub fn new() -> Self {
         Self {
             errors: Vec::new(),
@@ -93,6 +94,7 @@ impl FormatValidationResult {
     }
 
     /// Check if validation passed (no errors)
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
     }
@@ -138,6 +140,7 @@ pub struct FormatStats {
 ///
 /// # Returns
 /// Validation result with errors, warnings, and coverage statistics
+#[must_use]
 pub fn validate_data_mapping_consistency(
     buffer: &[u8],
     header: &ParaglobHeader,
@@ -166,8 +169,7 @@ pub fn validate_data_mapping_consistency(
         let entry_offset = mapping_offset + i * std::mem::size_of::<PatternDataMapping>();
         if entry_offset + std::mem::size_of::<PatternDataMapping>() > buffer.len() {
             result.error(format!(
-                "Mapping entry {} at offset {} truncated",
-                i, entry_offset
+                "Mapping entry {i} at offset {entry_offset} truncated"
             ));
             continue;
         }
@@ -176,8 +178,7 @@ pub fn validate_data_mapping_consistency(
             Ok((m, _)) => m,
             Err(_) => {
                 result.error(format!(
-                    "Failed to read PatternDataMapping at offset {}",
-                    entry_offset
+                    "Failed to read PatternDataMapping at offset {entry_offset}"
                 ));
                 continue;
             }
@@ -226,8 +227,7 @@ pub fn validate_data_mapping_consistency(
 
     if duplicate_mappings > 0 {
         result.warning(format!(
-            "Found {} duplicate pattern IDs in data mapping table",
-            duplicate_mappings
+            "Found {duplicate_mappings} duplicate pattern IDs in data mapping table"
         ));
     }
 

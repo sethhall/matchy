@@ -191,9 +191,9 @@ fn test_large_pattern_set() {
     // Generate a large set of patterns to test scalability
     let mut patterns = Vec::new();
     for i in 0..1000 {
-        patterns.push(format!("pattern_{}_*", i));
+        patterns.push(format!("pattern_{i}_*"));
     }
-    let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+    let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
     let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
 
     // Test that we can find specific patterns in the large set
@@ -561,8 +561,7 @@ fn test_v2_matching_with_data_retrieval() {
         let data = pg.get_pattern_data(pattern_id);
         assert!(
             data.is_some(),
-            "Matched pattern {} should have data",
-            pattern_id
+            "Matched pattern {pattern_id} should have data"
         );
 
         // Verify it's a map with an ID

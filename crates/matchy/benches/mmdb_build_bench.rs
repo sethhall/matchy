@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use matchy::DataValue;
 use matchy::DatabaseBuilder;
@@ -18,12 +20,12 @@ fn bench_mmdb_build_with_deduplication(c: &mut Criterion) {
                 let mut map = HashMap::new();
                 map.insert(
                     "category".to_string(),
-                    DataValue::String(format!("category_{}", i)),
+                    DataValue::String(format!("category_{i}")),
                 );
                 map.insert("risk".to_string(), DataValue::Uint16((i as u16) * 10));
                 map.insert(
                     "description".to_string(),
-                    DataValue::String(format!("This is a longer description for category {}", i)),
+                    DataValue::String(format!("This is a longer description for category {i}")),
                 );
                 map.insert("active".to_string(), DataValue::Bool(i % 2 == 0));
                 map
@@ -62,7 +64,7 @@ fn bench_mmdb_build_with_deduplication(c: &mut Criterion) {
                         data.insert("id".to_string(), DataValue::Uint32(i as u32));
                         data.insert(
                             "unique".to_string(),
-                            DataValue::String(format!("unique_value_{}", i)),
+                            DataValue::String(format!("unique_value_{i}")),
                         );
                         builder.add_ip(black_box(&ip), black_box(data)).unwrap();
                     }
@@ -78,7 +80,7 @@ fn bench_mmdb_build_with_deduplication(c: &mut Criterion) {
                 let mut map = HashMap::new();
                 map.insert(
                     "country".to_string(),
-                    DataValue::String(format!("Country_{}", i)),
+                    DataValue::String(format!("Country_{i}")),
                 );
                 map.insert("code".to_string(), DataValue::Uint16(i as u16));
                 map
@@ -117,13 +119,13 @@ fn bench_mmdb_build_with_deduplication(c: &mut Criterion) {
                             builder.add_ip(black_box(&ip), black_box(data)).unwrap();
                         } else if i % 3 == 1 {
                             // Literal pattern
-                            let pattern = format!("evil_{}.com", i);
+                            let pattern = format!("evil_{i}.com");
                             builder
                                 .add_literal(black_box(&pattern), black_box(data))
                                 .unwrap();
                         } else {
                             // Glob pattern
-                            let pattern = format!("*.bad_{}.net", i);
+                            let pattern = format!("*.bad_{i}.net");
                             builder
                                 .add_glob(black_box(&pattern), black_box(data))
                                 .unwrap();
@@ -193,7 +195,7 @@ fn bench_mmdb_build_complex_data(c: &mut Criterion) {
                             let ip = format!("10.{}.{}.{}", i / 65536, (i / 256) % 256, i % 256);
                             builder.add_ip(black_box(&ip), black_box(data)).unwrap();
                         } else {
-                            let domain = format!("evil-{}.badactor.com", i);
+                            let domain = format!("evil-{i}.badactor.com");
                             builder
                                 .add_literal(black_box(&domain), black_box(data))
                                 .unwrap();

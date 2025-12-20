@@ -10,7 +10,7 @@ fn make_type_map<S: Into<String>>(type_value: S) -> HashMap<String, DataValue> {
 
 fn lookup_expect_result(db: &Database, key: &str) -> QueryResult {
     db.lookup(key)
-        .unwrap_or_else(|e| panic!("lookup failed for '{}': {}", key, e))
+        .unwrap_or_else(|e| panic!("lookup failed for '{key}': {e}"))
         .unwrap_or(QueryResult::NotFound)
 }
 
