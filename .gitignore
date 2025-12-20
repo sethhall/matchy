@@ -36,6 +36,7 @@ flamegraph.svg
 
 # Benchmarks - local data storage only (not committed, like target/)
 /benchmarks/
+/benchmark_results/
 
 # Profiling output files
 dhat-*.json
