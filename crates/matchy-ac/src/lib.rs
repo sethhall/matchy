@@ -316,10 +316,18 @@ impl ACBuilder {
         let nodes_size = self.states.len() * node_size;
 
         // Classify states and count by type
+        // Root node (index 0) is ALWAYS Dense for O(1) lookup performance
         let state_kinds: Vec<StateKind> = self
             .states
             .iter()
-            .map(BuilderState::classify_state_kind)
+            .enumerate()
+            .map(|(i, s)| {
+                if i == 0 {
+                    StateKind::Dense
+                } else {
+                    s.classify_state_kind()
+                }
+            })
             .collect();
 
         let dense_count = state_kinds

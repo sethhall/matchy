@@ -26,5 +26,9 @@ tempfile.workspace = true
 name = "paraglob_bench"
 harness = false
 
+[[bench]]
+name = "ac_root_bench"
+harness = false
+
 [lints]
 workspace = true

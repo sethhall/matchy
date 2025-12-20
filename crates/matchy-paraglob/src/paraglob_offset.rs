@@ -1240,12 +1240,37 @@ impl Paraglob {
             MatchMode::CaseSensitive => text,
         };
 
+        // Pre-load root dense table offset (root is always Dense after optimization)
+        // SAFETY: We verified ac_buffer is non-empty above. Root node is at offset 0,
+        // ACNodeHot is 20 bytes, and the buffer contains valid serialized data.
+        let root_dense_offset = unsafe {
+            let root_node = ac_buffer.as_ptr().cast::<ACNodeHot>().read();
+            root_node.edges_offset as usize
+        };
+
         let mut current_offset = 0usize; // Start at root node
 
         for &search_ch in search_text.iter() {
             // Traverse to next state
             loop {
-                // Try to find transition
+                if current_offset == 0 {
+                    // Fast path: root is always Dense - direct table lookup
+                    let target_offset = root_dense_offset + (search_ch as usize * 4);
+                    if target_offset + 4 <= ac_buffer.len() {
+                        let target = u32::from_le_bytes([
+                            ac_buffer[target_offset],
+                            ac_buffer[target_offset + 1],
+                            ac_buffer[target_offset + 2],
+                            ac_buffer[target_offset + 3],
+                        ]);
+                        if target != 0 {
+                            current_offset = target as usize;
+                        }
+                    }
+                    break;
+                }
+
+                // Try to find transition for non-root nodes
                 if let Some(next_offset) =
                     Self::find_ac_transition(ac_buffer, current_offset, search_ch)
                 {
@@ -1253,12 +1278,7 @@ impl Paraglob {
                     break;
                 }
 
-                // Follow failure link
-                if current_offset == 0 {
-                    break; // At root, stay there
-                }
-
-                // SAFETY: Fast path with aligned pointer read
+                // SAFETY: Bounds checked before pointer read. ACNodeHot is 4-byte aligned.
                 let node = unsafe {
                     if current_offset + mem::size_of::<ACNodeHot>() > ac_buffer.len() {
                         break;
@@ -1267,13 +1287,14 @@ impl Paraglob {
                     ptr.read()
                 };
                 current_offset = node.failure_offset as usize;
-
-                // Continue loop to try transition from new state
-                // Don't break here - we need to retry the transition!
             }
 
-            // Collect pattern IDs at this state
-            // SAFETY: Fast path with aligned pointer reads
+            // Collect pattern IDs at this state (skip for root - no patterns there)
+            if current_offset == 0 {
+                continue;
+            }
+
+            // SAFETY: Bounds checked before pointer read. ACNodeHot is 4-byte aligned.
             let node = unsafe {
                 if current_offset + mem::size_of::<ACNodeHot>() > ac_buffer.len() {
                     continue;
@@ -1286,7 +1307,7 @@ impl Paraglob {
                 let patterns_offset = node.patterns_offset as usize;
                 let pattern_count = node.pattern_count as usize;
 
-                // SAFETY: Read u32 array directly - HOT PATH (4-byte aligned)
+                // SAFETY: Bounds checked. Pattern IDs are u32 (4-byte aligned).
                 unsafe {
                     if patterns_offset + pattern_count * 4 <= ac_buffer.len() {
                         let ids_ptr = ac_buffer.as_ptr().add(patterns_offset).cast::<u32>();
@@ -1363,7 +1384,6 @@ impl Paraglob {
             }
 
             StateKind::Dense => {
-                // O(1) lookup in dense table
                 let lookup_offset = node.edges_offset as usize;
                 let target_offset_offset = lookup_offset + (ch as usize * 4);
 
