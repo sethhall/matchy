@@ -124,8 +124,19 @@ MMDB-format data types:
 | Boolean | 14 | 0 bytes | Value in type byte |
 | Float | 15 | 4 bytes | IEEE 754 |
 | Array | 11 | Variable | Ordered list |
+| Timestamp | 128 | 8 bytes | Matchy extension (Unix epoch seconds) |
 
 See [MaxMind DB Format](https://maxmind.github.io/MaxMind-DB/) for encoding details.
+
+### Matchy Extended Types
+
+Matchy extends the MMDB format with additional types using codes 128+:
+
+| Type | Code | Size | Notes |
+|------|------|------|-------|
+| Timestamp | 128 | 8 bytes | Unix epoch seconds (signed i64) |
+
+These types are stored using the MMDB extended type mechanism (raw byte = code - 7). Timestamp values are serialized to JSON as ISO 8601 strings (e.g., `2025-10-02T18:44:31Z`) for human readability while stored compactly as 8 bytes instead of 27-byte strings.
 
 ## PARAGLOB Section Format
 

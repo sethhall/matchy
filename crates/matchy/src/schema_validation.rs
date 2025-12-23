@@ -370,13 +370,25 @@ fn validate_threatdb(data: &HashMap<String, DataValue>) -> Vec<ValidationErrorDe
         }
     }
 
-    // Optional string fields (no validation beyond type): description, first_seen, last_seen, reference
-    for field in &["description", "first_seen", "last_seen", "reference"] {
+    // Optional string fields: description, reference
+    for field in &["description", "reference"] {
         if let Some(v) = data.get(*field) {
             if !matches!(v, DataValue::String(_)) {
                 errors.push(ValidationErrorDetail {
                     path: format!("/{field}"),
                     message: "expected string type".to_string(),
+                });
+            }
+        }
+    }
+
+    // Timestamp fields: first_seen, last_seen (accept String or Timestamp)
+    for field in &["first_seen", "last_seen"] {
+        if let Some(v) = data.get(*field) {
+            if !matches!(v, DataValue::String(_) | DataValue::Timestamp(_)) {
+                errors.push(ValidationErrorDetail {
+                    path: format!("/{field}"),
+                    message: "expected string or timestamp type".to_string(),
                 });
             }
         }
@@ -613,5 +625,25 @@ mod tests {
         assert!(display.contains("2 errors"));
         assert!(display.contains("threat_level"));
         assert!(display.contains("confidence"));
+    }
+
+    #[test]
+    fn test_timestamp_fields_accept_string_and_timestamp() {
+        let validator = SchemaValidator::new("threatdb").unwrap();
+
+        let mut data_with_string = valid_threatdb_data();
+        data_with_string.insert(
+            "first_seen".to_string(),
+            DataValue::String("2025-10-02T18:44:31Z".to_string()),
+        );
+        assert!(validator.validate(&data_with_string).is_ok());
+
+        let mut data_with_timestamp = valid_threatdb_data();
+        data_with_timestamp.insert("first_seen".to_string(), DataValue::Timestamp(1727891071));
+        assert!(validator.validate(&data_with_timestamp).is_ok());
+
+        let mut data_with_wrong_type = valid_threatdb_data();
+        data_with_wrong_type.insert("first_seen".to_string(), DataValue::Uint32(12345));
+        assert!(validator.validate(&data_with_wrong_type).is_err());
     }
 }

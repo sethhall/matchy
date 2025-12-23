@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::TimeZone;
 use matchy::DataValue;
 use serde_json::json;
 use std::collections::HashMap;
@@ -197,6 +198,10 @@ pub fn data_value_to_json(data: &DataValue) -> serde_json::Value {
             json!(items.iter().map(data_value_to_json).collect::<Vec<_>>())
         }
         DataValue::Pointer(_) => json!("<pointer>"),
+        DataValue::Timestamp(epoch) => {
+            let dt = chrono::Utc.timestamp_opt(*epoch, 0).unwrap();
+            json!(dt.to_rfc3339())
+        }
     }
 }
 
@@ -361,5 +366,9 @@ pub fn format_data_value(data: &DataValue, indent: &str) -> String {
             }
         }
         DataValue::Pointer(_) => "<pointer>".to_string(),
+        DataValue::Timestamp(epoch) => {
+            let dt = chrono::Utc.timestamp_opt(*epoch, 0).unwrap();
+            format!("\"{}\"", dt.to_rfc3339())
+        }
     }
 }

@@ -147,7 +147,8 @@ pub fn validate_value_strings_utf8(value: &DataValue) -> Result<u32, String> {
         | DataValue::Uint64(_)
         | DataValue::Uint128(_)
         | DataValue::Bool(_)
-        | DataValue::Float(_) => {}
+        | DataValue::Float(_)
+        | DataValue::Timestamp(_) => {}
     }
 
     Ok(count)

@@ -303,6 +303,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "chrono"
+version = "0.4.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "145052bdd345b87320e369255277e3fb5152762ad123a901ef5c262dd38fe8d2"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "ciborium"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1085,6 +1094,7 @@ dependencies = [
  "bech32",
  "bs58",
  "cbindgen",
+ "chrono",
  "clap",
  "criterion",
  "crossbeam-channel",
@@ -1136,6 +1146,7 @@ dependencies = [
 name = "matchy-data-format"
 version = "1.2.2"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
 ]

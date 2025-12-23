@@ -10,6 +10,7 @@ publish = false  # Internal crate for now
 # Minimal dependencies for serialization support
 [dependencies]
 serde.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
