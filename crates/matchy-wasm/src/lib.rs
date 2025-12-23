@@ -1127,6 +1127,7 @@ mod native_tests {
     }
 
     #[test]
+    #[ignore] // Requires external file at hardcoded path - run manually
     fn test_production_threatdb_ip_lookup() {
         use std::path::Path;
 
@@ -1190,6 +1191,7 @@ mod native_tests {
     }
 
     #[test]
+    #[ignore] // Requires external file at hardcoded path - run manually
     fn test_query_result_to_js_with_ip_data() {
         use std::path::Path;
 

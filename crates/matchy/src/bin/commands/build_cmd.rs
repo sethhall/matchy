@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::DateTime;
 use matchy::schemas::{get_schema_info, is_known_database_type};
 use matchy::{DataValue, DatabaseBuilder, DatabaseBuilderExt, MatchMode};
 use std::collections::HashMap;
@@ -206,7 +207,6 @@ pub fn cmd_build(
                     for (col_idx, col_name) in &data_cols {
                         if let Some(value) = record.get(*col_idx) {
                             if !value.is_empty() {
-                                // Try to parse as number, otherwise treat as string
                                 let data_value = if let Ok(i) = value.parse::<i64>() {
                                     DataValue::Int32(i32::try_from(i).unwrap_or(if i < 0 {
                                         i32::MIN
@@ -219,6 +219,8 @@ pub fn cmd_build(
                                     DataValue::Double(f)
                                 } else if value == "true" || value == "false" {
                                     DataValue::Bool(value == "true")
+                                } else if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
+                                    DataValue::Timestamp(dt.timestamp())
                                 } else {
                                     DataValue::String(value.to_string())
                                 };

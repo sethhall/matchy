@@ -234,7 +234,13 @@ pub fn json_to_data_value(json: &serde_json::Value) -> Result<DataValue> {
                 anyhow::bail!("Unsupported number type")
             }
         }
-        serde_json::Value::String(s) => Ok(DataValue::String(s.clone())),
+        serde_json::Value::String(s) => {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                Ok(DataValue::Timestamp(dt.timestamp()))
+            } else {
+                Ok(DataValue::String(s.clone()))
+            }
+        }
         serde_json::Value::Array(arr) => {
             let items = arr
                 .iter()
