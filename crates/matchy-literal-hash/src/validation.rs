@@ -176,14 +176,14 @@ mod tests {
     #[test]
     fn test_validate_literal_hash_valid() {
         let mut buffer = vec![0u8; 100];
-        buffer[0..4].copy_from_slice(b"LHSH"); // Valid magic
-        buffer[4..8].copy_from_slice(&1u32.to_le_bytes()); // version = 1
-        buffer[8..12].copy_from_slice(&100u32.to_le_bytes()); // entry_count = 100
-        buffer[12..16].copy_from_slice(&128u32.to_le_bytes()); // table_size = 128
+        buffer[0..4].copy_from_slice(b"LHSH");
+        buffer[4..8].copy_from_slice(&2u32.to_le_bytes());
+        buffer[8..12].copy_from_slice(&100u32.to_le_bytes());
+        buffer[12..16].copy_from_slice(&128u32.to_le_bytes());
 
         let result = validate_literal_hash(&buffer, 0);
         assert!(result.is_valid());
-        assert_eq!(result.stats.version, 1);
+        assert_eq!(result.stats.version, 2);
         assert_eq!(result.stats.entry_count, 100);
         assert_eq!(result.stats.table_size, 128);
     }
@@ -192,9 +192,9 @@ mod tests {
     fn test_validate_literal_hash_table_too_small() {
         let mut buffer = vec![0u8; 100];
         buffer[0..4].copy_from_slice(b"LHSH");
-        buffer[4..8].copy_from_slice(&1u32.to_le_bytes()); // version
-        buffer[8..12].copy_from_slice(&100u32.to_le_bytes()); // entry_count = 100
-        buffer[12..16].copy_from_slice(&50u32.to_le_bytes()); // table_size = 50 (too small!)
+        buffer[4..8].copy_from_slice(&2u32.to_le_bytes());
+        buffer[8..12].copy_from_slice(&100u32.to_le_bytes());
+        buffer[12..16].copy_from_slice(&50u32.to_le_bytes());
 
         let result = validate_literal_hash(&buffer, 0);
         assert!(!result.is_valid());

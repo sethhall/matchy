@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ⚠️ Breaking Changes
+
+- **Literal Hash Format v2**: Databases containing literal strings (non-wildcard patterns) must be rebuilt
+  - Changed from string storage to 96-bit hash-only format
+  - Old databases with literal strings will fail to load with: `Unsupported literal hash version: 1 (expected 2)`
+  - Databases with only IPs or glob patterns are unaffected
+  - **Action required**: Rebuild databases from source data using `matchy build`
+
 ### Added
 - **Auto-Build in Match Command**: `matchy match` can now accept JSON or CSV source files directly
   - Automatically builds database in-memory when `.json` or `.csv` file is provided
@@ -26,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Validation now passes with 0 errors/warnings (previously reported 2.2M+ false errors)
 
 ### Changed
+- **Literal Hash 96-bit Format**: Switched from string storage to hash-only matching
+  - ~50% smaller literal sections (no string pool)
+  - Faster lookups (12-byte memcmp vs variable-length strcmp)
+  - Privacy-preserving (original strings not stored in database)
+  - Uses XXH3_128 truncated to 96 bits (collision probability < 10⁻²⁴)
+
 - **Extractor Thread-Safety**: `Extractor` is now `Send + Sync` and can be shared across threads via `Arc`
   - Moved scratch buffers to thread-local storage (same pattern as `Database` and `Paraglob`)
   - Each thread gets its own buffers for zero-allocation extraction

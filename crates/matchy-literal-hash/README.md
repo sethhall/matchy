@@ -4,7 +4,7 @@ O(1) exact string matching using hash tables with parallel construction.
 
 ## Overview
 
-A memory-mapped hash table optimized for exact string lookups. Unlike Aho-Corasick (designed for pattern matching), this provides O(1) lookups for literal strings using XXH64 with sharded parallel construction.
+A memory-mapped hash table optimized for exact string lookups. Unlike Aho-Corasick (designed for pattern matching), this provides O(1) lookups for literal strings using 96-bit truncated XXH3 hashes with sharded parallel construction.
 
 ## Features
 
@@ -12,12 +12,13 @@ A memory-mapped hash table optimized for exact string lookups. Unlike Aho-Corasi
 - **Parallel construction**: Sharded building for large datasets
 - **Memory-mapped**: Zero-copy loading from disk
 - **Case modes**: Case-sensitive and case-insensitive matching
-- **Efficient format**: Optimized binary layout with alignment
+- **Privacy**: Hash-only storage means original strings aren't stored
+- **Compact**: ~50% smaller than string-storing formats
 
 ## Usage
 
 ```rust
-use matchy_literal_hash::{LiteralHashBuilder, MatchMode};
+use matchy_literal_hash::{LiteralHashBuilder, LiteralHash, MatchMode};
 
 // Build a hash table
 let mut builder = LiteralHashBuilder::new(MatchMode::CaseInsensitive);
@@ -36,25 +37,22 @@ assert_eq!(hash.lookup("EXAMPLE.COM"), Some(0)); // Case-insensitive
 ## Architecture
 
 - **Sharded hash table**: Distributes entries across multiple shards for parallel construction
-- **XXH64 hashing**: Fast, stable hash function
+- **XXH3_128 hashing**: Fast hash function, truncated to 96 bits
 - **Binary format**: Memory-mappable with magic bytes "LHSH"
 
-## Binary Format
+## Binary Format (Version 2)
 
 ```
-[Header]
+[Header - 32 bytes]
   magic: "LHSH"
-  version: 1
-  entry_count, table_size, offsets...
+  version: 2
+  entry_count, table_size, reserved1, reserved2, num_shards, shard_bits
 
 [Shard Offset Table]
   Offsets to each shard in the table
 
 [Hash Table]
-  Sharded entries: [hash, string_offset, pattern_id]
-
-[String Pool]
-  Concatenated null-terminated strings
+  entries: [hash: [u8; 12], pattern_id: u32]
 
 [Pattern Mappings]
   (pattern_id, data_offset) pairs
@@ -64,5 +62,5 @@ assert_eq!(hash.lookup("EXAMPLE.COM"), Some(0)); // Case-insensitive
 
 - `matchy-match-mode` - Shared MatchMode enum
 - `rustc-hash` - Fast FxHashMap
-- `xxhash-rust` - XXH64 implementation
+- `xxhash-rust` - XXH3 implementation
 - `rayon` - Parallel shard construction

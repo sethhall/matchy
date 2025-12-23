@@ -2,45 +2,45 @@
 //!
 //! This module provides a memory-mapped hash table optimized for exact string matching.
 //! Unlike Aho-Corasick which is designed for pattern matching, this provides O(1) lookups
-//! for literal strings using XXH64 with sharded parallel construction.
+//! for literal strings using 96-bit truncated XXH3 hashes with sharded parallel construction.
 //!
-//! # Format
+//! # Format (Version 2)
 //!
 //! The hash table is stored in a memory-mappable binary format:
 //!
 //! ```text
-//! [Header]
+//! [Header - 32 bytes]
 //!   magic: [u8; 4]           // "LHSH"
-//!   version: u32              // 1
+//!   version: u32              // 2
 //!   entry_count: u32          // Number of literal patterns
 //!   table_size: u32           // Hash table size (entry_count * 1.25)
-//!   strings_offset: u32       // Offset to string pool
-//!   strings_size: u32         // Size of string pool
+//!   reserved1: u32            // Reserved (was strings_offset, now 0)
+//!   reserved2: u32            // Reserved (was strings_size, now 0)
 //!   num_shards: u32           // Number of shards (power of 2)
 //!   shard_bits: u32           // Bits used for sharding (log2(num_shards))
 //!
-//! [Hash Table]
-//!   Sharded table: [Shard0][Shard1]...[ShardN]
-//!   Each shard is a power-of-two sized slice
-//!   entries: [HashEntry; table_size]
-//!     hash: u64               // Full hash for verification
-//!     string_offset: u32      // Offset into string pool (or 0xFFFFFFFF if empty)
-//!     pattern_id: u32         // Pattern ID for data lookup
+//! [Shard Offset Table]
+//!   offsets: [u32; num_shards + 1]
 //!
-//! [String Pool]
-//!   Concatenated shard string pools
-//!   Strings stored as: [length: u16][bytes...][null terminator]
+//! [Hash Table]
+//!   entries: [HashEntry; table_size]
+//!     hash: [u8; 12]          // 96-bit truncated XXH3_128
+//!     pattern_id: u32         // Pattern ID for data lookup
 //!
 //! [Pattern Mappings]
 //!   count: u32
 //!   mappings: [(pattern_id: u32, data_offset: u32); count]
 //! ```
 //!
+//! Note: Version 2 removes the string pool entirely. String verification is replaced
+//! by 96-bit hash comparison, which provides negligible collision probability
+//! (false positive rate < 10^-24 per query for 100K entries).
+//!
 use matchy_match_mode::MatchMode;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::mem;
-use xxhash_rust::xxh64::xxh64;
+use xxhash_rust::xxh3::xxh3_128;
 
 // Validation module for literal hash structures
 pub mod validation;
@@ -71,41 +71,39 @@ impl std::error::Error for LiteralHashError {}
 pub const LITERAL_HASH_MAGIC: &[u8; 4] = b"LHSH";
 
 /// Current version of the literal hash format
-pub const MATCHY_LITERAL_HASH_VERSION: u32 = 1;
+pub const MATCHY_LITERAL_HASH_VERSION: u32 = 2;
 
-/// Empty slot marker
-const EMPTY_SLOT: u32 = 0xFFFFFFFF;
+/// Empty slot marker - all 0xFF bytes indicate an empty hash entry
+const EMPTY_HASH: [u8; 12] = [0xFF; 12];
 
-/// Hash table header
+/// Hash table header (32 bytes)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct LiteralHashHeader {
     /// Magic bytes "LHSH"
     pub magic: [u8; 4],
-    /// Format version
+    /// Format version (2 for 96-bit hash format)
     pub version: u32,
     /// Number of literal patterns
     pub entry_count: u32,
     /// Hash table size
     pub table_size: u32,
-    /// Offset to string pool
-    pub strings_offset: u32,
-    /// Size of string pool
-    pub strings_size: u32,
+    /// Reserved (was strings_offset in v1)
+    pub reserved1: u32,
+    /// Reserved (was strings_size in v1)
+    pub reserved2: u32,
     /// Number of shards (power of 2)
     pub num_shards: u32,
     /// Bits used for sharding (log2(num_shards))
     pub shard_bits: u32,
 }
 
-/// Single hash table entry
+/// Single hash table entry (16 bytes)
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HashEntry {
-    /// Full hash for verification
-    pub hash: u64,
-    /// Offset into string pool
-    pub string_offset: u32,
+    /// 96-bit truncated XXH3_128 hash
+    pub hash: [u8; 12],
     /// Pattern ID for data lookup
     pub pattern_id: u32,
 }
@@ -113,14 +111,13 @@ pub struct HashEntry {
 impl HashEntry {
     fn empty() -> Self {
         Self {
-            hash: 0,
-            string_offset: EMPTY_SLOT,
+            hash: EMPTY_HASH,
             pattern_id: 0,
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.string_offset == EMPTY_SLOT
+        self.hash == EMPTY_HASH
     }
 }
 
@@ -137,13 +134,12 @@ pub struct PatternMapping {
 /// Single shard of the hash table
 struct Shard {
     table: Vec<HashEntry>,
-    strings: Vec<u8>,
     shard_id: usize,
 }
 
 /// Builder for literal hash table
 pub struct LiteralHashBuilder {
-    patterns: Vec<(String, u32, u64)>, // (pattern, pattern_id, hash)
+    patterns: Vec<([u8; 12], u32)>, // (hash, pattern_id)
     mode: MatchMode,
 }
 
@@ -159,53 +155,37 @@ impl LiteralHashBuilder {
 
     /// Add a literal pattern
     pub fn add_pattern(&mut self, pattern: &str, pattern_id: u32) {
-        // Normalize pattern based on match mode and pre-compute hash
         let normalized = match self.mode {
             MatchMode::CaseSensitive => pattern.to_string(),
             MatchMode::CaseInsensitive => pattern.to_lowercase(),
         };
         let hash = compute_hash(&normalized);
-        self.patterns.push((normalized, pattern_id, hash));
+        self.patterns.push((hash, pattern_id));
     }
 
     /// Build the hash table with parallel sharding
-    ///
-    /// Returns (hash_table_bytes, pattern_id_to_data_offset_map)
-    pub fn build(
-        self,
-        pattern_data_offsets: &[(u32, u32)], // (pattern_id, data_offset)
-    ) -> Result<Vec<u8>, LiteralHashError> {
+    pub fn build(self, pattern_data_offsets: &[(u32, u32)]) -> Result<Vec<u8>, LiteralHashError> {
         if self.patterns.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Determine number of shards adaptively based on dataset size
-        // Small datasets: fewer shards to avoid memory overhead
-        // Large datasets: more shards for parallelism
         let shard_bits = if self.patterns.len() < 10_000 {
-            4 // 16 shards for small datasets
+            4
         } else if self.patterns.len() < 100_000 {
-            5 // 32 shards for medium datasets
+            5
         } else {
-            6 // 64 shards for large datasets
+            6
         };
         let num_shards = 1 << shard_bits;
 
-        // We'll calculate per-shard capacity during build (after partitioning)
-        // to avoid allocating huge empty tables
-
-        // Partition entries into shards by top shard_bits of hash
-        let mut shard_buckets: Vec<Vec<(String, u32, u64)>> =
+        let mut shard_buckets: Vec<Vec<([u8; 12], u32)>> =
             (0..num_shards).map(|_| Vec::new()).collect();
 
-        for (pattern, pattern_id, hash) in self.patterns {
-            // Modulo in u64 space, result bounded by num_shards (always fits in usize)
-            let shard_id = usize::try_from(hash % (num_shards as u64)).unwrap();
-            shard_buckets[shard_id].push((pattern, pattern_id, hash));
+        for (hash, pattern_id) in self.patterns {
+            let shard_id = hash_to_shard(&hash, num_shards);
+            shard_buckets[shard_id].push((hash, pattern_id));
         }
 
-        // Build shards in batches to limit memory usage
-        // Batch size scales with available parallelism (respects RAYON_NUM_THREADS)
         let parallelism = std::thread::available_parallelism()
             .map(std::num::NonZero::get)
             .unwrap_or(8);
@@ -220,22 +200,18 @@ impl LiteralHashBuilder {
                 .enumerate()
                 .map(|(i, entries)| {
                     let shard_id = chunk_start + i;
-                    let entries_vec = std::mem::take(entries); // Move data, free memory
-                    build_shard_auto_size(shard_id, &entries_vec)
+                    let entries_vec = std::mem::take(entries);
+                    build_shard(shard_id, &entries_vec)
                 })
                 .collect();
 
             shards.append(&mut chunk);
         }
 
-        // Concatenate shards into final table and string pool
         let table_size: usize = shards.iter().map(|s| s.table.len()).sum();
         let mut final_table = Vec::with_capacity(table_size);
-        let mut final_string_pool = Vec::new();
-        let mut pool_offset = 0;
 
-        // Build shard offset table for lookups
-        let mut shard_offsets = vec![0u32; num_shards + 1]; // +1 for end sentinel
+        let mut shard_offsets = vec![0u32; num_shards + 1];
         let mut table_offset = 0u32;
 
         for shard in &shards {
@@ -244,41 +220,23 @@ impl LiteralHashBuilder {
                 LiteralHashError::InvalidFormat("Shard table size exceeds u32::MAX".into())
             })?;
         }
-        shard_offsets[num_shards] = table_offset; // End sentinel
+        shard_offsets[num_shards] = table_offset;
 
-        for mut shard in shards {
-            let shard_pool_size = u32::try_from(shard.strings.len()).map_err(|_| {
-                LiteralHashError::InvalidFormat("Shard string pool exceeds u32::MAX".into())
-            })?;
-
-            // Adjust string offsets by pool base
-            for entry in &mut shard.table {
-                if !entry.is_empty() {
-                    entry.string_offset += pool_offset;
-                }
-            }
-
+        for shard in shards {
             final_table.extend(shard.table);
-            final_string_pool.extend(shard.strings);
-            pool_offset += shard_pool_size;
         }
 
-        // Calculate offsets
-        let header_size = 32; // Fixed: 4 bytes magic + 7 u32 fields
-        let shard_table_size = (num_shards + 1) * 4; // Shard offset table
+        let header_size = 32;
+        let shard_table_size = (num_shards + 1) * 4;
         let table_bytes_size = table_size * mem::size_of::<HashEntry>();
-        let strings_offset = header_size + shard_table_size + table_bytes_size;
-        let strings_size = final_string_pool.len();
 
-        // Pre-allocate entire buffer to avoid reallocation
         let total_size = header_size
+            + shard_table_size
             + table_bytes_size
-            + strings_size
-            + 4 // pattern_data_offsets count
-            + (pattern_data_offsets.len() * 8); // pattern mappings
+            + 4
+            + (pattern_data_offsets.len() * 8);
         let mut buffer = Vec::with_capacity(total_size);
 
-        // Header
         let entry_count = final_table.iter().filter(|e| !e.is_empty()).count();
         let header = LiteralHashHeader {
             magic: *LITERAL_HASH_MAGIC,
@@ -289,12 +247,8 @@ impl LiteralHashBuilder {
             table_size: u32::try_from(table_size).map_err(|_| {
                 LiteralHashError::InvalidFormat("Table size exceeds u32::MAX".into())
             })?,
-            strings_offset: u32::try_from(strings_offset).map_err(|_| {
-                LiteralHashError::InvalidFormat("Strings offset exceeds u32::MAX".into())
-            })?,
-            strings_size: u32::try_from(strings_size).map_err(|_| {
-                LiteralHashError::InvalidFormat("Strings size exceeds u32::MAX".into())
-            })?,
+            reserved1: 0,
+            reserved2: 0,
             num_shards: u32::try_from(num_shards).map_err(|_| {
                 LiteralHashError::InvalidFormat("Shard count exceeds u32::MAX".into())
             })?,
@@ -305,28 +259,21 @@ impl LiteralHashBuilder {
         buffer.extend_from_slice(&header.version.to_le_bytes());
         buffer.extend_from_slice(&header.entry_count.to_le_bytes());
         buffer.extend_from_slice(&header.table_size.to_le_bytes());
-        buffer.extend_from_slice(&header.strings_offset.to_le_bytes());
-        buffer.extend_from_slice(&header.strings_size.to_le_bytes());
+        buffer.extend_from_slice(&header.reserved1.to_le_bytes());
+        buffer.extend_from_slice(&header.reserved2.to_le_bytes());
         buffer.extend_from_slice(&header.num_shards.to_le_bytes());
         buffer.extend_from_slice(&header.shard_bits.to_le_bytes());
 
-        // Write shard offset table
         for offset in &shard_offsets {
             buffer.extend_from_slice(&offset.to_le_bytes());
         }
 
-        // Hash table entries
         buffer.reserve(table_bytes_size);
         for entry in final_table.iter() {
-            buffer.extend_from_slice(&entry.hash.to_le_bytes());
-            buffer.extend_from_slice(&entry.string_offset.to_le_bytes());
+            buffer.extend_from_slice(&entry.hash);
             buffer.extend_from_slice(&entry.pattern_id.to_le_bytes());
         }
 
-        // String pool
-        buffer.extend_from_slice(&final_string_pool);
-
-        // Pattern mappings
         let pattern_count = u32::try_from(pattern_data_offsets.len()).map_err(|_| {
             LiteralHashError::InvalidFormat("Pattern count exceeds u32::MAX".into())
         })?;
@@ -358,16 +305,14 @@ pub struct LiteralHash<'a> {
     buffer: &'a [u8],
     header: LiteralHashHeader,
     table_start: usize,
-    strings_start: usize,
     mappings_start: usize,
-    shard_offsets: Vec<u32>, // Offset of each shard in the table
+    shard_offsets: Vec<u32>,
     mode: MatchMode,
 }
 
 impl<'a> LiteralHash<'a> {
     /// Load from memory-mapped buffer
     pub fn from_buffer(buffer: &'a [u8], mode: MatchMode) -> Result<Self, LiteralHashError> {
-        // Header size: 4 + 7*4 = 32 bytes (magic + 7 u32 fields)
         const HEADER_SIZE: usize = 32;
         if buffer.len() < HEADER_SIZE {
             return Err(LiteralHashError::InvalidFormat(
@@ -375,7 +320,6 @@ impl<'a> LiteralHash<'a> {
             ));
         }
 
-        // Parse header
         let magic = &buffer[0..4];
         if magic != LITERAL_HASH_MAGIC {
             return Err(LiteralHashError::InvalidFormat(format!(
@@ -386,14 +330,14 @@ impl<'a> LiteralHash<'a> {
         let version = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
         if version != MATCHY_LITERAL_HASH_VERSION {
             return Err(LiteralHashError::InvalidFormat(format!(
-                "Unsupported literal hash version: {version}"
+                "Unsupported literal hash version: {version} (expected {MATCHY_LITERAL_HASH_VERSION})"
             )));
         }
 
         let entry_count = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
         let table_size = u32::from_le_bytes(buffer[12..16].try_into().unwrap());
-        let strings_offset = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
-        let strings_size = u32::from_le_bytes(buffer[20..24].try_into().unwrap());
+        let reserved1 = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
+        let reserved2 = u32::from_le_bytes(buffer[20..24].try_into().unwrap());
         let num_shards = u32::from_le_bytes(buffer[24..28].try_into().unwrap());
         let shard_bits = u32::from_le_bytes(buffer[28..32].try_into().unwrap());
 
@@ -402,19 +346,17 @@ impl<'a> LiteralHash<'a> {
             version,
             entry_count,
             table_size,
-            strings_offset,
-            strings_size,
+            reserved1,
+            reserved2,
             num_shards,
             shard_bits,
         };
 
-        // Header is 32 bytes: 4 byte magic + 7 u32 fields
         let header_size = 32;
-
-        // Read shard offset table (num_shards + 1 entries)
         let shard_table_start = header_size;
         let shard_table_size = (num_shards as usize + 1) * 4;
         let mut shard_offsets = Vec::with_capacity(num_shards as usize + 1);
+
         for i in 0..=num_shards as usize {
             let offset_pos = shard_table_start + i * 4;
             if offset_pos + 4 > buffer.len() {
@@ -427,14 +369,13 @@ impl<'a> LiteralHash<'a> {
         }
 
         let table_start = shard_table_start + shard_table_size;
-        let strings_start = strings_offset as usize;
-        let mappings_start = strings_start + strings_size as usize;
+        let table_bytes = table_size as usize * mem::size_of::<HashEntry>();
+        let mappings_start = table_start + table_bytes;
 
         Ok(Self {
             buffer,
             header,
             table_start,
-            strings_start,
             mappings_start,
             shard_offsets,
             mode,
@@ -448,38 +389,30 @@ impl<'a> LiteralHash<'a> {
     }
 
     /// Lookup a literal string using sharded table
-    ///
-    /// Returns the pattern ID if found, None otherwise
     #[must_use]
     pub fn lookup(&self, query: &str) -> Option<u32> {
-        // Normalize query based on match mode
         let normalized_query = match self.mode {
             MatchMode::CaseSensitive => query.to_string(),
             MatchMode::CaseInsensitive => query.to_lowercase(),
         };
-        let hash = compute_hash(&normalized_query);
+        let query_hash = compute_hash(&normalized_query);
 
-        // Compute shard and shard bounds using offset table
-        let num_shards = self.header.num_shards;
-        let shard_id = usize::try_from(hash % u64::from(num_shards)).unwrap();
+        let num_shards = self.header.num_shards as usize;
+        let shard_id = hash_to_shard(&query_hash, num_shards);
 
         let shard_start = self.shard_offsets[shard_id] as usize;
         let shard_end = self.shard_offsets[shard_id + 1] as usize;
         let shard_capacity = shard_end - shard_start;
 
         if shard_capacity == 0 {
-            return None; // Empty shard
+            return None;
         }
 
-        // Shard capacity is always power of 2, so mask works
         let shard_mask = shard_capacity - 1;
-
-        // Mask result bounded by shard_capacity (always fits in usize)
-        let base_slot = usize::try_from(hash & (shard_mask as u64)).unwrap();
-        let mut slot = shard_start + base_slot; // Absolute position
+        let base_slot = hash_to_slot(&query_hash, shard_mask);
+        let mut slot = shard_start + base_slot;
         let entry_size = mem::size_of::<HashEntry>();
 
-        // Lookup within shard only
         for _ in 0..shard_capacity {
             let entry_offset = self.table_start + slot * entry_size;
             if entry_offset + entry_size > self.buffer.len() {
@@ -487,47 +420,21 @@ impl<'a> LiteralHash<'a> {
             }
 
             let entry_bytes = &self.buffer[entry_offset..entry_offset + entry_size];
-            let entry_hash = u64::from_le_bytes(entry_bytes[0..8].try_into().unwrap());
-            let string_offset = u32::from_le_bytes(entry_bytes[8..12].try_into().unwrap());
+            let entry_hash: [u8; 12] = entry_bytes[0..12].try_into().unwrap();
             let pattern_id = u32::from_le_bytes(entry_bytes[12..16].try_into().unwrap());
 
-            // Empty slot - not found
-            if string_offset == EMPTY_SLOT {
+            if entry_hash == EMPTY_HASH {
                 return None;
             }
 
-            // Hash matches - verify string
-            if entry_hash == hash {
-                if let Some(stored_string) = self.read_string(string_offset as usize) {
-                    if stored_string == normalized_query {
-                        return Some(pattern_id);
-                    }
-                }
+            if entry_hash == query_hash {
+                return Some(pattern_id);
             }
 
-            // Wrap within shard only
             slot = shard_start + ((slot + 1 - shard_start) & shard_mask);
         }
 
         None
-    }
-
-    /// Read a string from the string pool
-    fn read_string(&self, offset: usize) -> Option<&str> {
-        let abs_offset = self.strings_start + offset;
-        if abs_offset + 2 > self.buffer.len() {
-            return None;
-        }
-
-        let len = u16::from_le_bytes(self.buffer[abs_offset..abs_offset + 2].try_into().ok()?);
-        let str_start = abs_offset + 2;
-        let str_end = str_start + len as usize;
-
-        if str_end > self.buffer.len() {
-            return None;
-        }
-
-        std::str::from_utf8(&self.buffer[str_start..str_end]).ok()
     }
 
     /// Get data offset for a pattern ID
@@ -577,74 +484,61 @@ impl<'a> LiteralHash<'a> {
 }
 
 /// Build a single shard from its entries
-fn build_shard_auto_size(shard_id: usize, entries: &[(String, u32, u64)]) -> Shard {
+fn build_shard(shard_id: usize, entries: &[([u8; 12], u32)]) -> Shard {
     if entries.is_empty() {
         return Shard {
             shard_id,
             table: Vec::new(),
-            strings: Vec::new(),
         };
     }
 
-    // Use 0.6 load factor for faster builds (40% empty space reduces collisions dramatically)
-    // Integer math: needed = ceil(len / 0.6) = ceil(len * 10 / 6)
     let needed = (entries.len() * 10).div_ceil(6);
     let capacity = needed.next_power_of_two().max(16);
     let mask = capacity - 1;
 
-    // Build string pool for this shard
-    let estimated_pool_size: usize = entries.iter().map(|(p, _, _)| 2 + p.len() + 1).sum();
-    let mut strings = Vec::with_capacity(estimated_pool_size);
-    let mut string_offsets = Vec::with_capacity(entries.len());
-
-    for (pattern, _, _) in entries {
-        string_offsets.push(strings.len());
-
-        let len = u16::try_from(pattern.len()).expect("Pattern length exceeds 65535 bytes");
-        strings.extend_from_slice(&len.to_le_bytes());
-        strings.extend_from_slice(pattern.as_bytes());
-        strings.push(0); // null terminator
+    let mut map: FxHashMap<[u8; 12], u32> = FxHashMap::default();
+    for (hash, pattern_id) in entries {
+        map.insert(*hash, *pattern_id);
     }
 
-    // Build with FxHashMap (fast!), then convert to linear-probed array
-    let mut map: FxHashMap<u64, (u32, u32)> = FxHashMap::default();
-    for (idx, (_pattern, pattern_id, hash)) in entries.iter().enumerate() {
-        let offset =
-            u32::try_from(string_offsets[idx]).expect("String pool offset exceeds u32::MAX");
-        map.insert(*hash, (offset, *pattern_id));
-    }
-
-    // Now serialize to linear-probed table
     let mut table = vec![HashEntry::empty(); capacity];
-    for (hash, (string_offset, pattern_id)) in map.into_iter() {
-        // Mask result bounded by capacity (always fits in usize)
-        let mut pos = usize::try_from(hash & (mask as u64)).unwrap();
+    for (hash, pattern_id) in map.into_iter() {
+        let mut pos = hash_to_slot(&hash, mask);
 
-        // Linear probing - should be fast since we have 40% empty space
         while !table[pos].is_empty() {
             pos = (pos + 1) & mask;
         }
 
-        table[pos] = HashEntry {
-            hash,
-            string_offset,
-            pattern_id,
-        };
+        table[pos] = HashEntry { hash, pattern_id };
     }
 
-    Shard {
-        table,
-        strings,
-        shard_id,
-    }
+    Shard { table, shard_id }
 }
 
-/// Compute XXH64 with fixed seed for stable, portable on-disk hashing
-const HASH_SEED_1: u64 = 0;
-
+/// Compute XXH3_128 and truncate to 96 bits
 #[inline]
-fn compute_hash(s: &str) -> u64 {
-    xxh64(s.as_bytes(), HASH_SEED_1)
+fn compute_hash(s: &str) -> [u8; 12] {
+    let full = xxh3_128(s.as_bytes());
+    let bytes = full.to_le_bytes();
+    bytes[0..12].try_into().unwrap()
+}
+
+/// Extract shard ID from hash
+#[inline]
+fn hash_to_shard(hash: &[u8; 12], num_shards: usize) -> usize {
+    let bucket_bits = u64::from_le_bytes(hash[0..8].try_into().unwrap());
+    #[allow(clippy::cast_possible_truncation)]
+    let result = (bucket_bits % num_shards as u64) as usize;
+    result
+}
+
+/// Extract slot index from hash
+#[inline]
+fn hash_to_slot(hash: &[u8; 12], mask: usize) -> usize {
+    let bucket_bits = u64::from_le_bytes(hash[0..8].try_into().unwrap());
+    #[allow(clippy::cast_possible_truncation)]
+    let result = (bucket_bits & mask as u64) as usize;
+    result
 }
 
 #[cfg(test)]

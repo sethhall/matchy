@@ -26,8 +26,8 @@ This crate provides the binary format for matchy databases (.mxy files), combini
 │   - Glob segments           │
 ├─────────────────────────────┤
 │ Literal Hash (optional)     │  ← matchy-literal-hash
-│   - Hash table              │
-│   - String pool             │
+│   - 96-bit hash table       │
+│   - Pattern mappings        │
 ├─────────────────────────────┤
 │ MMDB Metadata               │
 └─────────────────────────────┘

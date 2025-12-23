@@ -38,7 +38,7 @@ memchr = "2.7"
 
 # Hashing
 rustc-hash = "2.0"
-xxhash-rust = { version = "0.8", features = ["xxh64"] }
+xxhash-rust = { version = "0.8", features = ["xxh64", "xxh3"] }
 
 # Concurrency
 rayon = "1.10"

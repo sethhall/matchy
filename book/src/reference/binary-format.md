@@ -162,17 +162,35 @@ Followed by:
 
 See `matchy-format/src/offset_format.rs` for the complete `ParaglobHeader` structure (112 bytes in v5).
 
-## String Literals Hash Section Format
+## String Literals Hash Section Format (Version 2)
 
-When literal strings are present, a hash table section provides O(1) lookups:
+When literal strings are present, a hash table section provides O(1) lookups using 96-bit truncated XXH3 hashes:
 
 ```rust
-// Hash table with open addressing
-struct LiteralHashSection {
-    // Serialized hash table from matchy-literal-hash
-    // Format: capacity + array of (hash, pattern_id, data_offset)
+#[repr(C)]
+struct LiteralHashHeader {
+    magic: [u8; 4],        // "LHSH"
+    version: u32,          // 2
+    entry_count: u32,      // Number of patterns
+    table_size: u32,       // Hash table capacity
+    reserved1: u32,        // Reserved (was strings_offset in v1)
+    reserved2: u32,        // Reserved (was strings_size in v1)
+    num_shards: u32,       // Number of shards (power of 2)
+    shard_bits: u32,       // Bits used for sharding
+}
+
+#[repr(C)]
+struct HashEntry {
+    hash: [u8; 12],        // 96-bit truncated XXH3_128
+    pattern_id: u32,       // Pattern ID for data lookup
 }
 ```
+
+**Key characteristics:**
+- **Hash-only storage**: Original strings are not stored (privacy-preserving)
+- **96-bit hashes**: Negligible collision probability (< 10⁻²⁴ per query)
+- **Sharded construction**: Parallel building for large datasets
+- **16-byte entries**: Same size as v1, but ~50% smaller total (no string pool)
 
 See `matchy-literal-hash` crate for implementation details.
 
