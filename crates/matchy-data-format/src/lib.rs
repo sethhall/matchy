@@ -27,8 +27,25 @@
 //!
 //! See: <https://maxmind.github.io/MaxMind-DB/>
 
+use chrono::{DateTime, TimeZone, Utc};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+
+/// Extended type ID for Timestamp (Matchy extension, avoids collision with MaxMind types 1-15)
+const TIMESTAMP_EXTENDED_TYPE: u8 = 121; // Type 128 = 7 + 121
+
+fn try_parse_iso8601(s: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
+fn format_iso8601(epoch: i64) -> String {
+    Utc.timestamp_opt(epoch, 0)
+        .single()
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| format!("{epoch}"))
+}
 
 mod validation;
 pub use validation::{
@@ -74,6 +91,15 @@ pub enum DataValue {
     Bool(bool),
     /// IEEE 754 single precision float
     Float(f32),
+    /// Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
+    ///
+    /// Stored compactly as a variable-length i64 using Matchy extended type 128.
+    /// Serializes to/from ISO 8601 strings (e.g., "2025-10-02T18:44:31Z") in JSON,
+    /// making the optimization transparent to API consumers.
+    ///
+    /// This is a Matchy extension to the MMDB format. Standard MMDB readers
+    /// will not recognize this type.
+    Timestamp(i64),
 }
 
 // Custom serialization that excludes Pointer (internal format detail)
@@ -98,6 +124,7 @@ impl serde::Serialize for DataValue {
             Self::Array(a) => a.serialize(serializer),
             Self::Bool(b) => serializer.serialize_bool(*b),
             Self::Float(f) => serializer.serialize_f32(*f),
+            Self::Timestamp(epoch) => serializer.serialize_str(&format_iso8601(*epoch)),
         }
     }
 }
@@ -173,10 +200,16 @@ impl<'de> serde::Deserialize<'de> for DataValue {
             }
 
             fn visit_str<E>(self, v: &str) -> Result<DataValue, E> {
+                if let Some(epoch) = try_parse_iso8601(v) {
+                    return Ok(DataValue::Timestamp(epoch));
+                }
                 Ok(DataValue::String(v.to_string()))
             }
 
             fn visit_string<E>(self, v: String) -> Result<DataValue, E> {
+                if let Some(epoch) = try_parse_iso8601(&v) {
+                    return Ok(DataValue::Timestamp(epoch));
+                }
                 Ok(DataValue::String(v))
             }
 
@@ -254,6 +287,7 @@ impl Hash for DataValue {
                 // For floats, hash the bit representation to handle NaN consistently
                 v.to_bits().hash(state);
             }
+            Self::Timestamp(v) => v.hash(state),
         }
     }
 }
@@ -381,6 +415,7 @@ impl DataEncoder {
             DataValue::Array(a) => Self::encode_array(a, buffer),
             DataValue::Bool(b) => Self::encode_bool(*b, buffer),
             DataValue::Float(f) => Self::encode_float(*f, buffer),
+            DataValue::Timestamp(t) => Self::encode_timestamp(*t, buffer),
         }
     }
 
@@ -616,6 +651,13 @@ impl DataEncoder {
         buffer.extend_from_slice(&f.to_be_bytes());
     }
 
+    // Type 128: Timestamp (Matchy extension, extended type 121)
+    fn encode_timestamp(epoch: i64, buffer: &mut Vec<u8>) {
+        buffer.push(0x08); // Type 0 << 5, size 8
+        buffer.push(TIMESTAMP_EXTENDED_TYPE);
+        buffer.extend_from_slice(&epoch.to_be_bytes());
+    }
+
     /// Encode control byte with size for standard types
     fn encode_with_size(type_id: u8, size: usize, buffer: &mut Vec<u8>) {
         let type_bits = type_id << 5;
@@ -724,6 +766,7 @@ impl<'a> DataDecoder<'a> {
             11 => self.decode_array(cursor, size_from_ctrl), // Extended type 4
             14 => Ok(DataValue::Bool(size_from_ctrl != 0)), // Extended type 7
             15 => self.decode_float(cursor, size_from_ctrl), // Extended type 8
+            128 => self.decode_timestamp(cursor, size_from_ctrl), // Matchy extension
             _ => {
                 eprintln!(
                     "Unknown extended type: raw_ext_type={}, type_id={}, size_from_ctrl={}, offset={}",
@@ -992,6 +1035,26 @@ impl<'a> DataDecoder<'a> {
         *cursor += 4;
 
         Ok(DataValue::Float(f32::from_be_bytes(bytes)))
+    }
+
+    fn decode_timestamp(
+        &self,
+        cursor: &mut usize,
+        size_bits: u8,
+    ) -> Result<DataValue, &'static str> {
+        if size_bits != 8 {
+            return Err("Timestamp must be 8 bytes");
+        }
+
+        if *cursor + 8 > self.buffer.len() {
+            return Err("Timestamp data out of bounds");
+        }
+
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&self.buffer[*cursor..*cursor + 8]);
+        *cursor += 8;
+
+        Ok(DataValue::Timestamp(i64::from_be_bytes(bytes)))
     }
 
     fn decode_size(&self, cursor: &mut usize, size_bits: u8) -> Result<usize, &'static str> {
@@ -1390,5 +1453,97 @@ mod tests {
         let result: Result<DataValue, _> = serde_json::from_str(&json);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), DataValue::Int32(i32::MIN));
+    }
+
+    #[test]
+    fn test_timestamp_binary_roundtrip() {
+        let mut encoder = DataEncoder::new();
+        let epoch = 1727894671i64; // 2024-10-02T18:44:31Z
+        let value = DataValue::Timestamp(epoch);
+        let offset = encoder.encode(&value);
+
+        let bytes = encoder.into_bytes();
+        let decoder = DataDecoder::new(&bytes, 0);
+        let decoded = decoder.decode(offset).unwrap();
+
+        assert_eq!(decoded, DataValue::Timestamp(epoch));
+    }
+
+    #[test]
+    fn test_timestamp_json_serialize() {
+        let value = DataValue::Timestamp(1727894671);
+        let json = serde_json::to_string(&value).unwrap();
+        assert_eq!(json, "\"2024-10-02T18:44:31Z\"");
+    }
+
+    #[test]
+    fn test_timestamp_json_deserialize() {
+        let json = "\"2024-10-02T18:44:31Z\"";
+        let value: DataValue = serde_json::from_str(json).unwrap();
+        assert_eq!(value, DataValue::Timestamp(1727894671));
+    }
+
+    #[test]
+    fn test_timestamp_with_fractional_seconds() {
+        let json = "\"2024-10-02T18:44:31.123456Z\"";
+        let value: DataValue = serde_json::from_str(json).unwrap();
+        if let DataValue::Timestamp(epoch) = value {
+            assert_eq!(epoch, 1727894671);
+        } else {
+            panic!("Expected Timestamp, got {value:?}");
+        }
+    }
+
+    #[test]
+    fn test_non_timestamp_string_stays_string() {
+        let json = "\"hello world\"";
+        let value: DataValue = serde_json::from_str(json).unwrap();
+        assert_eq!(value, DataValue::String("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_timestamp_negative_epoch() {
+        let mut encoder = DataEncoder::new();
+        let epoch = -86400i64; // 1969-12-31
+        let value = DataValue::Timestamp(epoch);
+        let offset = encoder.encode(&value);
+
+        let bytes = encoder.into_bytes();
+        let decoder = DataDecoder::new(&bytes, 0);
+        let decoded = decoder.decode(offset).unwrap();
+
+        assert_eq!(decoded, DataValue::Timestamp(epoch));
+    }
+
+    #[test]
+    fn test_timestamp_in_map() {
+        let mut encoder = DataEncoder::new();
+        let mut map = HashMap::new();
+        map.insert("first_seen".to_string(), DataValue::Timestamp(1727894671));
+        map.insert("last_seen".to_string(), DataValue::Timestamp(1727981071));
+        map.insert("name".to_string(), DataValue::String("test".to_string()));
+
+        let offset = encoder.encode(&DataValue::Map(map.clone()));
+
+        let bytes = encoder.into_bytes();
+        let decoder = DataDecoder::new(&bytes, 0);
+        let decoded = decoder.decode(offset).unwrap();
+
+        if let DataValue::Map(decoded_map) = decoded {
+            assert_eq!(
+                decoded_map.get("first_seen"),
+                Some(&DataValue::Timestamp(1727894671))
+            );
+            assert_eq!(
+                decoded_map.get("last_seen"),
+                Some(&DataValue::Timestamp(1727981071))
+            );
+            assert_eq!(
+                decoded_map.get("name"),
+                Some(&DataValue::String("test".to_string()))
+            );
+        } else {
+            panic!("Expected Map, got {decoded:?}");
+        }
     }
 }

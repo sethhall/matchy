@@ -17,6 +17,7 @@ Matchy databases store arbitrary data with each entry using the `DataValue` type
 - **Bytes**: Arbitrary binary data
 - **Array**: Ordered list of values
 - **Map**: Key-value mappings
+- **Timestamp**: Unix epoch seconds (compact storage for ISO 8601 timestamps)
 
 See [Data Types](../guide/data-types.md) for conceptual overview.
 
@@ -35,6 +36,7 @@ pub enum DataValue {
     Bytes(Vec<u8>),
     Array(Vec<DataValue>),
     Map(HashMap<String, DataValue>),
+    Timestamp(i64),  // Unix epoch seconds
 }
 ```
 
@@ -83,6 +85,28 @@ let tags = DataValue::Array(vec![
 
 data.insert("tags".to_string(), tags);
 ```
+
+## Working with Timestamps
+
+Timestamps store Unix epoch seconds compactly (8 bytes vs 27-byte ISO 8601 strings):
+
+```rust
+use matchy::DataValue;
+
+let first_seen = DataValue::Timestamp(1727891071);
+data.insert("first_seen".to_string(), first_seen);
+```
+
+ISO 8601 strings in JSON input are automatically parsed into Timestamps during deserialization:
+
+```json
+{
+  "entry": "1.2.3.4",
+  "first_seen": "2025-10-02T18:44:31Z"
+}
+```
+
+When serialized back to JSON, Timestamps render as ISO 8601 strings for readability.
 
 ## Nested Structures
 
@@ -180,6 +204,7 @@ DataValue types are serialized to the MMDB binary format:
 | Bytes | bytes | Length-prefixed |
 | Array | array | Recursive |
 | Map | map | Key-value pairs |
+| Timestamp | ext 128 | 8 bytes, Matchy extension |
 
 See [Binary Format](binary-format.md) for encoding details.
 

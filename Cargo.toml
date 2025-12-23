@@ -63,6 +63,9 @@ libc = "0.2"
 # Time (wasm-compatible)
 web-time = "1.1"
 
+# Timestamp parsing/formatting
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+
 # Dev dependencies (shared)
 criterion = "0.8"
 tempfile = "3.8"

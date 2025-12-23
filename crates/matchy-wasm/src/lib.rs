@@ -579,6 +579,10 @@ fn data_value_to_js_value_direct(value: &DataValue) -> Result<JsValue, JsError> 
             Ok(JsValue::from_str(&STANDARD.encode(b)))
         }
         DataValue::Pointer(_) => Ok(JsValue::NULL),
+        DataValue::Timestamp(epoch) => {
+            let date = js_sys::Date::new(&JsValue::from(*epoch as f64 * 1000.0));
+            Ok(date.to_iso_string().into())
+        }
     }
 }
 
@@ -609,8 +613,66 @@ fn data_value_to_json(value: &DataValue) -> serde_json::Value {
             use base64::{engine::general_purpose::STANDARD, Engine};
             serde_json::Value::String(STANDARD.encode(b))
         }
-        DataValue::Pointer(_) => serde_json::Value::Null, // Internal type, shouldn't appear in user data
+        DataValue::Pointer(_) => serde_json::Value::Null,
+        DataValue::Timestamp(epoch) => {
+            let secs = *epoch;
+            let (year, month, day, hour, min, sec) = epoch_to_datetime(secs);
+            serde_json::Value::String(format!(
+                "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z"
+            ))
+        }
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn epoch_to_datetime(epoch: i64) -> (i64, u8, u8, u8, u8, u8) {
+    let secs_per_day = 86400i64;
+    let secs_per_hour = 3600i64;
+    let secs_per_min = 60i64;
+
+    let days = epoch / secs_per_day;
+    let day_secs = epoch % secs_per_day;
+
+    let hour = (day_secs / secs_per_hour) as u8;
+    let min = ((day_secs % secs_per_hour) / secs_per_min) as u8;
+    let sec = (day_secs % secs_per_min) as u8;
+
+    let mut year = 1970i64;
+    let mut remaining_days = days;
+
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    let leap = is_leap_year(year);
+    let days_in_months: [i64; 12] = if leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1u8;
+    for &dim in &days_in_months {
+        if remaining_days < dim {
+            break;
+        }
+        remaining_days -= dim;
+        month += 1;
+    }
+
+    let day = (remaining_days + 1) as u8;
+    (year, month, day, hour, min, sec)
+}
+
+#[cfg(test)]
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 /// Input data for adding entries (from JavaScript)

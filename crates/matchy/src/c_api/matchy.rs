@@ -7,6 +7,7 @@ use crate::database::{Database, ReloadEvent};
 use crate::schema_validation::SchemaValidator;
 use crate::schemas::{get_schema_info, is_known_database_type};
 use crate::DatabaseBuilder;
+use chrono::TimeZone;
 use matchy_data_format::DataValue;
 use matchy_match_mode::MatchMode;
 use std::collections::HashMap;
@@ -1583,6 +1584,22 @@ impl matchy_entry_data_t {
                 matchy_entry_data_value_u { float_value: *f },
                 4,
             ),
+            DataValue::Timestamp(epoch) => {
+                let iso = chrono::Utc
+                    .timestamp_opt(*epoch, 0)
+                    .single()
+                    .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                    .unwrap_or_else(|| format!("{epoch}"));
+                let c_str = CString::new(iso.as_str()).ok()?;
+                let ptr = c_str.as_ptr();
+                let len = iso.len();
+                string_cache.push(c_str);
+                (
+                    MATCHY_DATA_TYPE_UTF8_STRING,
+                    matchy_entry_data_value_u { utf8_string: ptr },
+                    u32::try_from(len).unwrap_or(u32::MAX),
+                )
+            }
         };
 
         Some(Self {
