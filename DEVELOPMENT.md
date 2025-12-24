@@ -21,20 +21,20 @@ Key capabilities:
 Matchy extends the MaxMind DB (MMDB) binary format. An `.mxy` file is a valid MMDB file with an additional embedded section for patterns:
 
 ```
-┌────────────────────────────────────┐
-│  IP Search Tree (binary trie)      │  ← IPv4/IPv6 addresses
-├────────────────────────────────────┤
-│  Data Section (deduplicated)       │  ← JSON-like structured data
-├────────────────────────────────────┤
-│  PARAGLOB Section (optional)       │  ← Glob patterns
-│    - AC nodes/edges                │     (Aho-Corasick + glob engine)
-├────────────────────────────────────┤
-│  Literal Hash Section (optional)   │  ← Exact string matching
-│    - Hash table (XXH64)            │
-├────────────────────────────────────┤
-│  MMDB Metadata (last 128KB)        │  ← Binary format info,
-│                                    │     section offsets
-└────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│  IP Search Tree (binary trie)           │  ← IPv4/IPv6 addresses
+├─────────────────────────────────────────┤
+│  Data Section (deduplicated)            │  ← JSON-like structured data
+├─────────────────────────────────────────┤
+│  PARAGLOB Section (optional)            │  ← Glob patterns
+│    - AC nodes/edges                     │     (Aho-Corasick + glob engine)
+├─────────────────────────────────────────┤
+│  Literal Hash Section (optional)        │  ← Exact string matching
+│    - Sharded hash table (96-bit XXH3)   │
+├─────────────────────────────────────────┤
+│  MMDB Metadata (last 128KB)             │  ← Binary format info,
+│                                         │     section offsets
+└─────────────────────────────────────────┘
 ```
 
 **Why this works**: MMDB format includes a metadata section that can hold arbitrary key-value pairs. Matchy stores the offset and size of the PARAGLOB section there. Standard MMDB readers ignore it and just use the IP tree. Matchy reads both.
@@ -49,7 +49,7 @@ When you call `db.lookup("something")`:
    - Return immediately if found
 
 2. **Literal match**: Check exact string hash table
-   - O(1) lookup using XXH64
+   - O(1) lookup using 96-bit XXH3 hash
    - Common for domain blocklists with exact matches
    - Return if found
 
@@ -60,46 +60,109 @@ When you call `db.lookup("something")`:
 
 4. **Cache**: Results cached in LRU (optional, enabled via `DatabaseOpener::cache_capacity()`)
 
-### Module Organization
+### Workspace Structure
 
-50 source files, ~13K SLOC. Key modules:
+Matchy is organized as a Cargo workspace with specialized crates:
 
-**Core Query Engine**:
-- `database.rs` (47K) - Main `Database` struct, unified query API, result caching
-- `paraglob_offset.rs` (74K) - Glob matching engine (AC + glob)
-- `ac_offset.rs` (46K) - Offset-based Aho-Corasick automaton for mmap
-- `glob.rs` (25K) - Glob matching (wildcards, character classes)
-- `literal_hash.rs` (24K) - Exact string matching via hash table
-- `ac_literal_hash.rs` (13K) - Literal-to-glob-ID mapping
+```
+matchy/
+├── crates/
+│   ├── matchy/              # Main crate: CLI + library + C API
+│   │   ├── src/
+│   │   │   ├── lib.rs       # Public API surface
+│   │   │   ├── database.rs  # Unified Database API
+│   │   │   ├── processing/  # Batch processing (Worker, parallel)
+│   │   │   ├── c_api/       # C FFI layer
+│   │   │   └── bin/         # CLI implementation
+│   │   ├── tests/           # Integration tests
+│   │   ├── benches/         # Benchmarks
+│   │   ├── examples/        # Example programs
+│   │   └── include/         # Generated C headers (matchy.h) ⚠️ Don't edit!
+│   │
+│   ├── matchy-format/       # Binary format, MMDB builder, mmap
+│   ├── matchy-ip-trie/      # IP address lookups via binary trie
+│   ├── matchy-literal-hash/ # O(1) exact string matching
+│   ├── matchy-paraglob/     # Glob pattern matching with Aho-Corasick
+│   ├── matchy-ac/           # Offset-based Aho-Corasick automaton
+│   ├── matchy-extractor/    # Extract IPs, domains, emails from text
+│   ├── matchy-data-format/  # DataValue type for database entries
+│   ├── matchy-match-mode/   # CaseSensitive/CaseInsensitive enum
+│   └── matchy-wasm/         # WebAssembly bindings
+│
+├── book/                    # mdbook documentation
+├── fuzz/                    # Fuzzing tests
+└── scripts/                 # Build and benchmark scripts
+```
 
-**Database Construction**:
-- `mmdb_builder.rs` (35K) - Unified builder (`DatabaseBuilder`), entry type detection
-- `ip_tree_builder.rs` (23K) - Binary trie builder for IP addresses
-- `data_section.rs` (49K) - Data encoding/deduplication
+### Crate Dependency Graph
 
-**Binary Format**:
-- `offset_format.rs` (28K) - `#[repr(C)]` structures for PARAGLOB section
-- `mmdb/` - MMDB format reading/writing (internal)
-- `endian.rs` (9K) - Cross-platform byte order handling
-- `serialization.rs` (8K) - High-level save/load/mmap API
+```
+matchy (main crate)
+├── matchy-match-mode (shared enum)
+├── matchy-ac (Aho-Corasick)
+├── matchy-ip-trie (IP lookups)
+├── matchy-data-format (data encoding)
+├── matchy-paraglob (glob patterns)
+│   ├── matchy-match-mode
+│   ├── matchy-ac
+│   ├── matchy-data-format
+│   └── matchy-ip-trie
+├── matchy-literal-hash (exact strings)
+│   └── matchy-match-mode
+├── matchy-format (database format)
+│   ├── matchy-ip-trie
+│   ├── matchy-data-format
+│   ├── matchy-paraglob
+│   ├── matchy-literal-hash
+│   └── matchy-match-mode
+├── matchy-extractor (text extraction)
+└── matchy-wasm (WASM bindings)
+    └── matchy
+```
 
-**Data Extraction & Processing**:
-- `extractor.rs` (118K) - SIMD-accelerated extraction of IPs, domains, emails, crypto addresses
-- `processing.rs` (62K) - Batch processing infrastructure (Worker, LineFileReader, stats)
-- `file_reader.rs` (6K) - Streaming I/O with gzip support
+### Crate Responsibilities
 
-**Utilities & Safety**:
-- `validation.rs` (110K) - Comprehensive database validation (untrusted files)
-- `mmap.rs` (12K) - Memory-mapped file wrapper
-- `error.rs` (2K) - Error types
-- `simd_utils.rs` (9K) - SIMD acceleration helpers
+| Crate                    | Purpose                                            | Key Types                                          |
+|--------------------------|----------------------------------------------------|----------------------------------------------------|
+| **matchy**               | Main crate: CLI, public API, Database, processing  | `Database`, `DatabaseBuilder`, `DataValue`         |
+| **matchy-format**        | Binary format, MMDB builder, mmap handling         | `DatabaseBuilder`, `EntryType`, `FormatError`      |
+| **matchy-ip-trie**       | IP address lookups via binary trie                 | `IpTreeBuilder`, `RecordSize`, `IpTreeError`       |
+| **matchy-literal-hash**  | O(1) exact string matching                         | `LiteralHashBuilder`, `LiteralHash`, `HashEntry`   |
+| **matchy-paraglob**      | Glob pattern matching with Aho-Corasick            | `Paraglob`, `ParaglobBuilder`, `GlobError`         |
+| **matchy-ac**            | Offset-based Aho-Corasick automaton                | `ACAutomaton`, `ACNodeHot`, `ACEdge`               |
+| **matchy-extractor**     | Extract IPs, domains, emails from text             | `Extractor`, `ExtractorBuilder`, `ExtractedItem`   |
+| **matchy-data-format**   | DataValue type for database entries                | `DataValue`, `DataEncoder`, `DataDecoder`          |
+| **matchy-match-mode**    | CaseSensitive/CaseInsensitive configuration        | `MatchMode`                                        |
+| **matchy-wasm**          | WebAssembly bindings for browser/Node.js           | `Database`, `DatabaseBuilder`, `Extractor`         |
 
-**FFI**:
-- `c_api/matchy.rs` - Native C API (opaque handles)
-- `c_api/maxminddb_compat.rs` - MaxMind-compatible C API
+### Key Source Files
 
-**Build & CLI**:
-- `bin/` (26 files) - CLI implementation (`matchy build`, `match`, `query`, etc.)
+**Main Crate (`matchy/`)**:
+- `src/database.rs` - Unified `Database` struct, query API, result caching
+- `src/processing/` - Batch processing infrastructure (Worker, parallel execution)
+- `src/c_api/matchy.rs` - Native C API (opaque handles)
+- `src/c_api/maxminddb_compat.rs` - MaxMind-compatible C API
+
+**Format & Builders (`matchy-format/`)**:
+- `src/mmdb_builder.rs` - Unified builder, entry type detection
+- `src/offset_format.rs` - `#[repr(C)]` structures for binary format
+- `src/validation.rs` - Format validation
+
+**Pattern Matching (`matchy-paraglob/`)**:
+- `src/paraglob_offset.rs` - Glob matching engine (AC + glob)
+- `src/glob.rs` - Glob matching (wildcards, character classes)
+- `src/literal_hash.rs` - Literal-to-glob-ID mapping
+- `src/offset_format.rs` - PARAGLOB section format structures
+
+**Core Data Structures**:
+- `matchy-ac/src/lib.rs` - Offset-based Aho-Corasick automaton
+- `matchy-ip-trie/src/lib.rs` - Binary trie for IP addresses
+- `matchy-literal-hash/src/lib.rs` - Hash table for exact matching
+- `matchy-data-format/src/lib.rs` - Data encoding/deduplication
+
+**Extraction (`matchy-extractor/`)**:
+- `src/lib.rs` - SIMD-accelerated extraction
+- `src/extractors/` - Type-specific extractors (IP, domain, email, hash, crypto)
 
 ### Data Structure Design
 
@@ -145,13 +208,18 @@ Performance varies significantly based on query type, database size, and glob pa
 
 ### Exact String Matching
 
-**Algorithm**: XXH64 hash table, O(1) expected case.
+**Algorithm**: Sharded hash table with 96-bit XXH3 hashes, O(1) expected case.
 
-**Scaling**: Performance stays good up to ~50K entries. At larger scales, lookup time increases due to longer probe chains in the hash table (uses linear probing with 0.8 load factor). Still usable at 100K+ entries but noticeably slower than small tables.
+**How it works**:
+1. Compute 128-bit XXH3 hash, truncate to 96 bits (u64 + u32)
+2. Route to shard based on lower bits
+3. Linear probe within shard until match or empty slot
 
-**Database size**: ~50-100 bytes per entry (depends on string length and hash distribution).
+**Scaling**: Excellent. Sharded construction parallelizes across cores. 96-bit hashes provide virtually zero false positives even at high volumes. The ~60% load factor keeps probe chains short.
 
-**Build time**: Fast, scales linearly. Build-time deduplication removes identical strings automatically.
+**Database size**: 16 bytes per hash table entry (hash_lo: u64, hash_hi: u32, pattern_id: u32), plus shard offset table and pattern mappings.
+
+**Build time**: Fast and parallel. Large datasets (100K+ entries) build quickly via sharded construction with configurable parallelism.
 
 **Use case**: Exact domain/URL/path matching before falling back to glob matching.
 
@@ -205,16 +273,7 @@ Traditional approach (heap deserialization): Each process loads its own copy. 50
 
 Matchy approach (mmap): OS shares physical pages across processes. 50 workers reading same file = 100 MB RAM total. **98% savings**.
 
-## Implementation Notes
-
-### Test Coverage
-
-**242 tests passing** (as of latest run). Coverage includes:
-- Unit tests in each module
-- Integration tests for end-to-end workflows
-- Property-based tests for glob matching edge cases
-- Round-trip serialization tests
-- CLI integration tests via `assert_cmd`
+## Implementation Details
 
 ### Glob Engine
 
@@ -225,11 +284,11 @@ Supports standard glob syntax:
 - `[!abc]` or `[^abc]` - negated character class
 - `[a-z]` - range syntax
 
-**Implementation**: Recursive backtracking matcher with step limit to prevent pathological cases. Fast for simple globs where wildcards have few choices. Slow for complex globs with multiple wildcards that generate many backtracking paths. This is why suffix/prefix globs outperform complex globs by 100×+.
+**Implementation** (`matchy-paraglob/src/glob.rs`): Recursive backtracking matcher with step limit to prevent pathological cases. Fast for simple globs where wildcards have few choices. Slow for complex globs with multiple wildcards that generate many backtracking paths. This is why suffix/prefix globs outperform complex globs by 100×+.
 
 ### Aho-Corasick Automaton
 
-Classic AC implementation with failure links:
+Classic AC implementation with failure links (`matchy-ac/src/lib.rs`):
 1. Build a trie from pattern literals
 2. Compute failure links (BFS from root)
 3. At query time, traverse based on input, following failure links on mismatch
@@ -238,13 +297,13 @@ Classic AC implementation with failure links:
 
 ### Data Deduplication
 
-The data section deduplicates identical metadata across entries. If 1000 IPs all have `{"threat_level": "high"}`, we store it once and reference it 1000 times. Implemented via content-addressed storage (hash the data, check for existing entry).
+The data section deduplicates identical metadata across entries (`matchy-data-format/`). If 1000 IPs all have `{"threat_level": "high"}`, we store it once and reference it 1000 times. Implemented via content-addressed storage (hash the data, check for existing entry).
 
 Typical compression: 50-80% for threat feeds with similar metadata.
 
 ### FFI Design
 
-Two C APIs provided:
+Two C APIs provided (`matchy/src/c_api/`):
 1. **Native API** (`matchy_*` functions) - Full Matchy functionality
 2. **MaxMind-compatible API** (`MMDB_*` functions) - Drop-in replacement for libmaxminddb
 
@@ -254,7 +313,7 @@ Both use opaque handles and return error codes. All string data passed as `const
 
 ## Data Extraction
 
-The `extractor` module finds structured data in unstructured text: IPs, domains, emails, file hashes, crypto addresses.
+The `matchy-extractor` crate finds structured data in unstructured text: IPs, domains, emails, file hashes, crypto addresses.
 
 **Supported types**:
 - **IPv4/IPv6**: Standard address formats
@@ -275,7 +334,7 @@ for item in extractor.extract_from_line(log_line.as_bytes()) {
 
 ## Batch Processing
 
-The `processing` module provides infrastructure for scanning files against databases:
+The `matchy/src/processing/` module provides infrastructure for scanning files against databases:
 
 **Key types**:
 - `LineFileReader` - Streams file in chunks, handles gzip automatically
@@ -306,7 +365,7 @@ for batch in reader.batches() {
 
 ## Database Validation
 
-For untrusted databases, use validation before loading:
+For untrusted databases, use validation before loading. Validation logic is distributed across crates, with each crate validating its own structures.
 
 **Three levels**:
 1. **Basic** (~1ms): Magic bytes, version, critical offsets
@@ -379,8 +438,6 @@ Current performance is good for most use cases. If you need more:
 
 ## Building & Testing
 
-See [WARP.md](WARP.md) for complete development workflow. Quick reference:
-
 ```bash
 # Development
 cargo build
@@ -394,27 +451,29 @@ cargo bench
 
 # Documentation
 cargo doc --no-deps --open
-cd book && mdbook serve  # User guide
+cd book && mdbook serve  # User guide at localhost:3000
 ```
+
+See [AGENTS.md](AGENTS.md) for complete development workflow, including CI checks and commit guidelines.
 
 ## Additional Documentation
 
 - **README.md** - Project overview, quick start, features
-- **WARP.md** - Complete development guide (workflow, best practices, module details)
+- **AGENTS.md** - Development guide (workflow, best practices, boundaries)
+- **CONTRIBUTING.md** - How to contribute, PR process
 - **book/** - User documentation (mdbook)
 - **examples/** - Working code examples
 - **Cargo docs** - API reference (`cargo doc --open`)
 
 ## Summary
 
-Matchy is a production-ready unified database for IP addresses and glob matching. Key architectural decisions:
+Matchy is a production-ready unified database for IP addresses and pattern matching. Key architectural decisions:
 
-1. **Extended MMDB format** - Backward compatible, standards-based
-2. **Offset-based structures** - Enable zero-copy mmap with shared memory
-3. **Unified query API** - Automatic detection (IP vs string vs glob)
-4. **Multiple data structures** - Binary trie (IPs), hash table (literals), AC+glob engine
-5. **Safety first** - UTF-8 validation, comprehensive validation module
+1. **Multi-crate workspace** - Clean separation of concerns, each crate has single responsibility
+2. **Extended MMDB format** - Backward compatible, standards-based
+3. **Offset-based structures** - Enable zero-copy mmap with shared memory
+4. **Unified query API** - Automatic detection (IP vs string vs glob)
+5. **Multiple data structures** - Binary trie (IPs), hash table (literals), AC+glob engine
+6. **Safety first** - UTF-8 validation, comprehensive validation modules per crate
 
 Performance is excellent for typical workloads. Glob performance varies dramatically by complexity - keep globs simple when possible. Multi-process deployments benefit massively from mmap (98% memory savings).
-
-242 tests passing. Ready for production use.
