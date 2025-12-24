@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ⚠️ Breaking Changes
 
-- **Literal Hash Format v2**: Databases containing literal strings (non-wildcard patterns) must be rebuilt
-  - Changed from string storage to 96-bit hash-only format
-  - Old databases with literal strings will fail to load with: `Unsupported literal hash version: 1 (expected 2)`
+- **Literal Hash Format v3**: Databases containing literal strings (non-wildcard patterns) must be rebuilt
+  - Changed from string storage to 96-bit hash-only format (stored as u64 + u32)
+  - 8-byte aligned hash table for efficient memory access
+  - Old databases with literal strings will fail to load with: `Unsupported version: 2 (expected 3)`
   - Databases with only IPs or glob patterns are unaffected
   - **Action required**: Rebuild databases from source data using `matchy build`
 
@@ -34,11 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Validation now passes with 0 errors/warnings (previously reported 2.2M+ false errors)
 
 ### Changed
-- **Literal Hash 96-bit Format**: Switched from string storage to hash-only matching
+- **Literal Hash v3 Format**: Switched from string storage to hash-only matching
+  - 96-bit XXH3 hashes (u64 + u32) - virtually zero false positives at 60M+ lookups/sec
+  - Array-of-Structs layout with 8-byte aligned hash table
   - ~50% smaller literal sections (no string pool)
-  - Faster lookups (12-byte memcmp vs variable-length strcmp)
   - Privacy-preserving (original strings not stored in database)
-  - Uses XXH3_128 truncated to 96 bits (collision probability < 10⁻²⁴)
 
 - **Extractor Thread-Safety**: `Extractor` is now `Send + Sync` and can be shared across threads via `Arc`
   - Moved scratch buffers to thread-local storage (same pattern as `Database` and `Paraglob`)
