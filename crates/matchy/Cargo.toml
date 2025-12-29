@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Fast database for IP address and pattern matching with rich data storage"
-readme = "README.md"
+readme = "../../README.md"
 keywords = ["ip", "pattern", "database", "geoip", "matching"]
 categories = ["network-programming", "database", "algorithms"]
 autobins = false
@@ -22,10 +22,10 @@ include = [
     "cbindgen.toml",
     "Cargo.toml",
     "Cargo.lock",
-    "README.md",
-    "CHANGELOG.md",
-    "CONTRIBUTING.md",
-    "LICENSE",
+    "../../README.md",
+    "../../CHANGELOG.md",
+    "../../CONTRIBUTING.md",
+    "../../LICENSE",
 ]
 
 [package.metadata.capi]
