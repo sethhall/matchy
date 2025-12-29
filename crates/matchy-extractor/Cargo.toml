@@ -5,7 +5,7 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false  # Internal crate for now - could publish later!
+description = "Fast extraction of IPs, domains, emails, hashes from text (internal)"
 
 [dependencies]
 memchr.workspace = true

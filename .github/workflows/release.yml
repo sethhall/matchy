@@ -245,7 +245,49 @@ jobs:
         uses: rust-lang/crates-io-auth-action@v1
         id: auth
       
-      - name: Publish to crates.io
-        run: cargo publish --allow-dirty
+      - name: Publish all crates to crates.io
+        run: |
+          # Publish in dependency order with delays for crates.io indexing
+          # Level 1: Leaf crates (no internal dependencies)
+          echo "Publishing matchy-match-mode..."
+          cargo publish -p matchy-match-mode --allow-dirty
+          sleep 30
+          
+          echo "Publishing matchy-ip-trie..."
+          cargo publish -p matchy-ip-trie --allow-dirty
+          sleep 30
+          
+          echo "Publishing matchy-data-format..."
+          cargo publish -p matchy-data-format --allow-dirty
+          sleep 30
+          
+          echo "Publishing matchy-extractor..."
+          cargo publish -p matchy-extractor --allow-dirty
+          sleep 30
+          
+          # Level 2: Depend on match-mode
+          echo "Publishing matchy-ac..."
+          cargo publish -p matchy-ac --allow-dirty
+          sleep 30
+          
+          echo "Publishing matchy-literal-hash..."
+          cargo publish -p matchy-literal-hash --allow-dirty
+          sleep 30
+          
+          # Level 3: Depends on ac, data-format, ip-trie, match-mode
+          echo "Publishing matchy-paraglob..."
+          cargo publish -p matchy-paraglob --allow-dirty
+          sleep 30
+          
+          # Level 4: Depends on all above
+          echo "Publishing matchy-format..."
+          cargo publish -p matchy-format --allow-dirty
+          sleep 30
+          
+          # Level 5: Main crate
+          echo "Publishing matchy..."
+          cargo publish -p matchy --allow-dirty
+          
+          echo "All crates published successfully!"
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

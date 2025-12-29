@@ -5,7 +5,7 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false  # Internal crate - just the MatchMode enum
+description = "Shared MatchMode enum for matchy workspace (internal)"
 
 # NO dependencies - pure enum
 [dependencies]

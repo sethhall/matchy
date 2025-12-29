@@ -62,14 +62,14 @@ path = "src/bin/matchy.rs"
 required-features = ["cli"]
 
 [dependencies]
-matchy-match-mode = { path = "../matchy-match-mode" }
-matchy-ac = { path = "../matchy-ac" }
-matchy-ip-trie = { path = "../matchy-ip-trie" }
-matchy-data-format = { path = "../matchy-data-format" }
-matchy-paraglob = { path = "../matchy-paraglob" }
-matchy-literal-hash = { path = "../matchy-literal-hash" }
-matchy-format = { path = "../matchy-format" }
-matchy-extractor = { path = "../matchy-extractor" }
+matchy-match-mode = { path = "../matchy-match-mode", version = "2.0.0" }
+matchy-ac = { path = "../matchy-ac", version = "2.0.0" }
+matchy-ip-trie = { path = "../matchy-ip-trie", version = "2.0.0" }
+matchy-data-format = { path = "../matchy-data-format", version = "2.0.0" }
+matchy-paraglob = { path = "../matchy-paraglob", version = "2.0.0" }
+matchy-literal-hash = { path = "../matchy-literal-hash", version = "2.0.0" }
+matchy-format = { path = "../matchy-format", version = "2.0.0" }
+matchy-extractor = { path = "../matchy-extractor", version = "2.0.0" }
 
 thiserror.workspace = true
 zerocopy.workspace = true

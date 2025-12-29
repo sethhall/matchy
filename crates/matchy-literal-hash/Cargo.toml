@@ -5,10 +5,10 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false  # Internal for now
+description = "O(1) exact string matching via memory-mapped hash tables (internal)"
 
 [dependencies]
-matchy-match-mode = { path = "../matchy-match-mode" }
+matchy-match-mode = { path = "../matchy-match-mode", version = "2.0.0" }
 rayon = { workspace = true }
 rustc-hash = { workspace = true }
 xxhash-rust = { workspace = true }

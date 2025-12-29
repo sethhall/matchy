@@ -5,14 +5,14 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false  # Internal for now
+description = "Binary format and MMDB builder for matchy databases (internal)"
 
 [dependencies]
-matchy-ip-trie = { path = "../matchy-ip-trie" }
-matchy-data-format = { path = "../matchy-data-format" }
-matchy-paraglob = { path = "../matchy-paraglob" }
-matchy-literal-hash = { path = "../matchy-literal-hash" }
-matchy-match-mode = { path = "../matchy-match-mode" }
+matchy-ip-trie = { path = "../matchy-ip-trie", version = "2.0.0" }
+matchy-data-format = { path = "../matchy-data-format", version = "2.0.0" }
+matchy-paraglob = { path = "../matchy-paraglob", version = "2.0.0" }
+matchy-literal-hash = { path = "../matchy-literal-hash", version = "2.0.0" }
+matchy-match-mode = { path = "../matchy-match-mode", version = "2.0.0" }
 
 zerocopy.workspace = true
 anyhow.workspace = true

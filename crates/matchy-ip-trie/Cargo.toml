@@ -5,7 +5,7 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false  # Internal crate for now
+description = "Binary IP trie for matchy database lookups (internal)"
 
 # No dependencies - pure IP trie data structure
 [dependencies]
