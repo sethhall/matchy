@@ -42,7 +42,7 @@ xxhash-rust = { version = "0.8", features = ["xxh64", "xxh3"] }
 
 # Concurrency
 rayon = "1.10"
-arc-swap = "1.7"
+arc-swap = "1.8"
 crossbeam-channel = "0.5"
 
 # Compression
