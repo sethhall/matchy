@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Binary IP trie for matchy database lookups (internal)"
+readme = "../../README.md"
 
 # No dependencies - pure IP trie data structure
 [dependencies]

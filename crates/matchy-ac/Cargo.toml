@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Offset-based Aho-Corasick automaton for matchy (internal)"
+readme = "../../README.md"
 
 [dependencies]
 matchy-match-mode = { path = "../matchy-match-mode", version = "2.0.0" }

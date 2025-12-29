@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "DataValue type for matchy database entries (internal)"
+readme = "../../README.md"
 
 # Minimal dependencies for serialization support
 [dependencies]

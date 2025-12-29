@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Fast extraction of IPs, domains, emails, hashes from text (internal)"
+readme = "../../README.md"
 
 [dependencies]
 memchr.workspace = true

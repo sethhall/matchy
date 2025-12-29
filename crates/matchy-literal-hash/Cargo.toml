@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "O(1) exact string matching via memory-mapped hash tables (internal)"
+readme = "README.md"
 
 [dependencies]
 matchy-match-mode = { path = "../matchy-match-mode", version = "2.0.0" }

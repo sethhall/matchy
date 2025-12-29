@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shared MatchMode enum for matchy workspace (internal)"
+readme = "README.md"
 
 # NO dependencies - pure enum
 [dependencies]
