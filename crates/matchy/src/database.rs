@@ -554,7 +554,8 @@ impl Database {
                 .entry(self.cache_generation)
                 .or_insert_with(|| {
                     LruCache::with_hasher(
-                        NonZeroUsize::new(self.cache_capacity).unwrap(),
+                        NonZeroUsize::new(self.cache_capacity)
+                            .expect("cache_capacity > 0 when cache_enabled is true"),
                         BuildHasherDefault::<rustc_hash::FxHasher>::default(),
                     )
                 });

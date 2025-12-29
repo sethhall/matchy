@@ -11,7 +11,7 @@ mod paraglob_offset;
 // Temporary modules until Phase 8 (will be extracted to matchy-format)
 pub mod error; // Public so matchy-format can use ParaglobError
 pub mod offset_format; // Public for validation and external format access
-pub(crate) mod simd_utils;
+pub mod simd_utils;
 
 // Re-export main types
 pub use paraglob_offset::{Paraglob, ParaglobBuilder};

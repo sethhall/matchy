@@ -1422,8 +1422,16 @@ fn get_literal_data_offsets(
     }
 
     // Parse header to find mappings
-    let strings_offset = u32::from_le_bytes(literal_data[16..20].try_into().unwrap()) as usize;
-    let strings_size = u32::from_le_bytes(literal_data[20..24].try_into().unwrap()) as usize;
+    let strings_offset = u32::from_le_bytes(
+        literal_data[16..20]
+            .try_into()
+            .expect("slice is exactly 4 bytes"),
+    ) as usize;
+    let strings_size = u32::from_le_bytes(
+        literal_data[20..24]
+            .try_into()
+            .expect("slice is exactly 4 bytes"),
+    ) as usize;
 
     let mappings_start = strings_offset + strings_size;
     if mappings_start + 4 > literal_data.len() {
@@ -1433,7 +1441,7 @@ fn get_literal_data_offsets(
     let count = u32::from_le_bytes(
         literal_data[mappings_start..mappings_start + 4]
             .try_into()
-            .unwrap(),
+            .expect("slice is exactly 4 bytes"),
     );
 
     let mut offsets = Vec::with_capacity(count as usize);
@@ -1445,8 +1453,11 @@ fn get_literal_data_offsets(
             break;
         }
         // Skip pattern_id (first 4 bytes), read data_offset (next 4 bytes)
-        let data_offset =
-            u32::from_le_bytes(literal_data[offset + 4..offset + 8].try_into().unwrap());
+        let data_offset = u32::from_le_bytes(
+            literal_data[offset + 4..offset + 8]
+                .try_into()
+                .expect("slice is exactly 4 bytes"),
+        );
         offsets.push(data_offset);
     }
 
@@ -1578,19 +1589,24 @@ fn validate_schema_content(
                                 )
                             {
                                 if header.has_data_section() && header.mapping_count > 0 {
-                                    if let Ok(data_offsets) = matchy_paraglob::get_pattern_data_offsets(
-                                        paraglob_data,
-                                        &matchy_paraglob::offset_format::ParaglobHeader::read_from_prefix(paraglob_data)
-                                            .map(|(h, _)| h)
-                                            .unwrap(),
-                                    ) {
+                                    if let Ok(data_offsets) =
+                                        matchy_paraglob::get_pattern_data_offsets(
+                                            paraglob_data,
+                                            &header,
+                                        )
+                                    {
                                         for offset in data_offsets.iter() {
                                             if *offset > 0 {
                                                 // Pattern data offsets are absolute
                                                 let offset_usize = *offset as usize;
                                                 if offset_usize >= data_section_start {
-                                                    if let Ok(rel_offset) = u32::try_from(offset_usize - data_section_start) {
-                                                        validate_at_offset(rel_offset, "Pattern entry");
+                                                    if let Ok(rel_offset) = u32::try_from(
+                                                        offset_usize - data_section_start,
+                                                    ) {
+                                                        validate_at_offset(
+                                                            rel_offset,
+                                                            "Pattern entry",
+                                                        );
                                                     }
                                                 }
                                             }

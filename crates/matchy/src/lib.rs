@@ -126,7 +126,9 @@ pub mod schemas;
 /// Provides optimized implementations of common operations using SIMD instructions:
 /// - ASCII lowercase conversion (4-8x faster than iterator chains)
 /// - Byte searching and comparison
-pub mod simd_utils;
+///
+/// Re-exported from `matchy_paraglob` for convenience.
+pub use matchy_paraglob::simd_utils;
 /// Database validation for untrusted files
 ///
 /// Provides comprehensive validation of `.mxy` database files including:
