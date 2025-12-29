@@ -7,99 +7,130 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### ⚠️ Breaking Changes
+## [2.0.0] - UNRELEASED
 
-- **Literal Hash Format v3**: Databases containing literal strings (non-wildcard patterns) must be rebuilt
+### Breaking Changes
+
+- **Literal Hash Format v3**: Databases containing literal strings must be rebuilt
   - Changed from string storage to 96-bit hash-only format (stored as u64 + u32)
   - 8-byte aligned hash table for efficient memory access
   - Old databases with literal strings will fail to load with: `Unsupported version: 2 (expected 3)`
   - Databases with only IPs or glob patterns are unaffected
   - **Action required**: Rebuild databases from source data using `matchy build`
 
-### Added
-- **Auto-Build in Match Command**: `matchy match` can now accept JSON or CSV source files directly
-  - Automatically builds database in-memory when `.json` or `.csv` file is provided
-  - Convenient for quick testing and ad-hoc analysis without a separate build step
-  - JSON format: `[{"key": "pattern", "data": {...}}, ...]`
-  - CSV format: requires `key` or `entry` column, other columns become metadata
-  - Example: `matchy match threats.json access.log` (no pre-build needed)
-  - Pre-building with `matchy build` still recommended for production/repeated use
-
-### Fixed
-- **Database Validation**: Fixed multiple validation errors that caused false positives
-  - Fix AC node count tracking (was storing buffer size instead of actual count)
-  - Fix AC structure validation to use correct buffer slice offsets
-  - Fix AC literal mapping validation for new hash table format
-  - Fix edge_count for single-transition AC nodes
-  - Add 64-byte alignment padding before AC buffer for cache-line alignment
-  - Validation now passes with 0 errors/warnings (previously reported 2.2M+ false errors)
-
-### Changed
-- **Literal Hash v3 Format**: Switched from string storage to hash-only matching
-  - 96-bit XXH3 hashes (u64 + u32) - virtually zero false positives at 60M+ lookups/sec
-  - Array-of-Structs layout with 8-byte aligned hash table
-  - ~50% smaller literal sections (no string pool)
-  - Privacy-preserving (original strings not stored in database)
-
-- **Extractor Thread-Safety**: `Extractor` is now `Send + Sync` and can be shared across threads via `Arc`
-  - Moved scratch buffers to thread-local storage (same pattern as `Database` and `Paraglob`)
-  - Each thread gets its own buffers for zero-allocation extraction
-  - Can now share a single `Extractor` across multiple workers instead of creating one per worker
-  - Zero performance impact - thread-local buffers provide same benefits as before
-  - Removed unnecessary `unsafe` blocks from lookup table access (compiler eliminates bounds checks)
-  - Example: `examples/concurrent_extraction.rs` demonstrates `Arc<Extractor>` usage
-
-## [1.3.0] - 2025-11-23
-
-### Added
-- **Lock-Free Auto-Reload** with zero-overhead database access
-  - Automatic database reloading when file changes are detected
-  - Lock-free Arc swapping using `arc-swap` crate for atomic database updates
-  - Thread-local Arc caching eliminates atomic operations on hot query path
-  - Per-query overhead: ~1-2ns (atomic generation counter check only)
-  - Enable with `Database::from(path).auto_reload().open()`
-  - Graceful database handoff: old database stays alive until all threads finish with it
-  - 200ms debounce prevents rapid reload cycles during file writes
-  - File watching works with atomic renames (e.g., `mv new.mxy db.mxy`)
-  - Scales to 160+ cores without lock contention or cache line ping-ponging
-  
-- **Reload Callbacks** for database change notifications (Rust + C API)
-  - Rust API: `.on_reload()` method accepts closures for reload events
-  - C API: `reload_callback` function pointer in `matchy_open_options_t`
-  - Callback receives: file path, success status, error message (if failed), generation counter
-  - Invoked from watcher thread on both successful and failed reloads
-  - Useful for logging, metrics, and coordinating application state
-  - Thread-safe callback execution with proper error handling
-  - Examples: `examples/c_reload_callback.c`, Rust test in `src/database.rs`
-
-### Performance
-- **Auto-Reload Overhead**: ~1-2ns per query (atomic generation check)
-  - Thread-local Arc pointer caching eliminates repeated atomic loads
-  - Zero locks on query path - pure thread-local access after generation check
-  - Automatic cache invalidation when database reloads
-  - Benchmark: `benches/reload_overhead_bench.rs` measures overhead vs baseline
-
-### Changed
 - **Worker API**: `Worker::add_database()` now accepts `Arc<Database>` instead of `Database`
   - Eliminates unsafe clone operations that caused segfaults in parallel mode
-  - Multiple workers can efficiently share the same database via Arc
-  - Breaking change: wrap databases in Arc when passing to Worker
   - Migration: `worker.add_database("id", Arc::new(db))` instead of `worker.add_database("id", db)`
 
+- **Minimum Rust Version**: Bumped to **1.87** (was 1.70)
+
+- **License Change**: Changed from BSD-2-Clause to **Apache-2.0**
+
+- **Deprecated API**: `Database::open()` removed in favor of `Database::from(path).open()`
+
+### Architecture
+
+- **Multi-Crate Workspace**: Refactored monolithic crate into 10 focused crates for better maintainability
+  - `matchy`, `matchy-format`, `matchy-ip-trie`, `matchy-literal-hash`, `matchy-paraglob`,
+    `matchy-ac`, `matchy-extractor`, `matchy-data-format`, `matchy-match-mode`, `matchy-wasm`
+
+- **WebAssembly Support**: New `matchy-wasm` crate enables browser and WASI deployments
+  - Full database querying and pattern extraction in the browser
+  - Interactive demo with CSV/JSON import and file upload
+
+- **Thread Safety**: `Database` and `Extractor` are now `Send + Sync`
+  - Share across threads via `Arc` with zero API changes
+  - Thread-local scratch buffers for zero-allocation operations
+
+### Added
+
+- **Lock-Free Auto-Reload** with zero-overhead database access
+  - Automatic database reloading when file changes are detected
+  - Lock-free Arc swapping using `arc-swap` for atomic updates
+  - Per-query overhead: ~1-2ns (atomic generation counter check only)
+  - Enable with `Database::from(path).auto_reload().open()`
+
+- **Reload Callbacks** for database change notifications (Rust + C API)
+  - `.on_reload()` method accepts closures for reload events
+  - Callback receives: file path, success status, error message, generation counter
+
+- **Auto-Build in Match Command**: `matchy match` accepts JSON or CSV source files directly
+  - Automatically builds database in-memory when `.json` or `.csv` file is provided
+  - Example: `matchy match threats.json access.log`
+
+- **ThreatDB Schema Validation**: Validate entries during database build
+  - `DatabaseBuilderExt::with_schema("threatdb")` enables validation
+  - Validates required fields, TLP levels, timestamps, etc.
+
+- **A-B Database Fallback**: Query-time corruption detection with automatic failover
+
+- **Unified Database API**: Fluent builder pattern for database configuration
+  - `Database::from(path).auto_reload().open()`
+
+- **Zero-Allocation C API**: Offset-based lookups eliminate per-query allocations
+  - `matchy_query_into()` for FFI-friendly querying
+
+- **Extractor C API**: Pattern extraction available from C
+
+- **Timestamp Type**: Compact date storage with ISO 8601 parsing during database build
+
+- **Lookup Helpers**: `lookup_expect_result()` and `lookup_extracted()` for cleaner APIs
+
+### Performance
+
+- **AC Root Node Optimization**: 2.5x throughput improvement in pattern matching
+
+- **Compile-Time PSL Hash Table**: Public Suffix List lookup moved to compile-time
+  - Zero startup overhead for domain extraction
+
+- **Zero-Copy Optimizations** throughout extraction pipeline:
+  - Pre-compute word boundaries once per chunk (3.1x speedup)
+  - Defer string allocation until match is confirmed
+  - Eliminate all allocations in IPv4 parsing
+
+- **SIMD Enhancements**: Fast-forward optimization and CPU prefetching in AC automaton
+
+- **Parallel Processing Improvements**:
+  - Dynamic reader spawning based on workload
+  - Compression-aware routing for intelligent file processing
+  - Lock-free MPMC channels via crossbeam-channel
+
+### Changed
+
+- **Literal Hash v3 Format**: Hash-only matching for ~50% smaller literal sections
+  - Privacy-preserving (original strings not stored in database)
+
+- **Extractor Thread-Safety**: Now `Send + Sync` via thread-local scratch buffers
+
+- **DatabaseBuilder**: Renamed from `MmdbBuilder` for clarity
+
+- **TLP Values**: Now use uppercase per TLP 2.0 standard
+
 ### Fixed
-- **Critical: Segmentation Fault in Parallel Mode**
-  - Fixed unsafe `Clone` implementation on `Database` that used `std::ptr::read()` to bitwise copy `Mmap`
-  - `Mmap` is `Send but not Sync` and does not support bitwise copying
-  - Removed unsafe `Clone` implementations from both `Database` and `Paraglob`
-  - Changed parallel processing to use `Arc<Database>` for safe sharing across threads
-  - All 243 library tests + 34 CLI tests now pass in parallel mode
+
+- **Database Validation**: Fixed multiple validation errors that caused false positives
+  - Validation now passes with 0 errors/warnings (previously reported 2.2M+ false errors)
+
+- **Thread-Local Cache**: Fixed sharing bug between Database instances
+
+- **Memory Leak**: Fixed unbounded channels causing queue explosion in parallel mode
+
+- **WASM Lookup**: Fixed returning empty objects instead of data
+
+- **Segmentation Fault in Parallel Mode**: Fixed unsafe `Clone` on `Database` and `Paraglob`
 
 ### Dependencies
+
 - Added `arc-swap = "1.7"` for lock-free Arc pointer swapping
+- Added `crossbeam-channel` for lock-free MPMC
+- Upgraded `notify` 6.1 → 8.2
+- Upgraded `criterion` to 0.8.1
+- Switched to `zlib-rs` (pure Rust) for gzip decompression
 
 ### Removed
-- Deprecated `Database::open()` method (use `Database::from(path).open()` instead)
-- Unsafe `Clone` implementations on `Database` and `Paraglob` structs
+
+- `Database::open()` method (use `Database::from(path).open()`)
+- Unsafe `Clone` implementations on `Database` and `Paraglob`
 
 ## [1.2.2] - 2025-11-07
 

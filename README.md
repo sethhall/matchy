@@ -59,7 +59,7 @@ matchy query threats.mxy 1.2.3.4
 cargo install matchy
 ```
 
-**Requirements**: Rust 1.70+ (or use [pre-built binaries](https://github.com/matchylabs/matchy/releases))
+**Requirements**: Rust 1.87+ (or use [pre-built binaries](https://github.com/matchylabs/matchy/releases))
 
 ### Build a Threat Database
 
