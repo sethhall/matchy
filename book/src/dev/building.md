@@ -21,7 +21,7 @@ cargo build --release
 cargo test
 
 # Install CLI
-cargo install --path .
+cargo install --path crates/matchy
 ```
 
 ## Build Profiles
