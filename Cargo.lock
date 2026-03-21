@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "matchy"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "matchy-ac"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "matchy-match-mode",
  "memchr",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "matchy-data-format"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "chrono",
  "serde",
@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "matchy-extractor"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "bech32",
  "bs58",
@@ -1166,7 +1166,7 @@ dependencies = [
 
 [[package]]
 name = "matchy-format"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "matchy-data-format",
@@ -1185,11 +1185,11 @@ dependencies = [
 
 [[package]]
 name = "matchy-ip-trie"
-version = "2.0.0"
+version = "2.0.1"
 
 [[package]]
 name = "matchy-literal-hash"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "matchy-match-mode",
  "rayon",
@@ -1199,11 +1199,11 @@ dependencies = [
 
 [[package]]
 name = "matchy-match-mode"
-version = "2.0.0"
+version = "2.0.1"
 
 [[package]]
 name = "matchy-paraglob"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "matchy-wasm"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "base64",
  "console_error_panic_hook",

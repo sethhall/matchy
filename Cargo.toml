@@ -15,7 +15,7 @@ default-members = ["crates/matchy"]
 resolver = "2"
 
 [workspace.package]
-version = "2.0.0"
+version = "2.0.1"
 authors = ["Seth Hall <seth@matchylabs.com>"]
 edition = "2021"
 rust-version = "1.87"

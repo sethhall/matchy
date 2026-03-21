@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-03-21
+
+### Fixed
+
+- **Auto-reload with C API / zero-allocation lookups**: `lookup_ref()` and `decode_at_offset()` now correctly delegate to the live database when auto-reload is enabled. Previously these methods operated on the shell database (which has no data), causing not-found results or errors for any code using the zero-allocation lookup path (including the entire C API).
+
+### Changed
+
+- Extracted shared live-database resolution logic into `resolve_live_db()` helper, eliminating three copies of the same thread-local caching pattern.
+
 ## [2.0.0] - 2025-12-29
 
 ### Breaking Changes

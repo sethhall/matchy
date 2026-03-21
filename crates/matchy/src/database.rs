@@ -830,16 +830,14 @@ impl Database {
         }
     }
 
+    /// Resolve the current live database, using a thread-local cache to avoid
+    /// reloading the Arc on every call within the same generation.
     #[cfg(not(target_family = "wasm"))]
-    fn lookup_live(
-        &self,
-        query: &str,
-        live: &LiveState,
-    ) -> Result<Option<QueryResult>, DatabaseError> {
-        use crate::updater::{FallbackEvent, LOCAL_DB};
+    fn resolve_live_db(live: &LiveState) -> Arc<Database> {
+        use crate::updater::LOCAL_DB;
 
         let current_gen = live.generation.load(Ordering::Acquire);
-        let db = LOCAL_DB.with(|local| {
+        LOCAL_DB.with(|local| {
             let mut local_ref = local.borrow_mut();
             match &*local_ref {
                 Some((gen, db)) if *gen == current_gen => db.clone(),
@@ -849,7 +847,18 @@ impl Database {
                     new_db
                 }
             }
-        });
+        })
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn lookup_live(
+        &self,
+        query: &str,
+        live: &LiveState,
+    ) -> Result<Option<QueryResult>, DatabaseError> {
+        use crate::updater::{FallbackEvent, LOCAL_DB};
+
+        let db = Self::resolve_live_db(live);
 
         match db.lookup(query) {
             Ok(result) => Ok(result),
@@ -1295,6 +1304,12 @@ impl Database {
     /// - `prefix_len`: network prefix length (for IP results)
     /// - `result_type`: 0=not found, 1=ip, 2=pattern
     pub fn lookup_ref(&self, query: &str) -> Result<LookupRef, DatabaseError> {
+        // Delegate to live database if auto-reload is enabled
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(ref live) = self.live {
+            return Self::resolve_live_db(live).lookup_ref(query);
+        }
+
         // Check cache first - if hit, derive LookupRef from cached QueryResult
         if let Some(Some(result)) = self.with_cache(|cache| cache.get(query).cloned()) {
             return Ok(match result {
@@ -1388,6 +1403,12 @@ impl Database {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn decode_at_offset(&self, offset: u32) -> Result<DataValue, DatabaseError> {
+        // Delegate to live database if auto-reload is enabled
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(ref live) = self.live {
+            return Self::resolve_live_db(live).decode_at_offset(offset);
+        }
+
         let header = self.ip_header.as_ref().ok_or_else(|| {
             DatabaseError::Format(MmdbError::InvalidFormat(
                 "No IP header - cannot decode data".to_string(),
@@ -2045,5 +2066,40 @@ mod tests {
             count, 3,
             "ip_count() should return ip_entry_count (3) for matchy-built DB"
         );
+    }
+
+    /// Regression test: lookup_ref and decode_at_offset must delegate to the live
+    /// database when auto-reload is enabled. Previously they operated on the shell
+    /// database (which has empty data/no ip_header), returning not-found or errors.
+    #[test]
+    fn test_lookup_ref_with_auto_reload() {
+        let db = Database::from("tests/data/GeoLite2-Country.mmdb")
+            .watch()
+            .open()
+            .unwrap();
+
+        // lookup_ref should find known IPs via the live database
+        let lookup = db.lookup_ref("1.1.1.1").unwrap();
+        assert!(lookup.found, "lookup_ref should find 1.1.1.1 with auto-reload enabled");
+        assert_eq!(lookup.result_type, 1, "result_type should be 1 (IP)");
+        assert!(lookup.prefix_len > 0);
+
+        // decode_at_offset should be able to decode the data the ref points to
+        let data = db.decode_at_offset(lookup.data_offset).unwrap();
+        match data {
+            DataValue::Map(map) => assert!(!map.is_empty(), "decoded data should not be empty"),
+            _ => panic!("Expected map data from decode_at_offset"),
+        }
+
+        // Verify consistency: lookup_ref + decode_at_offset should produce the
+        // same data as the full lookup() path
+        let full_result = db.lookup("1.1.1.1").unwrap();
+        if let Some(QueryResult::Ip { data: full_data, prefix_len, .. }) = full_result {
+            assert_eq!(prefix_len, lookup.prefix_len);
+            let ref_data = db.decode_at_offset(lookup.data_offset).unwrap();
+            assert_eq!(full_data, ref_data, "lookup_ref+decode should match lookup");
+        } else {
+            panic!("Full lookup should also find 1.1.1.1");
+        }
     }
 }
