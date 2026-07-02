@@ -58,7 +58,7 @@ fn test_inspect_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Inspect a pattern database"));
+        .stdout(predicate::str::contains("Inspect a matchy database"));
 }
 
 #[test]
@@ -215,7 +215,160 @@ fn test_inspect_database() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Database:"))
-        .stdout(predicate::str::contains("Capabilities:"));
+        .stdout(predicate::str::contains("Contents:"))
+        .stdout(predicate::str::contains("Lookup support:"));
+}
+
+#[test]
+fn test_inspect_output_disambiguates_ip_families_when_metadata_is_available() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("patterns.txt");
+    let output_file = temp_dir.path().join("test.mxy");
+
+    fs::write(
+        &input_file,
+        "192.0.2.1\n2001:db8::1\nexample.com\n*.evil.com\n",
+    )
+    .unwrap();
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&output_file)
+        .assert()
+        .success();
+
+    matchy_cmd()
+        .arg("inspect")
+        .arg(&output_file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Contents:"))
+        .stdout(predicate::str::contains("  IP/CIDR entries:  2"))
+        .stdout(predicate::str::contains("    IPv4 entries:   1"))
+        .stdout(predicate::str::contains("    IPv6 entries:   1"))
+        .stdout(predicate::str::contains("  Exact strings:    1"))
+        .stdout(predicate::str::contains("  Glob patterns:    1"))
+        .stdout(predicate::str::contains("Lookup support:"))
+        .stdout(predicate::str::contains(
+            "  IP addresses:     yes (IPv4 and IPv6)",
+        ))
+        .stdout(predicate::str::contains("  Exact strings:    yes"))
+        .stdout(predicate::str::contains("  Glob patterns:    yes"))
+        .stdout(predicate::str::contains(
+            "  String match mode: case-sensitive",
+        ))
+        .stdout(predicate::str::contains("Capabilities:").not())
+        .stdout(predicate::str::contains("IP version:").not());
+}
+
+#[test]
+fn test_inspect_json_includes_ip_family_counts_when_metadata_is_available() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("patterns.txt");
+    let output_file = temp_dir.path().join("test.mxy");
+
+    fs::write(&input_file, "192.0.2.1\n2001:db8::1\n").unwrap();
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&output_file)
+        .assert()
+        .success();
+
+    let output = matchy_cmd()
+        .arg("inspect")
+        .arg(&output_file)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["ip_count"], 2);
+    assert_eq!(json["ipv4_count"], 1);
+    assert_eq!(json["ipv6_count"], 1);
+
+    let metadata = json["metadata"].as_object().unwrap();
+    assert_eq!(metadata["ip_entry_count"], 2);
+    assert_eq!(metadata["ipv4_entry_count"], 1);
+    assert_eq!(metadata["ipv6_entry_count"], 1);
+}
+
+#[test]
+fn test_inspect_standard_mmdb_omits_missing_ip_family_counts() {
+    matchy_cmd()
+        .arg("inspect")
+        .arg("tests/data/GeoLite2-Country.mmdb")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Format:   MMDB IP database"))
+        .stdout(predicate::str::contains(
+            "  IP/CIDR entries:  not stored in metadata",
+        ))
+        .stdout(predicate::str::contains("    IPv4 entries:").not())
+        .stdout(predicate::str::contains("    IPv6 entries:").not())
+        .stdout(predicate::str::contains("  IP addresses:     yes"))
+        .stdout(predicate::str::contains("Node count:").not())
+        .stdout(predicate::str::contains("IP version:").not())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn test_inspect_json_standard_mmdb_does_not_promote_node_count() {
+    let output = matchy_cmd()
+        .arg("inspect")
+        .arg("tests/data/GeoLite2-Country.mmdb")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json["ip_count"].is_null());
+    assert!(json.get("ipv4_count").is_none());
+    assert!(json.get("ipv6_count").is_none());
+    assert!(json["metadata"]["node_count"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn test_inspect_verbose_includes_storage_details() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("patterns.txt");
+    let output_file = temp_dir.path().join("test.mxy");
+
+    fs::write(
+        &input_file,
+        "192.0.2.1\n2001:db8::1\nexample.com\n*.evil.com\n",
+    )
+    .unwrap();
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&output_file)
+        .assert()
+        .success();
+
+    matchy_cmd()
+        .arg("inspect")
+        .arg(&output_file)
+        .arg("--verbose")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Storage:"))
+        .stdout(predicate::str::contains(
+            "  Container:        Matchy extended MMDB",
+        ))
+        .stdout(predicate::str::contains("  Format version:   2.0"))
+        .stdout(predicate::str::contains("  MMDB IP tree:     IPv6"))
+        .stdout(predicate::str::contains("  IP family split: not stored in metadata").not())
+        .stdout(predicate::str::contains("Node count:").not())
+        .stdout(predicate::str::contains(
+            "  Sections:         IP tree, literal hash, glob automaton",
+        ))
+        .stdout(predicate::str::contains("Full metadata:").not());
 }
 
 #[test]
@@ -240,6 +393,37 @@ fn test_inspect_json() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"has_glob_data\":"));
+}
+
+#[test]
+fn test_inspect_json_string_only_database_does_not_report_ip_data() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("patterns.txt");
+    let output_file = temp_dir.path().join("test.mxy");
+
+    fs::write(&input_file, "*.test.com\n").unwrap();
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&output_file)
+        .assert()
+        .success();
+
+    let output = matchy_cmd()
+        .arg("inspect")
+        .arg(&output_file)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["format"], "Matchy string database");
+    assert_eq!(json["has_ip_data"], false);
+    assert_eq!(json["ip_count"], 0);
+    assert_eq!(json["has_glob_data"], true);
+    assert_eq!(json["glob_count"], 1);
 }
 
 #[test]
@@ -523,10 +707,10 @@ exact.com,suspicious,low\n";
         .arg(&output_file)
         .assert()
         .success()
-        .stdout(predicate::str::contains("Combined IP+String database"))
-        .stdout(predicate::str::contains("IP lookups:      ✓"))
-        .stdout(predicate::str::contains("Literals:      ✓ (1 strings)"))
-        .stdout(predicate::str::contains("Globs:         ✓ (1 patterns)"));
+        .stdout(predicate::str::contains("Matchy combined database"))
+        .stdout(predicate::str::contains("IP addresses:     yes"))
+        .stdout(predicate::str::contains("Exact strings:    1"))
+        .stdout(predicate::str::contains("Glob patterns:    1"));
 
     matchy_cmd()
         .arg("query")

@@ -174,7 +174,7 @@ enum Commands {
         quiet: bool,
     },
 
-    /// Inspect a pattern database
+    /// Inspect a matchy database
     Inspect {
         /// Path to the matchy database (.mxy file)
         #[arg(value_name = "DATABASE")]
@@ -184,7 +184,7 @@ enum Commands {
         #[arg(short, long)]
         json: bool,
 
-        /// Show detailed statistics
+        /// Show storage details
         #[arg(short, long)]
         verbose: bool,
     },

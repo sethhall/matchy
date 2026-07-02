@@ -1656,9 +1656,9 @@ impl Database {
         }
     }
 
-    /// Get number of IP address entries
+    /// Get number of IP/CIDR entries
     ///
-    /// Returns the number of IP entries in the database.
+    /// Returns the number of IP or CIDR entries in the database.
     /// Returns 0 if the database has no IP data.
     ///
     /// For databases built with matchy, this returns the exact entry count from `ip_entry_count`.
@@ -1710,8 +1710,7 @@ impl Database {
             }
         }
 
-        // Slow path: Scan for separator (backwards compatibility)
-        eprintln!("Warning: Database lacks section offset metadata, falling back to full file scan (slower load time)");
+        // Slow path: scan for the separator for backwards compatibility.
         Self::find_pattern_section_slow(data)
     }
 
@@ -1749,11 +1748,7 @@ impl Database {
             }
         }
 
-        // Slow path: Scan for separator (backwards compatibility)
-        if data.len() > 1024 * 1024 {
-            // Only warn for files > 1MB
-            eprintln!("Warning: Database lacks section offset metadata, falling back to full file scan (slower load time)");
-        }
+        // Slow path: scan for the separator for backwards compatibility.
         Self::find_literal_section_slow(data)
     }
 
@@ -2112,7 +2107,7 @@ mod tests {
         // Note: node_count will be larger than ip_entry_count due to tree structure
         let count = db.ip_count();
 
-        // We added 3 IP entries
+        // We added 3 IP/CIDR entries
         assert_eq!(
             count, 3,
             "ip_count() should return ip_entry_count (3) for matchy-built DB"

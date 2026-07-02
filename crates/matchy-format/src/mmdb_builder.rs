@@ -500,7 +500,7 @@ impl DatabaseBuilder {
             // Pre-allocate nodes (estimate: ~1.5x entries for typical CIDR distributions)
             tree_builder.reserve_nodes(estimated_nodes + estimated_nodes / 2);
 
-            // Insert all IP entries using pre-encoded offsets
+            // Insert all IP/CIDR entries using pre-encoded offsets
             for (addr, prefix_len, data_offset) in &ip_entries {
                 tree_builder.insert(*addr, *prefix_len, *data_offset)?;
             }
@@ -666,6 +666,19 @@ impl DatabaseBuilder {
             metadata.insert(
                 "ip_entry_count".to_string(),
                 DataValue::Uint32(u32::try_from(ip_entries.len()).unwrap_or(u32::MAX)),
+            );
+            let ipv4_entry_count = ip_entries
+                .iter()
+                .filter(|(addr, _, _)| addr.is_ipv4())
+                .count();
+            let ipv6_entry_count = ip_entries.len() - ipv4_entry_count;
+            metadata.insert(
+                "ipv4_entry_count".to_string(),
+                DataValue::Uint32(u32::try_from(ipv4_entry_count).unwrap_or(u32::MAX)),
+            );
+            metadata.insert(
+                "ipv6_entry_count".to_string(),
+                DataValue::Uint32(u32::try_from(ipv6_entry_count).unwrap_or(u32::MAX)),
             );
             metadata.insert(
                 "literal_entry_count".to_string(),
