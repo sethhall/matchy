@@ -319,7 +319,7 @@ pub struct DatabaseOptions {
 /// Builder for opening databases with custom configuration
 ///
 /// Created via `Database::from(path)`. Use the fluent API to configure
-/// options like caching and validation, then call `.open()` to load the database.
+/// options like caching and live updates, then call `.open()` to load the database.
 pub struct DatabaseOpener {
     options: DatabaseOptions,
     #[cfg(not(target_family = "wasm"))]
@@ -567,14 +567,14 @@ impl Database {
     /// Create a database opener with fluent builder API
     ///
     /// This is the recommended way to open databases, providing clean
-    /// configuration of cache size, validation, and future options.
+    /// configuration of cache size, live reloads, and future options.
     ///
     /// # Examples
     ///
     /// ```no_run
     /// use matchy::Database;
     ///
-    /// // Defaults (cache enabled, validation on)
+    /// // Defaults (cache enabled)
     /// let db = Database::from("threats.mxy").open()?;
     ///
     /// // Custom cache size

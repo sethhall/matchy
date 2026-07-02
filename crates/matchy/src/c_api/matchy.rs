@@ -687,7 +687,7 @@ pub type matchy_reload_callback_t =
 
 /// Database opening options
 ///
-/// Configure how databases are loaded, including cache settings and validation.
+/// Configure how databases are loaded, including cache, reload, and update settings.
 #[repr(C)]
 pub struct matchy_open_options_t {
     /// LRU cache capacity
@@ -781,7 +781,7 @@ pub unsafe extern "C" fn matchy_init_open_options(options: *mut matchy_open_opti
 
 /// Open database with custom options
 ///
-/// Opens a database file with configurable cache size, auto-reload, and validation settings.
+/// Opens a database file with configurable cache size, auto-reload, and auto-update settings.
 ///
 /// # Parameters
 /// * `filename` - Path to database file (null-terminated C string, must not be NULL)
