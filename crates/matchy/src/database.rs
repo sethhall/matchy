@@ -833,7 +833,7 @@ impl Database {
     /// Resolve the current live database, using a thread-local cache to avoid
     /// reloading the Arc on every call within the same generation.
     #[cfg(not(target_family = "wasm"))]
-    fn resolve_live_db(live: &LiveState) -> Arc<Database> {
+    fn resolve_live_db(live: &LiveState) -> Arc<Self> {
         use crate::updater::LOCAL_DB;
 
         let current_gen = live.generation.load(Ordering::Acquire);
@@ -1277,8 +1277,18 @@ impl Database {
 
         // Offsets from the tree are relative to the start of the data section (after the 16-byte separator)
         // So we slice the buffer to start at tree_size + 16
-        let data_section_start = header.tree_size + 16;
-        let data_section = &self.data.as_slice()[data_section_start..];
+        let data_section_start = header.tree_size.checked_add(16).ok_or_else(|| {
+            DatabaseError::Format(MmdbError::InvalidFormat(
+                "Tree size overflows data section offset".to_string(),
+            ))
+        })?;
+        let data = self.data.as_slice();
+        let data_section = data.get(data_section_start..).ok_or_else(|| {
+            DatabaseError::Format(MmdbError::InvalidFormat(format!(
+                "Data section starts at {data_section_start}, beyond file length {}",
+                data.len()
+            )))
+        })?;
 
         // Offsets from tree are relative to data_section, which we've sliced
         // So base_offset is 0 (the decoder will resolve pointers relative to the buffer start)
@@ -1312,7 +1322,7 @@ impl Database {
 
         // Check cache first - if hit, derive LookupRef from cached QueryResult
         if let Some(Some(result)) = self.with_cache(|cache| cache.get(query).cloned()) {
-            return Ok(match result {
+            let lookup = match result {
                 QueryResult::Ip {
                     prefix_len,
                     data_offset,
@@ -1322,14 +1332,53 @@ impl Database {
                     LookupRef::pattern(*data_offsets.first().unwrap_or(&0))
                 }
                 QueryResult::NotFound => LookupRef::not_found(),
-            });
+            };
+            self.record_lookup_ref_stats(query, lookup, true);
+            return Ok(lookup);
         }
 
         // Cache miss - do uncached lookup
-        if let Ok(addr) = query.parse::<IpAddr>() {
+        let lookup = if let Ok(addr) = query.parse::<IpAddr>() {
             self.lookup_ip_ref(addr)
         } else {
             Ok(self.lookup_string_ref(query))
+        }?;
+        self.record_lookup_ref_stats(query, lookup, false);
+        Ok(lookup)
+    }
+
+    fn record_lookup_ref_stats(&self, query: &str, lookup: LookupRef, cache_hit: bool) {
+        self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
+
+        if cache_hit {
+            self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+        } else if self.cache_enabled {
+            self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
+        }
+
+        match lookup.result_type {
+            1 => {
+                self.stats.ip_queries.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .queries_with_match
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            2 => {
+                self.stats.string_queries.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .queries_with_match
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                if query.parse::<IpAddr>().is_ok() {
+                    self.stats.ip_queries.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.stats.string_queries.fetch_add(1, Ordering::Relaxed);
+                }
+                self.stats
+                    .queries_without_match
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1372,6 +1421,8 @@ impl Database {
                     {
                         return LookupRef::pattern(data_offset);
                     }
+                } else {
+                    return LookupRef::pattern(0);
                 }
             }
         }
@@ -2068,6 +2119,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_lookup_ref_finds_pattern_only_matches() {
+        let paraglob = Paraglob::build_from_patterns(
+            &["*.evil.com"],
+            matchy_match_mode::MatchMode::CaseSensitive,
+        )
+        .unwrap();
+        let db = Database::from_bytes(paraglob.buffer().to_vec()).unwrap();
+
+        let lookup = db.lookup_ref("sub.evil.com").unwrap();
+
+        assert!(
+            lookup.found,
+            "lookup_ref should report pattern-only matches"
+        );
+        assert_eq!(lookup.result_type, 2, "result_type should be 2 (pattern)");
+        assert_eq!(
+            lookup.data_offset, 0,
+            "pattern-only matches have no MMDB offset"
+        );
+    }
+
+    #[test]
+    fn test_lookup_ref_updates_query_stats() {
+        let db = Database::from("tests/data/GeoLite2-Country.mmdb")
+            .open()
+            .unwrap();
+
+        let lookup = db.lookup_ref("1.1.1.1").unwrap();
+
+        assert!(lookup.found);
+        let stats = db.stats();
+        assert_eq!(stats.total_queries, 1);
+        assert_eq!(stats.ip_queries, 1);
+        assert_eq!(stats.queries_with_match, 1);
+    }
+
+    #[test]
+    fn test_decode_at_offset_returns_error_for_truncated_data_section() {
+        use matchy_data_format::DataEncoder;
+        use std::collections::HashMap;
+
+        let mut metadata = HashMap::new();
+        metadata.insert("node_count".to_string(), DataValue::Uint32(100));
+        metadata.insert("record_size".to_string(), DataValue::Uint16(24));
+        metadata.insert("ip_version".to_string(), DataValue::Uint16(4));
+
+        let mut encoder = DataEncoder::new();
+        encoder.encode(&DataValue::Map(metadata));
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\xAB\xCD\xEFMaxMind.com");
+        bytes.extend_from_slice(&encoder.into_bytes());
+
+        let db = Database::from_bytes(bytes).unwrap();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db.decode_at_offset(0)));
+
+        assert!(
+            result.is_ok(),
+            "decode_at_offset should return an error instead of panicking"
+        );
+        assert!(result.unwrap().is_err());
+    }
+
     /// Regression test: lookup_ref and decode_at_offset must delegate to the live
     /// database when auto-reload is enabled. Previously they operated on the shell
     /// database (which has empty data/no ip_header), returning not-found or errors.
@@ -2080,7 +2196,10 @@ mod tests {
 
         // lookup_ref should find known IPs via the live database
         let lookup = db.lookup_ref("1.1.1.1").unwrap();
-        assert!(lookup.found, "lookup_ref should find 1.1.1.1 with auto-reload enabled");
+        assert!(
+            lookup.found,
+            "lookup_ref should find 1.1.1.1 with auto-reload enabled"
+        );
         assert_eq!(lookup.result_type, 1, "result_type should be 1 (IP)");
         assert!(lookup.prefix_len > 0);
 
@@ -2094,7 +2213,12 @@ mod tests {
         // Verify consistency: lookup_ref + decode_at_offset should produce the
         // same data as the full lookup() path
         let full_result = db.lookup("1.1.1.1").unwrap();
-        if let Some(QueryResult::Ip { data: full_data, prefix_len, .. }) = full_result {
+        if let Some(QueryResult::Ip {
+            data: full_data,
+            prefix_len,
+            ..
+        }) = full_result
+        {
             assert_eq!(prefix_len, lookup.prefix_len);
             let ref_data = db.decode_at_offset(lookup.data_offset).unwrap();
             assert_eq!(full_data, ref_data, "lookup_ref+decode should match lookup");
