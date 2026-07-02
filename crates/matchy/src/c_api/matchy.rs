@@ -13,8 +13,10 @@ use matchy_match_mode::MatchMode;
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
+use std::sync::Mutex;
 
 struct CCallbackAdapter {
     callback: unsafe extern "C" fn(event: *const matchy_reload_event_t, user_data: *mut c_void),
@@ -73,6 +75,8 @@ pub const MATCHY_ERROR_IO: i32 = -6;
 pub const MATCHY_ERROR_SCHEMA_VALIDATION: i32 = -7;
 /// Unknown schema error
 pub const MATCHY_ERROR_UNKNOWN_SCHEMA: i32 = -8;
+/// Internal panic caught at the FFI boundary
+pub const MATCHY_ERROR_INTERNAL: i32 = -12;
 
 // ============================================================================
 // OPAQUE HANDLES
@@ -105,6 +109,16 @@ pub struct matchy_result_t {
     pub _db_ref: *const matchy_t,
 }
 
+fn empty_matchy_result() -> matchy_result_t {
+    matchy_result_t {
+        found: false,
+        prefix_len: 0,
+        _result_type: 0,
+        _data_offset: 0,
+        _db_ref: ptr::null(),
+    }
+}
+
 // ============================================================================
 // INTERNAL STRUCTURES
 // ============================================================================
@@ -117,6 +131,23 @@ struct MatchyBuilderInternal {
 
 struct MatchyInternal {
     database: Database,
+    value_cache: Mutex<EntryDataStorage>,
+}
+
+impl MatchyInternal {
+    fn new(database: Database) -> Self {
+        Self {
+            database,
+            value_cache: Mutex::new(EntryDataStorage::default()),
+        }
+    }
+}
+
+pub(super) fn ffi_guard<T>(fallback: T, f: impl FnOnce() -> T) -> T {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(value) => value,
+        Err(_) => fallback,
+    }
 }
 
 // Conversion helpers for opaque types
@@ -168,12 +199,14 @@ impl matchy_t {
 /// ```
 #[no_mangle]
 pub extern "C" fn matchy_builder_new() -> *mut matchy_builder_t {
-    let builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
-    let internal = Box::new(MatchyBuilderInternal {
-        builder,
-        validator: None,
-    });
-    matchy_builder_t::from_internal(internal)
+    ffi_guard(ptr::null_mut(), || {
+        let builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+        let internal = Box::new(MatchyBuilderInternal {
+            builder,
+            validator: None,
+        });
+        matchy_builder_t::from_internal(internal)
+    })
 }
 
 /// Set case-insensitive matching mode
@@ -204,19 +237,21 @@ pub unsafe extern "C" fn matchy_builder_set_case_insensitive(
     builder: *mut matchy_builder_t,
     case_insensitive: bool,
 ) -> i32 {
-    if builder.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        if builder.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
+        }
 
-    let internal = matchy_builder_t::as_internal_mut(builder);
-    let match_mode = if case_insensitive {
-        MatchMode::CaseInsensitive
-    } else {
-        MatchMode::CaseSensitive
-    };
-    internal.builder.set_match_mode(match_mode);
+        let internal = matchy_builder_t::as_internal_mut(builder);
+        let match_mode = if case_insensitive {
+            MatchMode::CaseInsensitive
+        } else {
+            MatchMode::CaseSensitive
+        };
+        internal.builder.set_match_mode(match_mode);
 
-    MATCHY_SUCCESS
+        MATCHY_SUCCESS
+    })
 }
 
 /// Enable schema validation for a known database type
@@ -257,38 +292,40 @@ pub unsafe extern "C" fn matchy_builder_set_schema(
     builder: *mut matchy_builder_t,
     schema_name: *const c_char,
 ) -> i32 {
-    if builder.is_null() || schema_name.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        if builder.is_null() || schema_name.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
+        }
 
-    let name = match CStr::from_ptr(schema_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return MATCHY_ERROR_INVALID_PARAM,
-    };
+        let name = match CStr::from_ptr(schema_name).to_str() {
+            Ok(s) => s,
+            Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+        };
 
-    // Check if this is a known schema
-    if !is_known_database_type(name) {
-        return MATCHY_ERROR_UNKNOWN_SCHEMA;
-    }
+        // Check if this is a known schema
+        if !is_known_database_type(name) {
+            return MATCHY_ERROR_UNKNOWN_SCHEMA;
+        }
 
-    // Create validator
-    let validator = match SchemaValidator::new(name) {
-        Ok(v) => v,
-        Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
-    };
+        // Create validator
+        let validator = match SchemaValidator::new(name) {
+            Ok(v) => v,
+            Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
+        };
 
-    // Get the canonical database type and set it
-    let internal = matchy_builder_t::as_internal_mut(builder);
-    if let Some(info) = get_schema_info(name) {
-        // DatabaseBuilder's with_database_type takes ownership and returns Self
-        // We need to use a placeholder to swap it out
-        let placeholder = DatabaseBuilder::new(MatchMode::CaseSensitive);
-        let old_builder = std::mem::replace(&mut internal.builder, placeholder);
-        internal.builder = old_builder.with_database_type(info.database_type);
-    }
-    internal.validator = Some(validator);
+        // Get the canonical database type and set it
+        let internal = matchy_builder_t::as_internal_mut(builder);
+        if let Some(info) = get_schema_info(name) {
+            // DatabaseBuilder's with_database_type takes ownership and returns Self
+            // We need to use a placeholder to swap it out
+            let placeholder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+            let old_builder = std::mem::replace(&mut internal.builder, placeholder);
+            internal.builder = old_builder.with_database_type(info.database_type);
+        }
+        internal.validator = Some(validator);
 
-    MATCHY_SUCCESS
+        MATCHY_SUCCESS
+    })
 }
 
 /// Add an entry with associated data (as JSON)
@@ -321,50 +358,52 @@ pub unsafe extern "C" fn matchy_builder_add(
     key: *const c_char,
     json_data: *const c_char,
 ) -> i32 {
-    if builder.is_null() || key.is_null() || json_data.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
-
-    let key_str = match CStr::from_ptr(key).to_str() {
-        Ok(s) => s,
-        Err(_) => return MATCHY_ERROR_INVALID_PARAM,
-    };
-
-    let json_str = match CStr::from_ptr(json_data).to_str() {
-        Ok(s) => s,
-        Err(_) => return MATCHY_ERROR_INVALID_PARAM,
-    };
-
-    // Parse JSON to DataValue (supports nested structures)
-    let data: DataValue = match serde_json::from_str(json_str) {
-        Ok(d) => d,
-        Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
-    };
-
-    // Wrap in a map if it's not already a map
-    let data_map = match data {
-        DataValue::Map(m) => m,
-        _ => {
-            // Single value - wrap it in a map with "value" key
-            let mut map = HashMap::new();
-            map.insert("value".to_string(), data);
-            map
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        if builder.is_null() || key.is_null() || json_data.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
         }
-    };
 
-    let internal = matchy_builder_t::as_internal_mut(builder);
+        let key_str = match CStr::from_ptr(key).to_str() {
+            Ok(s) => s,
+            Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+        };
 
-    // Validate against schema if one is set
-    if let Some(ref validator) = internal.validator {
-        if validator.validate(&data_map).is_err() {
-            return MATCHY_ERROR_SCHEMA_VALIDATION;
+        let json_str = match CStr::from_ptr(json_data).to_str() {
+            Ok(s) => s,
+            Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+        };
+
+        // Parse JSON to DataValue (supports nested structures)
+        let data: DataValue = match serde_json::from_str(json_str) {
+            Ok(d) => d,
+            Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
+        };
+
+        // Wrap in a map if it's not already a map
+        let data_map = match data {
+            DataValue::Map(m) => m,
+            _ => {
+                // Single value - wrap it in a map with "value" key
+                let mut map = HashMap::new();
+                map.insert("value".to_string(), data);
+                map
+            }
+        };
+
+        let internal = matchy_builder_t::as_internal_mut(builder);
+
+        // Validate against schema if one is set
+        if let Some(ref validator) = internal.validator {
+            if validator.validate(&data_map).is_err() {
+                return MATCHY_ERROR_SCHEMA_VALIDATION;
+            }
         }
-    }
 
-    match internal.builder.add_entry(key_str, data_map) {
-        Ok(_) => MATCHY_SUCCESS,
-        Err(_) => MATCHY_ERROR_INVALID_FORMAT,
-    }
+        match internal.builder.add_entry(key_str, data_map) {
+            Ok(_) => MATCHY_SUCCESS,
+            Err(_) => MATCHY_ERROR_INVALID_FORMAT,
+        }
+    })
 }
 
 /// Set database description
@@ -385,24 +424,26 @@ pub unsafe extern "C" fn matchy_builder_set_description(
     builder: *mut matchy_builder_t,
     description: *const c_char,
 ) -> i32 {
-    if builder.is_null() || description.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        if builder.is_null() || description.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
+        }
 
-    let desc_str = match CStr::from_ptr(description).to_str() {
-        Ok(s) => s,
-        Err(_) => return MATCHY_ERROR_INVALID_PARAM,
-    };
+        let desc_str = match CStr::from_ptr(description).to_str() {
+            Ok(s) => s,
+            Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+        };
 
-    let internal = matchy_builder_t::as_internal_mut(builder);
-    // Create new builder with description
-    let old_builder = std::mem::replace(
-        &mut internal.builder,
-        DatabaseBuilder::new(MatchMode::CaseSensitive),
-    );
-    internal.builder = old_builder.with_description("en", desc_str);
+        let internal = matchy_builder_t::as_internal_mut(builder);
+        // Create new builder with description
+        let old_builder = std::mem::replace(
+            &mut internal.builder,
+            DatabaseBuilder::new(MatchMode::CaseSensitive),
+        );
+        internal.builder = old_builder.with_description("en", desc_str);
 
-    MATCHY_SUCCESS
+        MATCHY_SUCCESS
+    })
 }
 
 /// Set the update URL for the database
@@ -431,23 +472,25 @@ pub unsafe extern "C" fn matchy_builder_set_update_url(
     builder: *mut matchy_builder_t,
     url: *const c_char,
 ) -> i32 {
-    if builder.is_null() || url.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        if builder.is_null() || url.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
+        }
 
-    let url_str = match CStr::from_ptr(url).to_str() {
-        Ok(s) => s,
-        Err(_) => return MATCHY_ERROR_INVALID_PARAM,
-    };
+        let url_str = match CStr::from_ptr(url).to_str() {
+            Ok(s) => s,
+            Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+        };
 
-    let internal = matchy_builder_t::as_internal_mut(builder);
-    let old_builder = std::mem::replace(
-        &mut internal.builder,
-        DatabaseBuilder::new(MatchMode::CaseSensitive),
-    );
-    internal.builder = old_builder.with_update_url(url_str);
+        let internal = matchy_builder_t::as_internal_mut(builder);
+        let old_builder = std::mem::replace(
+            &mut internal.builder,
+            DatabaseBuilder::new(MatchMode::CaseSensitive),
+        );
+        internal.builder = old_builder.with_update_url(url_str);
 
-    MATCHY_SUCCESS
+        MATCHY_SUCCESS
+    })
 }
 
 /// Build and save database to file
@@ -475,30 +518,32 @@ pub unsafe extern "C" fn matchy_builder_save(
     builder: *mut matchy_builder_t,
     filename: *const c_char,
 ) -> i32 {
-    if builder.is_null() || filename.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        if builder.is_null() || filename.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
+        }
 
-    let path = match CStr::from_ptr(filename).to_str() {
-        Ok(s) => s,
-        Err(_) => return MATCHY_ERROR_INVALID_PARAM,
-    };
+        let path = match CStr::from_ptr(filename).to_str() {
+            Ok(s) => s,
+            Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+        };
 
-    let internal = matchy_builder_t::as_internal_mut(builder);
-    // Replace builder with a dummy one to take ownership
-    let builder_to_build = std::mem::replace(
-        &mut internal.builder,
-        DatabaseBuilder::new(MatchMode::CaseSensitive),
-    );
-    let bytes = match builder_to_build.build() {
-        Ok(b) => b,
-        Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
-    };
+        let internal = matchy_builder_t::as_internal_mut(builder);
+        // Replace builder with a dummy one to take ownership
+        let builder_to_build = std::mem::replace(
+            &mut internal.builder,
+            DatabaseBuilder::new(MatchMode::CaseSensitive),
+        );
+        let bytes = match builder_to_build.build() {
+            Ok(b) => b,
+            Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
+        };
 
-    match std::fs::write(path, bytes) {
-        Ok(_) => MATCHY_SUCCESS,
-        Err(_) => MATCHY_ERROR_IO,
-    }
+        match std::fs::write(path, bytes) {
+            Ok(_) => MATCHY_SUCCESS,
+            Err(_) => MATCHY_ERROR_IO,
+        }
+    })
 }
 
 /// Build and return database in memory
@@ -532,35 +577,37 @@ pub unsafe extern "C" fn matchy_builder_build(
     buffer: *mut *mut u8,
     size: *mut usize,
 ) -> i32 {
-    if builder.is_null() || buffer.is_null() || size.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        if builder.is_null() || buffer.is_null() || size.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
+        }
 
-    let internal = matchy_builder_t::as_internal_mut(builder);
-    // Replace builder with a dummy one to take ownership
-    let builder_to_build = std::mem::replace(
-        &mut internal.builder,
-        DatabaseBuilder::new(MatchMode::CaseSensitive),
-    );
-    let bytes = match builder_to_build.build() {
-        Ok(b) => b,
-        Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
-    };
+        let internal = matchy_builder_t::as_internal_mut(builder);
+        // Replace builder with a dummy one to take ownership
+        let builder_to_build = std::mem::replace(
+            &mut internal.builder,
+            DatabaseBuilder::new(MatchMode::CaseSensitive),
+        );
+        let bytes = match builder_to_build.build() {
+            Ok(b) => b,
+            Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
+        };
 
-    // Allocate buffer using libc::malloc so C can free it
-    let buf_size = bytes.len();
-    let buf_ptr = libc::malloc(buf_size).cast::<u8>();
-    if buf_ptr.is_null() {
-        return MATCHY_ERROR_OUT_OF_MEMORY;
-    }
+        // Allocate buffer using libc::malloc so C can free it
+        let buf_size = bytes.len();
+        let buf_ptr = libc::malloc(buf_size).cast::<u8>();
+        if buf_ptr.is_null() {
+            return MATCHY_ERROR_OUT_OF_MEMORY;
+        }
 
-    // Copy data
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr, buf_size);
+        // Copy data
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr, buf_size);
 
-    *buffer = buf_ptr;
-    *size = buf_size;
+        *buffer = buf_ptr;
+        *size = buf_size;
 
-    MATCHY_SUCCESS
+        MATCHY_SUCCESS
+    })
 }
 
 /// Free builder
@@ -574,9 +621,11 @@ pub unsafe extern "C" fn matchy_builder_build(
 /// * Calling with NULL is safe (no-op)
 #[no_mangle]
 pub unsafe extern "C" fn matchy_builder_free(builder: *mut matchy_builder_t) {
-    if !builder.is_null() {
-        let _ = matchy_builder_t::into_internal(builder);
-    }
+    ffi_guard((), || {
+        if !builder.is_null() {
+            let _ = matchy_builder_t::into_internal(builder);
+        }
+    });
 }
 
 // ============================================================================
@@ -722,10 +771,12 @@ impl Default for matchy_open_options_t {
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_init_open_options(options: *mut matchy_open_options_t) {
-    if options.is_null() {
-        return;
-    }
-    *options = matchy_open_options_t::default();
+    ffi_guard((), || {
+        if options.is_null() {
+            return;
+        }
+        *options = matchy_open_options_t::default();
+    });
 }
 
 /// Open database with custom options
@@ -767,61 +818,63 @@ pub unsafe extern "C" fn matchy_open_with_options(
     filename: *const c_char,
     options: *const matchy_open_options_t,
 ) -> *mut matchy_t {
-    if filename.is_null() || options.is_null() {
-        return ptr::null_mut();
-    }
+    ffi_guard(ptr::null_mut(), || {
+        if filename.is_null() || options.is_null() {
+            return ptr::null_mut();
+        }
 
-    let path = match CStr::from_ptr(filename).to_str() {
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(),
-    };
+        let path = match CStr::from_ptr(filename).to_str() {
+            Ok(s) => s,
+            Err(_) => return ptr::null_mut(),
+        };
 
-    let opts = &*options;
+        let opts = &*options;
 
-    let mut opener = Database::from(path);
+        let mut opener = Database::from(path);
 
-    if opts.cache_capacity == 0 {
-        opener = opener.no_cache();
-    } else {
-        opener = opener.cache_capacity(opts.cache_capacity as usize);
-    }
+        if opts.cache_capacity == 0 {
+            opener = opener.no_cache();
+        } else {
+            opener = opener.cache_capacity(opts.cache_capacity as usize);
+        }
 
-    if opts.auto_reload {
-        opener = opener.watch();
-    }
+        if opts.auto_reload {
+            opener = opener.watch();
+        }
 
-    #[cfg(feature = "auto-update")]
-    if opts.auto_update {
-        opener = opener
-            .auto_update()
-            .update_interval(std::time::Duration::from_secs(u64::from(
-                opts.update_interval_secs,
-            )));
+        #[cfg(feature = "auto-update")]
+        if opts.auto_update {
+            opener = opener
+                .auto_update()
+                .update_interval(std::time::Duration::from_secs(u64::from(
+                    opts.update_interval_secs,
+                )));
 
-        if !opts.cache_dir.is_null() {
-            if let Ok(dir) = CStr::from_ptr(opts.cache_dir).to_str() {
-                opener = opener.cache_dir(dir);
+            if !opts.cache_dir.is_null() {
+                if let Ok(dir) = CStr::from_ptr(opts.cache_dir).to_str() {
+                    opener = opener.cache_dir(dir);
+                }
             }
         }
-    }
 
-    if let Some(callback) = opts.reload_callback {
-        let adapter = CCallbackAdapter {
-            callback,
-            user_data: opts.reload_callback_user_data,
-        };
-        opener = opener.on_reload(move |event: ReloadEvent| {
-            adapter.invoke(&event);
-        });
-    }
-
-    match opener.open() {
-        Ok(db) => {
-            let internal = Box::new(MatchyInternal { database: db });
-            matchy_t::from_internal(internal)
+        if let Some(callback) = opts.reload_callback {
+            let adapter = CCallbackAdapter {
+                callback,
+                user_data: opts.reload_callback_user_data,
+            };
+            opener = opener.on_reload(move |event: ReloadEvent| {
+                adapter.invoke(&event);
+            });
         }
-        Err(_) => ptr::null_mut(),
-    }
+
+        match opener.open() {
+            Ok(db) => {
+                let internal = Box::new(MatchyInternal::new(db));
+                matchy_t::from_internal(internal)
+            }
+            Err(_) => ptr::null_mut(),
+        }
+    })
 }
 
 /// Open database from file (memory-mapped) - SAFE mode
@@ -851,14 +904,18 @@ pub unsafe extern "C" fn matchy_open_with_options(
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_open(filename: *const c_char) -> *mut matchy_t {
-    // Delegate to matchy_open_with_options with default settings
-    let opts = matchy_open_options_t::default();
-    matchy_open_with_options(filename, &opts)
+    ffi_guard(ptr::null_mut(), || {
+        // Delegate to matchy_open_with_options with default settings
+        let opts = matchy_open_options_t::default();
+        matchy_open_with_options(filename, &opts)
+    })
 }
 
-/// Open database from memory buffer (zero-copy)
+/// Open database from memory buffer.
 ///
-/// Creates a database handle from a memory buffer. No data is copied.
+/// Creates a database handle from a memory buffer. The buffer is copied into
+/// the database handle, so the caller may modify or free the source buffer
+/// after this function returns.
 ///
 /// # Parameters
 /// * `buffer` - Pointer to database data (must not be NULL)
@@ -869,22 +926,23 @@ pub unsafe extern "C" fn matchy_open(filename: *const c_char) -> *mut matchy_t {
 /// * NULL on failure
 ///
 /// # Safety
-/// * `buffer` must be valid for the lifetime of the database handle
-/// * Caller must not modify or free buffer while handle exists
+/// * `buffer` must point to a valid readable buffer of `size` bytes
 #[no_mangle]
 pub unsafe extern "C" fn matchy_open_buffer(buffer: *const u8, size: usize) -> *mut matchy_t {
-    if buffer.is_null() || size == 0 {
-        return ptr::null_mut();
-    }
-
-    let slice = slice::from_raw_parts(buffer, size);
-    match Database::from_bytes(slice.to_vec()) {
-        Ok(db) => {
-            let internal = Box::new(MatchyInternal { database: db });
-            matchy_t::from_internal(internal)
+    ffi_guard(ptr::null_mut(), || {
+        if buffer.is_null() || size == 0 {
+            return ptr::null_mut();
         }
-        Err(_) => ptr::null_mut(),
-    }
+
+        let slice = slice::from_raw_parts(buffer, size);
+        match Database::from_bytes(slice.to_vec()) {
+            Ok(db) => {
+                let internal = Box::new(MatchyInternal::new(db));
+                matchy_t::from_internal(internal)
+            }
+            Err(_) => ptr::null_mut(),
+        }
+    })
 }
 
 /// Database statistics
@@ -936,22 +994,24 @@ pub struct matchy_stats_t {
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_get_stats(db: *const matchy_t, stats: *mut matchy_stats_t) {
-    if db.is_null() || stats.is_null() {
-        return;
-    }
+    ffi_guard((), || {
+        if db.is_null() || stats.is_null() {
+            return;
+        }
 
-    let internal = matchy_t::as_internal(db);
-    let rust_stats = internal.database.stats();
+        let internal = matchy_t::as_internal(db);
+        let rust_stats = internal.database.stats();
 
-    *stats = matchy_stats_t {
-        total_queries: rust_stats.total_queries,
-        queries_with_match: rust_stats.queries_with_match,
-        queries_without_match: rust_stats.queries_without_match,
-        cache_hits: rust_stats.cache_hits,
-        cache_misses: rust_stats.cache_misses,
-        ip_queries: rust_stats.ip_queries,
-        string_queries: rust_stats.string_queries,
-    };
+        *stats = matchy_stats_t {
+            total_queries: rust_stats.total_queries,
+            queries_with_match: rust_stats.queries_with_match,
+            queries_without_match: rust_stats.queries_without_match,
+            cache_hits: rust_stats.cache_hits,
+            cache_misses: rust_stats.cache_misses,
+            ip_queries: rust_stats.ip_queries,
+            string_queries: rust_stats.string_queries,
+        };
+    });
 }
 
 /// Clear the query cache
@@ -975,12 +1035,14 @@ pub unsafe extern "C" fn matchy_get_stats(db: *const matchy_t, stats: *mut match
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_clear_cache(db: *const matchy_t) {
-    if db.is_null() {
-        return;
-    }
+    ffi_guard((), || {
+        if db.is_null() {
+            return;
+        }
 
-    let internal = matchy_t::as_internal(db);
-    internal.database.clear_cache();
+        let internal = matchy_t::as_internal(db);
+        internal.database.clear_cache();
+    });
 }
 
 /// Close database
@@ -1002,9 +1064,11 @@ pub unsafe extern "C" fn matchy_clear_cache(db: *const matchy_t) {
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_close(db: *mut matchy_t) {
-    if !db.is_null() {
-        let _ = matchy_t::into_internal(db);
-    }
+    ffi_guard((), || {
+        if !db.is_null() {
+            let _ = matchy_t::into_internal(db);
+        }
+    });
 }
 
 /// Unified query interface - automatically detects IP vs pattern
@@ -1050,34 +1114,28 @@ pub unsafe extern "C" fn matchy_query(
     db: *const matchy_t,
     query: *const c_char,
 ) -> matchy_result_t {
-    let empty_result = matchy_result_t {
-        found: false,
-        prefix_len: 0,
-        _result_type: 0,
-        _data_offset: 0,
-        _db_ref: ptr::null(),
-    };
+    ffi_guard(empty_matchy_result(), || {
+        if db.is_null() || query.is_null() {
+            return empty_matchy_result();
+        }
 
-    if db.is_null() || query.is_null() {
-        return empty_result;
-    }
+        let query_str = match CStr::from_ptr(query).to_str() {
+            Ok(s) => s,
+            Err(_) => return empty_matchy_result(),
+        };
 
-    let query_str = match CStr::from_ptr(query).to_str() {
-        Ok(s) => s,
-        Err(_) => return empty_result,
-    };
-
-    let internal = matchy_t::as_internal(db);
-    match internal.database.lookup_ref(query_str) {
-        Ok(lookup_ref) if lookup_ref.found => matchy_result_t {
-            found: true,
-            prefix_len: lookup_ref.prefix_len,
-            _result_type: lookup_ref.result_type,
-            _data_offset: lookup_ref.data_offset,
-            _db_ref: db,
-        },
-        _ => empty_result,
-    }
+        let internal = matchy_t::as_internal(db);
+        match internal.database.lookup_ref(query_str) {
+            Ok(lookup_ref) if lookup_ref.found => matchy_result_t {
+                found: true,
+                prefix_len: lookup_ref.prefix_len,
+                _result_type: lookup_ref.result_type,
+                _data_offset: lookup_ref.data_offset,
+                _db_ref: db,
+            },
+            _ => empty_matchy_result(),
+        }
+    })
 }
 
 /// Unified query interface - writes result into provided struct pointer
@@ -1110,10 +1168,12 @@ pub unsafe extern "C" fn matchy_query_into(
     query: *const c_char,
     result: *mut matchy_result_t,
 ) {
-    if result.is_null() {
-        return;
-    }
-    *result = matchy_query(db, query);
+    ffi_guard((), || {
+        if result.is_null() {
+            return;
+        }
+        *result = matchy_query(db, query);
+    });
 }
 
 /// Free query result (no-op in zero-allocation API)
@@ -1128,7 +1188,9 @@ pub unsafe extern "C" fn matchy_query_into(
 /// * Safe to call with any pointer including NULL
 #[no_mangle]
 pub unsafe extern "C" fn matchy_free_result(_result: *mut matchy_result_t) {
-    // No-op: matchy_result_t now stores offsets, not heap pointers
+    ffi_guard((), || {
+        // No-op: matchy_result_t now stores offsets, not heap pointers
+    });
 }
 
 /// Free a string returned by matchy
@@ -1141,9 +1203,11 @@ pub unsafe extern "C" fn matchy_free_result(_result: *mut matchy_result_t) {
 /// * Must not be called twice on the same pointer
 #[no_mangle]
 pub unsafe extern "C" fn matchy_free_string(string: *mut c_char) {
-    if !string.is_null() {
-        let _ = CString::from_raw(string);
-    }
+    ffi_guard((), || {
+        if !string.is_null() {
+            let _ = CString::from_raw(string);
+        }
+    });
 }
 
 /// Get library version string
@@ -1153,10 +1217,12 @@ pub unsafe extern "C" fn matchy_free_string(string: *mut c_char) {
 /// * Pointer is valid for program lifetime, do not free
 #[no_mangle]
 pub extern "C" fn matchy_version() -> *const c_char {
-    // Use the version from Cargo.toml, automatically updated at compile time
-    concat!(env!("CARGO_PKG_VERSION"), "\0")
-        .as_ptr()
-        .cast::<c_char>()
+    ffi_guard(ptr::null(), || {
+        // Use the version from Cargo.toml, automatically updated at compile time
+        concat!(env!("CARGO_PKG_VERSION"), "\0")
+            .as_ptr()
+            .cast::<c_char>()
+    })
 }
 
 /// Get database format description
@@ -1173,13 +1239,15 @@ pub extern "C" fn matchy_version() -> *const c_char {
 /// * `db` must be a valid pointer from matchy_open
 #[no_mangle]
 pub unsafe extern "C" fn matchy_format(db: *const matchy_t) -> *const c_char {
-    if db.is_null() {
-        return ptr::null();
-    }
+    ffi_guard(ptr::null(), || {
+        if db.is_null() {
+            return ptr::null();
+        }
 
-    let internal = matchy_t::as_internal(db);
-    let format_str = internal.database.format();
-    format_str.as_ptr().cast::<c_char>()
+        let internal = matchy_t::as_internal(db);
+        let format_str = internal.database.format();
+        format_str.as_ptr().cast::<c_char>()
+    })
 }
 
 /// Check if database supports IP address lookups
@@ -1195,12 +1263,14 @@ pub unsafe extern "C" fn matchy_format(db: *const matchy_t) -> *const c_char {
 /// * `db` must be a valid pointer from matchy_open
 #[no_mangle]
 pub unsafe extern "C" fn matchy_has_ip_data(db: *const matchy_t) -> bool {
-    if db.is_null() {
-        return false;
-    }
+    ffi_guard(false, || {
+        if db.is_null() {
+            return false;
+        }
 
-    let internal = matchy_t::as_internal(db);
-    internal.database.has_ip_data()
+        let internal = matchy_t::as_internal(db);
+        internal.database.has_ip_data()
+    })
 }
 
 /// Check if database supports string lookups (literals or globs)
@@ -1216,12 +1286,14 @@ pub unsafe extern "C" fn matchy_has_ip_data(db: *const matchy_t) -> bool {
 /// * `db` must be a valid pointer from matchy_open
 #[no_mangle]
 pub unsafe extern "C" fn matchy_has_string_data(db: *const matchy_t) -> bool {
-    if db.is_null() {
-        return false;
-    }
+    ffi_guard(false, || {
+        if db.is_null() {
+            return false;
+        }
 
-    let internal = matchy_t::as_internal(db);
-    internal.database.has_string_data()
+        let internal = matchy_t::as_internal(db);
+        internal.database.has_string_data()
+    })
 }
 
 /// Check if database supports literal (exact string) lookups
@@ -1237,12 +1309,14 @@ pub unsafe extern "C" fn matchy_has_string_data(db: *const matchy_t) -> bool {
 /// * `db` must be a valid pointer from matchy_open
 #[no_mangle]
 pub unsafe extern "C" fn matchy_has_literal_data(db: *const matchy_t) -> bool {
-    if db.is_null() {
-        return false;
-    }
+    ffi_guard(false, || {
+        if db.is_null() {
+            return false;
+        }
 
-    let internal = matchy_t::as_internal(db);
-    internal.database.has_literal_data()
+        let internal = matchy_t::as_internal(db);
+        internal.database.has_literal_data()
+    })
 }
 
 /// Check if database supports glob pattern lookups
@@ -1258,12 +1332,14 @@ pub unsafe extern "C" fn matchy_has_literal_data(db: *const matchy_t) -> bool {
 /// * `db` must be a valid pointer from matchy_open
 #[no_mangle]
 pub unsafe extern "C" fn matchy_has_glob_data(db: *const matchy_t) -> bool {
-    if db.is_null() {
-        return false;
-    }
+    ffi_guard(false, || {
+        if db.is_null() {
+            return false;
+        }
 
-    let internal = matchy_t::as_internal(db);
-    internal.database.has_glob_data()
+        let internal = matchy_t::as_internal(db);
+        internal.database.has_glob_data()
+    })
 }
 
 /// Check if database supports pattern matching (deprecated)
@@ -1286,12 +1362,14 @@ pub unsafe extern "C" fn matchy_has_glob_data(db: *const matchy_t) -> bool {
     note = "Use matchy_has_literal_data or matchy_has_glob_data instead"
 )]
 pub unsafe extern "C" fn matchy_has_pattern_data(db: *const matchy_t) -> bool {
-    if db.is_null() {
-        return false;
-    }
+    ffi_guard(false, || {
+        if db.is_null() {
+            return false;
+        }
 
-    let internal = matchy_t::as_internal(db);
-    internal.database.has_string_data()
+        let internal = matchy_t::as_internal(db);
+        internal.database.has_string_data()
+    })
 }
 
 /// Get database metadata as JSON string
@@ -1309,24 +1387,26 @@ pub unsafe extern "C" fn matchy_has_pattern_data(db: *const matchy_t) -> bool {
 /// * `db` must be a valid pointer from matchy_open
 #[no_mangle]
 pub unsafe extern "C" fn matchy_metadata(db: *const matchy_t) -> *mut c_char {
-    if db.is_null() {
-        return ptr::null_mut();
-    }
-
-    let internal = matchy_t::as_internal(db);
-    match internal.database.metadata() {
-        Some(metadata) => {
-            // Convert metadata to JSON string
-            match serde_json::to_string(&metadata) {
-                Ok(json_str) => match CString::new(json_str) {
-                    Ok(c_str) => c_str.into_raw(),
-                    Err(_) => ptr::null_mut(),
-                },
-                Err(_) => ptr::null_mut(),
-            }
+    ffi_guard(ptr::null_mut(), || {
+        if db.is_null() {
+            return ptr::null_mut();
         }
-        None => ptr::null_mut(),
-    }
+
+        let internal = matchy_t::as_internal(db);
+        match internal.database.metadata() {
+            Some(metadata) => {
+                // Convert metadata to JSON string
+                match serde_json::to_string(&metadata) {
+                    Ok(json_str) => match CString::new(json_str) {
+                        Ok(c_str) => c_str.into_raw(),
+                        Err(_) => ptr::null_mut(),
+                    },
+                    Err(_) => ptr::null_mut(),
+                }
+            }
+            None => ptr::null_mut(),
+        }
+    })
 }
 
 /// Get pattern string by ID
@@ -1349,21 +1429,23 @@ pub unsafe extern "C" fn matchy_get_pattern_string(
     db: *const matchy_t,
     pattern_id: u32,
 ) -> *mut c_char {
-    if db.is_null() {
-        return ptr::null_mut();
-    }
-
-    let internal = matchy_t::as_internal(db);
-
-    // Get pattern string from database
-    if let Some(pattern_str) = internal.database.get_pattern_string(pattern_id) {
-        match CString::new(pattern_str) {
-            Ok(c_str) => return c_str.into_raw(),
-            Err(_) => return ptr::null_mut(),
+    ffi_guard(ptr::null_mut(), || {
+        if db.is_null() {
+            return ptr::null_mut();
         }
-    }
 
-    ptr::null_mut()
+        let internal = matchy_t::as_internal(db);
+
+        // Get pattern string from database
+        if let Some(pattern_str) = internal.database.get_pattern_string(pattern_id) {
+            match CString::new(pattern_str) {
+                Ok(c_str) => return c_str.into_raw(),
+                Err(_) => return ptr::null_mut(),
+            }
+        }
+
+        ptr::null_mut()
+    })
 }
 
 /// Get total number of patterns in database
@@ -1381,12 +1463,14 @@ pub unsafe extern "C" fn matchy_get_pattern_string(
 /// * `db` must be a valid pointer from matchy_open
 #[no_mangle]
 pub unsafe extern "C" fn matchy_pattern_count(db: *const matchy_t) -> usize {
-    if db.is_null() {
-        return 0;
-    }
+    ffi_guard(0, || {
+        if db.is_null() {
+            return 0;
+        }
 
-    let internal = matchy_t::as_internal(db);
-    internal.database.pattern_count()
+        let internal = matchy_t::as_internal(db);
+        internal.database.pattern_count()
+    })
 }
 
 // ============================================================================
@@ -1425,11 +1509,11 @@ pub const MATCHY_DATA_TYPE_FLOAT: u32 = 15;
 
 /// Additional error codes for structured data API
 /// Invalid lookup path specified
-pub const MATCHY_ERROR_LOOKUP_PATH_INVALID: i32 = -7;
+pub const MATCHY_ERROR_LOOKUP_PATH_INVALID: i32 = -9;
 /// No data available at the specified path
-pub const MATCHY_ERROR_NO_DATA: i32 = -8;
+pub const MATCHY_ERROR_NO_DATA: i32 = -10;
 /// Failed to parse data value
-pub const MATCHY_ERROR_DATA_PARSE: i32 = -9;
+pub const MATCHY_ERROR_DATA_PARSE: i32 = -11;
 
 /// Entry data union (matches MMDB layout for compatibility)
 #[repr(C)]
@@ -1492,6 +1576,18 @@ pub struct matchy_entry_data_list_t {
     pub next: *mut Self,
 }
 
+#[derive(Default)]
+struct EntryDataStorage {
+    strings: Vec<CString>,
+    bytes: Vec<Vec<u8>>,
+}
+
+#[repr(C)]
+struct OwnedEntryDataListNode {
+    node: matchy_entry_data_list_t,
+    _storage: EntryDataStorage,
+}
+
 impl matchy_entry_data_t {
     /// Create empty entry data
     fn empty() -> Self {
@@ -1505,8 +1601,8 @@ impl matchy_entry_data_t {
     }
 
     /// Convert DataValue to entry_data_t
-    /// Strings are stored in the cache to keep them alive
-    unsafe fn from_data_value(value: &DataValue, string_cache: &mut Vec<CString>) -> Option<Self> {
+    /// Strings and byte arrays are stored in the cache to keep pointers alive.
+    fn from_data_value(value: &DataValue, storage: &mut EntryDataStorage) -> Option<Self> {
         let (type_, data_value, data_size) = match value {
             DataValue::Pointer(offset) => (
                 MATCHY_DATA_TYPE_POINTER,
@@ -1516,7 +1612,7 @@ impl matchy_entry_data_t {
             DataValue::String(s) => {
                 let c_str = CString::new(s.as_str()).ok()?;
                 let ptr = c_str.as_ptr();
-                string_cache.push(c_str);
+                storage.strings.push(c_str);
                 (
                     MATCHY_DATA_TYPE_UTF8_STRING,
                     matchy_entry_data_value_u { utf8_string: ptr },
@@ -1529,7 +1625,8 @@ impl matchy_entry_data_t {
                 8,
             ),
             DataValue::Bytes(b) => {
-                let ptr = b.as_ptr();
+                storage.bytes.push(b.clone());
+                let ptr = storage.bytes.last()?.as_ptr();
                 (
                     MATCHY_DATA_TYPE_BYTES,
                     matchy_entry_data_value_u { bytes: ptr },
@@ -1593,7 +1690,7 @@ impl matchy_entry_data_t {
                 let c_str = CString::new(iso.as_str()).ok()?;
                 let ptr = c_str.as_ptr();
                 let len = iso.len();
-                string_cache.push(c_str);
+                storage.strings.push(c_str);
                 (
                     MATCHY_DATA_TYPE_UTF8_STRING,
                     matchy_entry_data_value_u { utf8_string: ptr },
@@ -1661,19 +1758,21 @@ pub unsafe extern "C" fn matchy_result_get_entry(
     result: *const matchy_result_t,
     entry: *mut matchy_entry_s,
 ) -> i32 {
-    if result.is_null() || entry.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        if result.is_null() || entry.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
+        }
 
-    let res = &*result;
-    if !res.found {
-        return MATCHY_ERROR_NO_DATA;
-    }
+        let res = &*result;
+        if !res.found {
+            return MATCHY_ERROR_NO_DATA;
+        }
 
-    (*entry).db = res._db_ref;
-    (*entry)._data_offset = res._data_offset;
+        (*entry).db = res._db_ref;
+        (*entry)._data_offset = res._data_offset;
 
-    MATCHY_SUCCESS
+        MATCHY_SUCCESS
+    })
 }
 
 // Note: Full varargs support (matchy_get_value) should be provided as a C macro
@@ -1707,59 +1806,67 @@ pub unsafe extern "C" fn matchy_aget_value(
     entry_data: *mut matchy_entry_data_t,
     path: *const *const c_char,
 ) -> i32 {
-    if entry.is_null() || entry_data.is_null() || path.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
-
-    let mut path_vec = Vec::new();
-    let mut i = 0;
-    loop {
-        let ptr = *path.offset(i);
-        if ptr.is_null() {
-            break;
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        if entry.is_null() || entry_data.is_null() || path.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
         }
-        match CStr::from_ptr(ptr).to_str() {
-            Ok(s) => path_vec.push(s),
-            Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+
+        let mut path_vec = Vec::new();
+        let mut i = 0;
+        loop {
+            let ptr = *path.offset(i);
+            if ptr.is_null() {
+                break;
+            }
+            match CStr::from_ptr(ptr).to_str() {
+                Ok(s) => path_vec.push(s),
+                Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+            }
+            i += 1;
         }
-        i += 1;
-    }
 
-    let db = (*entry).db;
-    if db.is_null() {
-        (*entry_data) = matchy_entry_data_t::empty();
-        return MATCHY_ERROR_NO_DATA;
-    }
-
-    let internal = matchy_t::as_internal(db);
-    let data = match internal.database.decode_at_offset((*entry)._data_offset) {
-        Ok(d) => d,
-        Err(_) => {
+        let db = (*entry).db;
+        if db.is_null() {
             (*entry_data) = matchy_entry_data_t::empty();
-            return MATCHY_ERROR_DATA_PARSE;
+            return MATCHY_ERROR_NO_DATA;
         }
-    };
 
-    let target = match navigate_path(&data, &path_vec) {
-        Some(v) => v,
-        None => {
-            (*entry_data) = matchy_entry_data_t::empty();
-            return MATCHY_ERROR_LOOKUP_PATH_INVALID;
-        }
-    };
+        let internal = matchy_t::as_internal(db);
+        let data = match internal.database.decode_at_offset((*entry)._data_offset) {
+            Ok(d) => d,
+            Err(_) => {
+                (*entry_data) = matchy_entry_data_t::empty();
+                return MATCHY_ERROR_DATA_PARSE;
+            }
+        };
 
-    let mut string_cache = Vec::new();
-    match matchy_entry_data_t::from_data_value(target, &mut string_cache) {
-        Some(d) => {
-            (*entry_data) = d;
-            std::mem::forget(string_cache);
-            MATCHY_SUCCESS
+        let target = match navigate_path(&data, &path_vec) {
+            Some(v) => v,
+            None => {
+                (*entry_data) = matchy_entry_data_t::empty();
+                return MATCHY_ERROR_LOOKUP_PATH_INVALID;
+            }
+        };
+
+        let mut value_cache = match internal.value_cache.lock() {
+            Ok(cache) => cache,
+            Err(_) => {
+                (*entry_data) = matchy_entry_data_t::empty();
+                return MATCHY_ERROR_DATA_PARSE;
+            }
+        };
+
+        match matchy_entry_data_t::from_data_value(target, &mut value_cache) {
+            Some(d) => {
+                (*entry_data) = d;
+                MATCHY_SUCCESS
+            }
+            None => {
+                (*entry_data) = matchy_entry_data_t::empty();
+                MATCHY_ERROR_DATA_PARSE
+            }
         }
-        None => {
-            (*entry_data) = matchy_entry_data_t::empty();
-            MATCHY_ERROR_DATA_PARSE
-        }
-    }
+    })
 }
 
 /// Get full entry data as linked list (tree traversal)
@@ -1795,78 +1902,77 @@ pub unsafe extern "C" fn matchy_get_entry_data_list(
     entry: *const matchy_entry_s,
     entry_data_list: *mut *mut matchy_entry_data_list_t,
 ) -> i32 {
-    if entry.is_null() || entry_data_list.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
-
-    let db = (*entry).db;
-    if db.is_null() {
-        return MATCHY_ERROR_NO_DATA;
-    }
-
-    let internal = matchy_t::as_internal(db);
-    let data = match internal.database.decode_at_offset((*entry)._data_offset) {
-        Ok(d) => d,
-        Err(_) => return MATCHY_ERROR_DATA_PARSE,
-    };
-    let mut string_cache = Vec::new();
-    let mut list_head: *mut matchy_entry_data_list_t = ptr::null_mut();
-    let mut list_tail: *mut matchy_entry_data_list_t = ptr::null_mut();
-
-    // Helper to add a node to the list
-    let mut add_node = |entry_data: matchy_entry_data_t| {
-        let node = Box::new(matchy_entry_data_list_t {
-            entry_data,
-            next: ptr::null_mut(),
-        });
-        let node_ptr = Box::into_raw(node);
-
-        if list_head.is_null() {
-            list_head = node_ptr;
-            list_tail = node_ptr;
-        } else {
-            (*list_tail).next = node_ptr;
-            list_tail = node_ptr;
-        }
-    };
-
-    // Flatten the data structure recursively
-    fn flatten_data(
-        value: &DataValue,
-        string_cache: &mut Vec<CString>,
-        add_node: &mut impl FnMut(matchy_entry_data_t),
-    ) {
-        // Add the current node
-        if let Some(entry_data) =
-            // SAFETY: from_data_value only reads from value and appends to string_cache
-            unsafe { matchy_entry_data_t::from_data_value(value, string_cache) }
-        {
-            add_node(entry_data);
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        if entry.is_null() || entry_data_list.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
         }
 
-        // Recursively add children
-        match value {
-            DataValue::Map(m) => {
-                for (_key, val) in m.iter() {
-                    flatten_data(val, string_cache, add_node);
-                }
+        *entry_data_list = ptr::null_mut();
+
+        let db = (*entry).db;
+        if db.is_null() {
+            return MATCHY_ERROR_NO_DATA;
+        }
+
+        let internal = matchy_t::as_internal(db);
+        let data = match internal.database.decode_at_offset((*entry)._data_offset) {
+            Ok(d) => d,
+            Err(_) => return MATCHY_ERROR_DATA_PARSE,
+        };
+        let mut list_head: *mut matchy_entry_data_list_t = ptr::null_mut();
+        let mut list_tail: *mut matchy_entry_data_list_t = ptr::null_mut();
+
+        // Helper to add a node to the list
+        let mut add_node = |value: &DataValue| {
+            let mut storage = EntryDataStorage::default();
+            let Some(entry_data) = matchy_entry_data_t::from_data_value(value, &mut storage) else {
+                return;
+            };
+
+            let mut node = Box::new(OwnedEntryDataListNode {
+                node: matchy_entry_data_list_t {
+                    entry_data,
+                    next: ptr::null_mut(),
+                },
+                _storage: storage,
+            });
+            let node_ptr = &mut node.node as *mut matchy_entry_data_list_t;
+            let _ = Box::into_raw(node);
+
+            if list_head.is_null() {
+                list_head = node_ptr;
+                list_tail = node_ptr;
+            } else {
+                (*list_tail).next = node_ptr;
+                list_tail = node_ptr;
             }
-            DataValue::Array(a) => {
-                for val in a.iter() {
-                    flatten_data(val, string_cache, add_node);
+        };
+
+        // Flatten the data structure recursively
+        fn flatten_data(value: &DataValue, add_node: &mut impl FnMut(&DataValue)) {
+            add_node(value);
+
+            // Recursively add children
+            match value {
+                DataValue::Map(m) => {
+                    for (_key, val) in m.iter() {
+                        flatten_data(val, add_node);
+                    }
                 }
+                DataValue::Array(a) => {
+                    for val in a.iter() {
+                        flatten_data(val, add_node);
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
 
-    flatten_data(&data, &mut string_cache, &mut add_node);
+        flatten_data(&data, &mut add_node);
 
-    // Leak the string cache so pointers remain valid
-    std::mem::forget(string_cache);
-
-    *entry_data_list = list_head;
-    MATCHY_SUCCESS
+        *entry_data_list = list_head;
+        MATCHY_SUCCESS
+    })
 }
 
 /// Free entry data list
@@ -1881,16 +1987,18 @@ pub unsafe extern "C" fn matchy_get_entry_data_list(
 /// * Must not be freed twice
 #[no_mangle]
 pub unsafe extern "C" fn matchy_free_entry_data_list(list: *mut matchy_entry_data_list_t) {
-    if list.is_null() {
-        return;
-    }
+    ffi_guard((), || {
+        if list.is_null() {
+            return;
+        }
 
-    let mut current = list;
-    while !current.is_null() {
-        let next = (*current).next;
-        let _ = Box::from_raw(current);
-        current = next;
-    }
+        let mut current = list;
+        while !current.is_null() {
+            let next = (*current).next;
+            let _ = Box::from_raw(current.cast::<OwnedEntryDataListNode>());
+            current = next;
+        }
+    });
 }
 
 // ============================================================================
@@ -1922,18 +2030,20 @@ pub unsafe extern "C" fn matchy_free_entry_data_list(list: *mut matchy_entry_dat
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_get_update_url(db: *const matchy_t) -> *mut c_char {
-    if db.is_null() {
-        return ptr::null_mut();
-    }
+    ffi_guard(ptr::null_mut(), || {
+        if db.is_null() {
+            return ptr::null_mut();
+        }
 
-    let internal = matchy_t::as_internal(db);
-    match internal.database.update_url() {
-        Some(url) => match CString::new(url) {
-            Ok(c_str) => c_str.into_raw(),
-            Err(_) => ptr::null_mut(),
-        },
-        None => ptr::null_mut(),
-    }
+        let internal = matchy_t::as_internal(db);
+        match internal.database.update_url() {
+            Some(url) => match CString::new(url) {
+                Ok(c_str) => c_str.into_raw(),
+                Err(_) => ptr::null_mut(),
+            },
+            None => ptr::null_mut(),
+        }
+    })
 }
 
 /// Check if auto-update feature is available
@@ -1955,14 +2065,16 @@ pub unsafe extern "C" fn matchy_get_update_url(db: *const matchy_t) -> *mut c_ch
 /// ```
 #[no_mangle]
 pub extern "C" fn matchy_has_auto_update() -> bool {
-    #[cfg(feature = "auto-update")]
-    {
-        true
-    }
-    #[cfg(not(feature = "auto-update"))]
-    {
-        false
-    }
+    ffi_guard(false, || {
+        #[cfg(feature = "auto-update")]
+        {
+            true
+        }
+        #[cfg(not(feature = "auto-update"))]
+        {
+            false
+        }
+    })
 }
 
 /// Convert query result data to JSON string
@@ -1995,25 +2107,27 @@ pub extern "C" fn matchy_has_auto_update() -> bool {
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_result_to_json(result: *const matchy_result_t) -> *mut c_char {
-    if result.is_null() || !(*result).found || (*result)._db_ref.is_null() {
-        return ptr::null_mut();
-    }
+    ffi_guard(ptr::null_mut(), || {
+        if result.is_null() || !(*result).found || (*result)._db_ref.is_null() {
+            return ptr::null_mut();
+        }
 
-    let internal = matchy_t::as_internal((*result)._db_ref);
-    let data = match internal.database.decode_at_offset((*result)._data_offset) {
-        Ok(d) => d,
-        Err(_) => return ptr::null_mut(),
-    };
+        let internal = matchy_t::as_internal((*result)._db_ref);
+        let data = match internal.database.decode_at_offset((*result)._data_offset) {
+            Ok(d) => d,
+            Err(_) => return ptr::null_mut(),
+        };
 
-    let json_str = match serde_json::to_string(&data) {
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(),
-    };
+        let json_str = match serde_json::to_string(&data) {
+            Ok(s) => s,
+            Err(_) => return ptr::null_mut(),
+        };
 
-    match CString::new(json_str) {
-        Ok(c_str) => c_str.into_raw(),
-        Err(_) => ptr::null_mut(),
-    }
+        match CString::new(json_str) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => ptr::null_mut(),
+        }
+    })
 }
 
 // ============================================================================
@@ -2061,55 +2175,57 @@ pub unsafe extern "C" fn matchy_validate(
     level: i32,
     error_message: *mut *mut c_char,
 ) -> i32 {
-    use crate::validation::{validate_database, ValidationLevel};
-    use std::path::Path;
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        use crate::validation::{validate_database, ValidationLevel};
+        use std::path::Path;
 
-    if filename.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
+        if filename.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
+        }
 
-    let path_str = match CStr::from_ptr(filename).to_str() {
-        Ok(s) => s,
-        Err(_) => return MATCHY_ERROR_INVALID_PARAM,
-    };
+        let path_str = match CStr::from_ptr(filename).to_str() {
+            Ok(s) => s,
+            Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+        };
 
-    let validation_level = match level {
-        MATCHY_VALIDATION_STANDARD => ValidationLevel::Standard,
-        MATCHY_VALIDATION_STRICT => ValidationLevel::Strict,
-        _ => return MATCHY_ERROR_INVALID_PARAM,
-    };
+        let validation_level = match level {
+            MATCHY_VALIDATION_STANDARD => ValidationLevel::Standard,
+            MATCHY_VALIDATION_STRICT => ValidationLevel::Strict,
+            _ => return MATCHY_ERROR_INVALID_PARAM,
+        };
 
-    match validate_database(Path::new(path_str), validation_level) {
-        Ok(report) => {
-            if report.is_valid() {
-                MATCHY_SUCCESS
-            } else {
-                // Validation failed - populate error message if requested
+        match validate_database(Path::new(path_str), validation_level) {
+            Ok(report) => {
+                if report.is_valid() {
+                    MATCHY_SUCCESS
+                } else {
+                    // Validation failed - populate error message if requested
+                    if !error_message.is_null() {
+                        let error_text = if report.errors.is_empty() {
+                            "Validation failed (no error details)".to_string()
+                        } else {
+                            report.errors.join("; ")
+                        };
+
+                        if let Ok(c_str) = CString::new(error_text) {
+                            *error_message = c_str.into_raw();
+                        } else {
+                            *error_message = ptr::null_mut();
+                        }
+                    }
+                    MATCHY_ERROR_CORRUPT_DATA
+                }
+            }
+            Err(_) => {
                 if !error_message.is_null() {
-                    let error_text = if report.errors.is_empty() {
-                        "Validation failed (no error details)".to_string()
-                    } else {
-                        report.errors.join("; ")
-                    };
-
-                    if let Ok(c_str) = CString::new(error_text) {
+                    if let Ok(c_str) = CString::new("Failed to validate database") {
                         *error_message = c_str.into_raw();
-                    } else {
-                        *error_message = ptr::null_mut();
                     }
                 }
-                MATCHY_ERROR_CORRUPT_DATA
+                MATCHY_ERROR_IO
             }
         }
-        Err(_) => {
-            if !error_message.is_null() {
-                if let Ok(c_str) = CString::new("Failed to validate database") {
-                    *error_message = c_str.into_raw();
-                }
-            }
-            MATCHY_ERROR_IO
-        }
-    }
+    })
 }
 
 // ============================================================================
@@ -2255,20 +2371,22 @@ fn item_type_from_extracted(item: &ExtractedItem) -> u8 {
 /// ```
 #[no_mangle]
 pub extern "C" fn matchy_extractor_create(flags: u32) -> *mut matchy_extractor_t {
-    let builder = ExtractorBuilder::new()
-        .extract_domains((flags & MATCHY_EXTRACT_DOMAINS) != 0)
-        .extract_emails((flags & MATCHY_EXTRACT_EMAILS) != 0)
-        .extract_ipv4((flags & MATCHY_EXTRACT_IPV4) != 0)
-        .extract_ipv6((flags & MATCHY_EXTRACT_IPV6) != 0)
-        .extract_hashes((flags & MATCHY_EXTRACT_HASHES) != 0)
-        .extract_bitcoin((flags & MATCHY_EXTRACT_BITCOIN) != 0)
-        .extract_ethereum((flags & MATCHY_EXTRACT_ETHEREUM) != 0)
-        .extract_monero((flags & MATCHY_EXTRACT_MONERO) != 0);
+    ffi_guard(ptr::null_mut(), || {
+        let builder = ExtractorBuilder::new()
+            .extract_domains((flags & MATCHY_EXTRACT_DOMAINS) != 0)
+            .extract_emails((flags & MATCHY_EXTRACT_EMAILS) != 0)
+            .extract_ipv4((flags & MATCHY_EXTRACT_IPV4) != 0)
+            .extract_ipv6((flags & MATCHY_EXTRACT_IPV6) != 0)
+            .extract_hashes((flags & MATCHY_EXTRACT_HASHES) != 0)
+            .extract_bitcoin((flags & MATCHY_EXTRACT_BITCOIN) != 0)
+            .extract_ethereum((flags & MATCHY_EXTRACT_ETHEREUM) != 0)
+            .extract_monero((flags & MATCHY_EXTRACT_MONERO) != 0);
 
-    match builder.build() {
-        Ok(extractor) => matchy_extractor_t::from_internal(Box::new(extractor)),
-        Err(_) => ptr::null_mut(),
-    }
+        match builder.build() {
+            Ok(extractor) => matchy_extractor_t::from_internal(Box::new(extractor)),
+            Err(_) => ptr::null_mut(),
+        }
+    })
 }
 
 /// Extract patterns from a chunk of data
@@ -2317,47 +2435,53 @@ pub unsafe extern "C" fn matchy_extractor_extract_chunk(
     len: usize,
     matches: *mut matchy_matches_t,
 ) -> i32 {
-    if extractor.is_null() || data.is_null() || matches.is_null() {
-        return MATCHY_ERROR_INVALID_PARAM;
-    }
+    ffi_guard(MATCHY_ERROR_INTERNAL, || {
+        if extractor.is_null() || data.is_null() || matches.is_null() {
+            return MATCHY_ERROR_INVALID_PARAM;
+        }
 
-    let ext = matchy_extractor_t::as_internal(extractor);
-    let chunk = slice::from_raw_parts(data, len);
+        (*matches).items = ptr::null();
+        (*matches).count = 0;
+        (*matches)._internal = ptr::null_mut();
 
-    // Extract matches
-    let rust_matches = ext.extract_from_chunk(chunk);
+        let ext = matchy_extractor_t::as_internal(extractor);
+        let chunk = slice::from_raw_parts(data, len);
 
-    // Convert to C representation
-    let mut strings = Vec::with_capacity(rust_matches.len());
-    let mut c_matches = Vec::with_capacity(rust_matches.len());
+        // Extract matches
+        let rust_matches = ext.extract_from_chunk(chunk);
 
-    for m in rust_matches {
-        let value_str = m.item.as_value();
-        let c_string = match CString::new(value_str) {
-            Ok(s) => s,
-            Err(_) => continue, // Skip invalid strings
-        };
+        // Convert to C representation
+        let mut strings = Vec::with_capacity(rust_matches.len());
+        let mut c_matches = Vec::with_capacity(rust_matches.len());
 
-        c_matches.push(matchy_match_t {
-            item_type: item_type_from_extracted(&m.item),
-            value: c_string.as_ptr(),
-            start: m.span.0,
-            end: m.span.1,
+        for m in rust_matches {
+            let value_str = m.item.as_value();
+            let c_string = match CString::new(value_str) {
+                Ok(s) => s,
+                Err(_) => continue, // Skip invalid strings
+            };
+
+            c_matches.push(matchy_match_t {
+                item_type: item_type_from_extracted(&m.item),
+                value: c_string.as_ptr(),
+                start: m.span.0,
+                end: m.span.1,
+            });
+            strings.push(c_string);
+        }
+
+        // Store internal data and populate output
+        let internal = Box::new(MatchesInternal {
+            matches: c_matches,
+            strings,
         });
-        strings.push(c_string);
-    }
 
-    // Store internal data and populate output
-    let internal = Box::new(MatchesInternal {
-        matches: c_matches,
-        strings,
-    });
+        (*matches).items = internal.matches.as_ptr();
+        (*matches).count = internal.matches.len();
+        (*matches)._internal = Box::into_raw(internal).cast::<c_void>();
 
-    (*matches).items = internal.matches.as_ptr();
-    (*matches).count = internal.matches.len();
-    (*matches)._internal = Box::into_raw(internal).cast::<c_void>();
-
-    MATCHY_SUCCESS
+        MATCHY_SUCCESS
+    })
 }
 
 /// Free the matches returned by matchy_extractor_extract_chunk
@@ -2369,16 +2493,18 @@ pub unsafe extern "C" fn matchy_extractor_extract_chunk(
 /// * Must not use the matches after calling this function
 #[no_mangle]
 pub unsafe extern "C" fn matchy_matches_free(matches: *mut matchy_matches_t) {
-    if matches.is_null() {
-        return;
-    }
+    ffi_guard((), || {
+        if matches.is_null() {
+            return;
+        }
 
-    if !(*matches)._internal.is_null() {
-        let _ = Box::from_raw((*matches)._internal.cast::<MatchesInternal>());
-        (*matches)._internal = ptr::null_mut();
-        (*matches).items = ptr::null();
-        (*matches).count = 0;
-    }
+        if !(*matches)._internal.is_null() {
+            let _ = Box::from_raw((*matches)._internal.cast::<MatchesInternal>());
+            (*matches)._internal = ptr::null_mut();
+            (*matches).items = ptr::null();
+            (*matches).count = 0;
+        }
+    });
 }
 
 /// Free the extractor
@@ -2390,9 +2516,11 @@ pub unsafe extern "C" fn matchy_matches_free(matches: *mut matchy_matches_t) {
 /// * Must not be used after calling this function
 #[no_mangle]
 pub unsafe extern "C" fn matchy_extractor_free(extractor: *mut matchy_extractor_t) {
-    if !extractor.is_null() {
-        let _ = matchy_extractor_t::to_internal(extractor);
-    }
+    ffi_guard((), || {
+        if !extractor.is_null() {
+            let _ = matchy_extractor_t::to_internal(extractor);
+        }
+    });
 }
 
 /// Get the string name for an item type constant
@@ -2408,34 +2536,142 @@ pub unsafe extern "C" fn matchy_extractor_free(extractor: *mut matchy_extractor_
 /// The returned string is static and must not be freed.
 #[no_mangle]
 pub extern "C" fn matchy_item_type_name(item_type: u8) -> *const c_char {
-    static DOMAIN: &[u8] = b"Domain\0";
-    static EMAIL: &[u8] = b"Email\0";
-    static IPV4: &[u8] = b"IPv4\0";
-    static IPV6: &[u8] = b"IPv6\0";
-    static MD5: &[u8] = b"MD5\0";
-    static SHA1: &[u8] = b"SHA1\0";
-    static SHA256: &[u8] = b"SHA256\0";
-    static SHA384: &[u8] = b"SHA384\0";
-    static SHA512: &[u8] = b"SHA512\0";
-    static BITCOIN: &[u8] = b"Bitcoin\0";
-    static ETHEREUM: &[u8] = b"Ethereum\0";
-    static MONERO: &[u8] = b"Monero\0";
-    static UNKNOWN: &[u8] = b"Unknown\0";
+    ffi_guard(ptr::null(), || {
+        static DOMAIN: &[u8] = b"Domain\0";
+        static EMAIL: &[u8] = b"Email\0";
+        static IPV4: &[u8] = b"IPv4\0";
+        static IPV6: &[u8] = b"IPv6\0";
+        static MD5: &[u8] = b"MD5\0";
+        static SHA1: &[u8] = b"SHA1\0";
+        static SHA256: &[u8] = b"SHA256\0";
+        static SHA384: &[u8] = b"SHA384\0";
+        static SHA512: &[u8] = b"SHA512\0";
+        static BITCOIN: &[u8] = b"Bitcoin\0";
+        static ETHEREUM: &[u8] = b"Ethereum\0";
+        static MONERO: &[u8] = b"Monero\0";
+        static UNKNOWN: &[u8] = b"Unknown\0";
 
-    let name = match item_type {
-        MATCHY_ITEM_TYPE_DOMAIN => DOMAIN,
-        MATCHY_ITEM_TYPE_EMAIL => EMAIL,
-        MATCHY_ITEM_TYPE_IPV4 => IPV4,
-        MATCHY_ITEM_TYPE_IPV6 => IPV6,
-        MATCHY_ITEM_TYPE_MD5 => MD5,
-        MATCHY_ITEM_TYPE_SHA1 => SHA1,
-        MATCHY_ITEM_TYPE_SHA256 => SHA256,
-        MATCHY_ITEM_TYPE_SHA384 => SHA384,
-        MATCHY_ITEM_TYPE_SHA512 => SHA512,
-        MATCHY_ITEM_TYPE_BITCOIN => BITCOIN,
-        MATCHY_ITEM_TYPE_ETHEREUM => ETHEREUM,
-        MATCHY_ITEM_TYPE_MONERO => MONERO,
-        _ => UNKNOWN,
-    };
-    name.as_ptr().cast::<c_char>()
+        let name = match item_type {
+            MATCHY_ITEM_TYPE_DOMAIN => DOMAIN,
+            MATCHY_ITEM_TYPE_EMAIL => EMAIL,
+            MATCHY_ITEM_TYPE_IPV4 => IPV4,
+            MATCHY_ITEM_TYPE_IPV6 => IPV6,
+            MATCHY_ITEM_TYPE_MD5 => MD5,
+            MATCHY_ITEM_TYPE_SHA1 => SHA1,
+            MATCHY_ITEM_TYPE_SHA256 => SHA256,
+            MATCHY_ITEM_TYPE_SHA384 => SHA384,
+            MATCHY_ITEM_TYPE_SHA512 => SHA512,
+            MATCHY_ITEM_TYPE_BITCOIN => BITCOIN,
+            MATCHY_ITEM_TYPE_ETHEREUM => ETHEREUM,
+            MATCHY_ITEM_TYPE_MONERO => MONERO,
+            _ => UNKNOWN,
+        };
+        name.as_ptr().cast::<c_char>()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn build_test_db_bytes() -> Vec<u8> {
+        let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+        let mut data = HashMap::new();
+        data.insert(
+            "source".to_string(),
+            DataValue::String("unit-test".to_string()),
+        );
+        builder.add_entry("1.1.1.1", data).unwrap();
+        builder.build().unwrap()
+    }
+
+    #[test]
+    fn test_matchy_query_updates_c_api_stats() {
+        let bytes = build_test_db_bytes();
+
+        // SAFETY: The test passes valid pointers created in this scope, keeps the
+        // backing byte buffer alive until after close, and closes the returned handle once.
+        unsafe {
+            let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!db.is_null(), "test database should open through C API");
+
+            let query = CString::new("1.1.1.1").unwrap();
+            let result = matchy_query(db, query.as_ptr());
+            assert!(result.found, "C API query should find test IP");
+
+            let mut stats = matchy_stats_t {
+                total_queries: 0,
+                queries_with_match: 0,
+                queries_without_match: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+                ip_queries: 0,
+                string_queries: 0,
+            };
+            matchy_get_stats(db, &mut stats);
+
+            assert_eq!(stats.total_queries, 1);
+            assert_eq!(stats.queries_with_match, 1);
+            assert_eq!(stats.ip_queries, 1);
+
+            matchy_close(db);
+        }
+    }
+
+    #[test]
+    fn test_ffi_guard_returns_fallback_on_panic() {
+        let result = ffi_guard(MATCHY_ERROR_INTERNAL, || -> i32 {
+            panic!("simulated FFI boundary panic");
+        });
+
+        assert_eq!(result, MATCHY_ERROR_INTERNAL);
+    }
+
+    #[test]
+    fn test_matchy_open_buffer_copies_input_buffer() {
+        let mut bytes = build_test_db_bytes();
+
+        // SAFETY: The test passes a valid buffer pointer and closes the returned handle once.
+        unsafe {
+            let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!db.is_null(), "test database should open through C API");
+
+            bytes.fill(0);
+
+            let query = CString::new("1.1.1.1").unwrap();
+            let result = matchy_query(db, query.as_ptr());
+            assert!(
+                result.found,
+                "database should remain usable after caller mutates the source buffer"
+            );
+
+            matchy_close(db);
+        }
+    }
+
+    #[test]
+    fn test_c_api_error_codes_are_unique() {
+        let error_codes = [
+            MATCHY_ERROR_FILE_NOT_FOUND,
+            MATCHY_ERROR_INVALID_FORMAT,
+            MATCHY_ERROR_CORRUPT_DATA,
+            MATCHY_ERROR_OUT_OF_MEMORY,
+            MATCHY_ERROR_INVALID_PARAM,
+            MATCHY_ERROR_IO,
+            MATCHY_ERROR_SCHEMA_VALIDATION,
+            MATCHY_ERROR_UNKNOWN_SCHEMA,
+            MATCHY_ERROR_INTERNAL,
+            MATCHY_ERROR_LOOKUP_PATH_INVALID,
+            MATCHY_ERROR_NO_DATA,
+            MATCHY_ERROR_DATA_PARSE,
+        ];
+
+        for (idx, code) in error_codes.iter().enumerate() {
+            assert!(
+                !error_codes[..idx].contains(code),
+                "duplicate C API error code: {code}"
+            );
+        }
+    }
 }

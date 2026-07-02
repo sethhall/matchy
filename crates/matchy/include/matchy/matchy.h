@@ -86,6 +86,11 @@ namespace matchy {
 #define MATCHY_ERROR_UNKNOWN_SCHEMA -8
 
 /*
+ Internal panic caught at the FFI boundary
+ */
+#define MATCHY_ERROR_INTERNAL -12
+
+/*
  MMDB data type constants (matching libmaxminddb)
  Extended type marker (internal use)
  */
@@ -160,17 +165,17 @@ namespace matchy {
  Additional error codes for structured data API
  Invalid lookup path specified
  */
-#define MATCHY_ERROR_LOOKUP_PATH_INVALID -7
+#define MATCHY_ERROR_LOOKUP_PATH_INVALID -9
 
 /*
  No data available at the specified path
  */
-#define MATCHY_ERROR_NO_DATA -8
+#define MATCHY_ERROR_NO_DATA -10
 
 /*
  Failed to parse data value
  */
-#define MATCHY_ERROR_DATA_PARSE -9
+#define MATCHY_ERROR_DATA_PARSE -11
 
 /*
  Standard validation level - all offsets, UTF-8, basic structure
@@ -895,9 +900,11 @@ struct matchy_t *matchy_open_with_options(const char *filename, const struct mat
 struct matchy_t *matchy_open(const char *filename);
 
 /*
- Open database from memory buffer (zero-copy)
+ Open database from memory buffer.
 
- Creates a database handle from a memory buffer. No data is copied.
+ Creates a database handle from a memory buffer. The buffer is copied into
+ the database handle, so the caller may modify or free the source buffer
+ after this function returns.
 
  # Parameters
  * `buffer` - Pointer to database data (must not be NULL)
@@ -908,8 +915,7 @@ struct matchy_t *matchy_open(const char *filename);
  * NULL on failure
 
  # Safety
- * `buffer` must be valid for the lifetime of the database handle
- * Caller must not modify or free buffer while handle exists
+ * `buffer` must point to a valid readable buffer of `size` bytes
  */
 struct matchy_t *matchy_open_buffer(const uint8_t *buffer, uintptr_t size);
 

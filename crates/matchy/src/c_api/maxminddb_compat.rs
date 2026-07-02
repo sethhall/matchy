@@ -5,8 +5,9 @@
 //! switch to matchy with minimal code changes.
 
 use super::matchy::{
-    matchy_aget_value, matchy_close, matchy_entry_data_list_t, matchy_entry_data_t, matchy_entry_s,
-    matchy_get_entry_data_list, matchy_open, matchy_query, matchy_t, MATCHY_SUCCESS,
+    ffi_guard, matchy_aget_value, matchy_close, matchy_entry_data_list_t, matchy_entry_data_t,
+    matchy_entry_s, matchy_free_entry_data_list, matchy_get_entry_data_list, matchy_open,
+    matchy_query, matchy_t, MATCHY_SUCCESS,
 };
 use std::ffi::{CStr, CString};
 use std::mem;
@@ -90,6 +91,20 @@ fn map_matchy_error(matchy_error: i32) -> c_int {
     }
 }
 
+fn empty_lookup_result() -> MMDB_lookup_result_s {
+    MMDB_lookup_result_s {
+        found_entry: false,
+        entry: MMDB_entry_s {
+            mmdb: ptr::null(),
+            _matchy_entry: matchy_entry_s {
+                db: ptr::null(),
+                _data_offset: 0,
+            },
+        },
+        netmask: 0,
+    }
+}
+
 // ============================================================================
 // CORE API FUNCTIONS
 // ============================================================================
@@ -105,41 +120,43 @@ pub unsafe extern "C" fn MMDB_open(
     flags: u32,
     mmdb: *mut MMDB_s,
 ) -> c_int {
-    if filename.is_null() || mmdb.is_null() {
-        return MMDB_FILE_OPEN_ERROR;
-    }
-
-    // Zero the struct first (for safety)
-    ptr::write_bytes(mmdb, 0, 1);
-
-    // Convert filename to Rust string
-    let filename_str = match CStr::from_ptr(filename).to_str() {
-        Ok(s) => s,
-        Err(_) => return MMDB_FILE_OPEN_ERROR,
-    };
-
-    // Open database using matchy
-    let db = matchy_open(filename_str.as_ptr().cast::<c_char>());
-    if db.is_null() {
-        return MMDB_FILE_OPEN_ERROR;
-    }
-
-    // Duplicate filename for storage
-    let filename_copy = match CString::new(filename_str) {
-        Ok(s) => s.into_raw(),
-        Err(_) => {
-            matchy_close(db);
-            return MMDB_OUT_OF_MEMORY_ERROR;
+    ffi_guard(MMDB_INVALID_DATA_ERROR, || {
+        if filename.is_null() || mmdb.is_null() {
+            return MMDB_FILE_OPEN_ERROR;
         }
-    };
 
-    // Initialize MMDB_s
-    (*mmdb)._matchy_db = db;
-    (*mmdb).flags = flags;
-    (*mmdb).filename = filename_copy;
-    (*mmdb).file_size = 0; // Could query file size if needed
+        // Zero the struct first (for safety)
+        ptr::write_bytes(mmdb, 0, 1);
 
-    MMDB_SUCCESS
+        // Convert filename to Rust string
+        let filename_str = match CStr::from_ptr(filename).to_str() {
+            Ok(s) => s,
+            Err(_) => return MMDB_FILE_OPEN_ERROR,
+        };
+
+        // Open database using matchy
+        let db = matchy_open(filename_str.as_ptr().cast::<c_char>());
+        if db.is_null() {
+            return MMDB_FILE_OPEN_ERROR;
+        }
+
+        // Duplicate filename for storage
+        let filename_copy = match CString::new(filename_str) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                matchy_close(db);
+                return MMDB_OUT_OF_MEMORY_ERROR;
+            }
+        };
+
+        // Initialize MMDB_s
+        (*mmdb)._matchy_db = db;
+        (*mmdb).flags = flags;
+        (*mmdb).filename = filename_copy;
+        (*mmdb).file_size = 0; // Could query file size if needed
+
+        MMDB_SUCCESS
+    })
 }
 
 /// Lookup an IP address from string
@@ -154,58 +171,63 @@ pub unsafe extern "C" fn MMDB_lookup_string(
     gai_error: *mut c_int,
     mmdb_error: *mut c_int,
 ) -> MMDB_lookup_result_s {
-    let set_error = |gai: c_int, mmdb_err: c_int| {
+    let fallback = {
         if !gai_error.is_null() {
-            *gai_error = gai;
+            *gai_error = 0;
         }
         if !mmdb_error.is_null() {
-            *mmdb_error = mmdb_err;
+            *mmdb_error = MMDB_INVALID_DATA_ERROR;
         }
-        MMDB_lookup_result_s {
-            found_entry: false,
+        empty_lookup_result()
+    };
+
+    ffi_guard(fallback, || {
+        let set_error = |gai: c_int, mmdb_err: c_int| {
+            if !gai_error.is_null() {
+                *gai_error = gai;
+            }
+            if !mmdb_error.is_null() {
+                *mmdb_error = mmdb_err;
+            }
+            empty_lookup_result()
+        };
+
+        if mmdb.is_null() || ipstr.is_null() {
+            return set_error(0, MMDB_INVALID_DATA_ERROR);
+        }
+
+        let db = (*mmdb)._matchy_db;
+        if db.is_null() {
+            return set_error(0, MMDB_INVALID_DATA_ERROR);
+        }
+
+        let result = matchy_query(db, ipstr);
+
+        if !result.found {
+            return set_error(0, MMDB_SUCCESS);
+        }
+
+        let lookup_result = MMDB_lookup_result_s {
+            found_entry: true,
             entry: MMDB_entry_s {
-                mmdb: ptr::null(),
-                _matchy_entry: mem::zeroed(),
+                mmdb,
+                _matchy_entry: matchy_entry_s {
+                    db,
+                    _data_offset: result._data_offset,
+                },
             },
-            netmask: 0,
+            netmask: u16::from(result.prefix_len),
+        };
+
+        if !gai_error.is_null() {
+            *gai_error = 0;
         }
-    };
+        if !mmdb_error.is_null() {
+            *mmdb_error = MMDB_SUCCESS;
+        }
 
-    if mmdb.is_null() || ipstr.is_null() {
-        return set_error(0, MMDB_INVALID_DATA_ERROR);
-    }
-
-    let db = (*mmdb)._matchy_db;
-    if db.is_null() {
-        return set_error(0, MMDB_INVALID_DATA_ERROR);
-    }
-
-    let result = matchy_query(db, ipstr);
-
-    if !result.found {
-        return set_error(0, MMDB_SUCCESS);
-    }
-
-    let lookup_result = MMDB_lookup_result_s {
-        found_entry: true,
-        entry: MMDB_entry_s {
-            mmdb,
-            _matchy_entry: matchy_entry_s {
-                db,
-                _data_offset: result._data_offset,
-            },
-        },
-        netmask: u16::from(result.prefix_len),
-    };
-
-    if !gai_error.is_null() {
-        *gai_error = 0;
-    }
-    if !mmdb_error.is_null() {
-        *mmdb_error = MMDB_SUCCESS;
-    }
-
-    lookup_result
+        lookup_result
+    })
 }
 
 /// Lookup an IP address from sockaddr
@@ -225,64 +247,66 @@ pub unsafe extern "C" fn MMDB_lookup_sockaddr(
     sockaddr: *const libc::sockaddr,
     mmdb_error: *mut c_int,
 ) -> MMDB_lookup_result_s {
-    let set_error = |err: c_int| {
+    let fallback = {
         if !mmdb_error.is_null() {
-            *mmdb_error = err;
+            *mmdb_error = MMDB_INVALID_DATA_ERROR;
         }
-        MMDB_lookup_result_s {
-            found_entry: false,
-            entry: MMDB_entry_s {
-                mmdb: ptr::null(),
-                _matchy_entry: mem::zeroed(),
-            },
-            netmask: 0,
-        }
+        empty_lookup_result()
     };
 
-    if mmdb.is_null() || sockaddr.is_null() {
-        return set_error(MMDB_INVALID_DATA_ERROR);
-    }
+    ffi_guard(fallback, || {
+        let set_error = |err: c_int| {
+            if !mmdb_error.is_null() {
+                *mmdb_error = err;
+            }
+            empty_lookup_result()
+        };
 
-    // Convert sockaddr to IP string
-    // First, read the address family with a minimal dereference
-    let family = i32::from((*sockaddr).sa_family);
-
-    let ip_addr = match family {
-        libc::AF_INET => {
-            // Safely copy the IPv4 address bytes into a local in_addr
-            let sa = sockaddr.cast::<libc::sockaddr_in>();
-            let mut in_addr: libc::in_addr = mem::zeroed();
-            ptr::copy_nonoverlapping(
-                &(*sa).sin_addr as *const libc::in_addr,
-                &mut in_addr as *mut libc::in_addr,
-                1,
-            );
-            let addr = u32::from_be(in_addr.s_addr);
-            IpAddr::V4(Ipv4Addr::from(addr))
+        if mmdb.is_null() || sockaddr.is_null() {
+            return set_error(MMDB_INVALID_DATA_ERROR);
         }
-        libc::AF_INET6 => {
-            // Safely copy the IPv6 address bytes into a local in6_addr
-            let sa = sockaddr.cast::<libc::sockaddr_in6>();
-            let mut in6_addr: libc::in6_addr = mem::zeroed();
-            ptr::copy_nonoverlapping(
-                &(*sa).sin6_addr as *const libc::in6_addr,
-                &mut in6_addr as *mut libc::in6_addr,
-                1,
-            );
-            IpAddr::V6(Ipv6Addr::from(in6_addr.s6_addr))
-        }
-        _ => return set_error(MMDB_INVALID_DATA_ERROR),
-    };
 
-    let ip_str = ip_addr.to_string();
-    let ip_cstr = match CString::new(ip_str) {
-        Ok(s) => s,
-        Err(_) => return set_error(MMDB_OUT_OF_MEMORY_ERROR),
-    };
+        // Convert sockaddr to IP string
+        // First, read the address family with a minimal dereference
+        let family = i32::from((*sockaddr).sa_family);
 
-    // Use MMDB_lookup_string
-    let mut gai_error = 0;
-    MMDB_lookup_string(mmdb, ip_cstr.as_ptr(), &mut gai_error, mmdb_error)
+        let ip_addr = match family {
+            libc::AF_INET => {
+                // Safely copy the IPv4 address bytes into a local in_addr
+                let sa = sockaddr.cast::<libc::sockaddr_in>();
+                let mut in_addr: libc::in_addr = mem::zeroed();
+                ptr::copy_nonoverlapping(
+                    &(*sa).sin_addr as *const libc::in_addr,
+                    &mut in_addr as *mut libc::in_addr,
+                    1,
+                );
+                let addr = u32::from_be(in_addr.s_addr);
+                IpAddr::V4(Ipv4Addr::from(addr))
+            }
+            libc::AF_INET6 => {
+                // Safely copy the IPv6 address bytes into a local in6_addr
+                let sa = sockaddr.cast::<libc::sockaddr_in6>();
+                let mut in6_addr: libc::in6_addr = mem::zeroed();
+                ptr::copy_nonoverlapping(
+                    &(*sa).sin6_addr as *const libc::in6_addr,
+                    &mut in6_addr as *mut libc::in6_addr,
+                    1,
+                );
+                IpAddr::V6(Ipv6Addr::from(in6_addr.s6_addr))
+            }
+            _ => return set_error(MMDB_INVALID_DATA_ERROR),
+        };
+
+        let ip_str = ip_addr.to_string();
+        let ip_cstr = match CString::new(ip_str) {
+            Ok(s) => s,
+            Err(_) => return set_error(MMDB_OUT_OF_MEMORY_ERROR),
+        };
+
+        // Use MMDB_lookup_string
+        let mut gai_error = 0;
+        MMDB_lookup_string(mmdb, ip_cstr.as_ptr(), &mut gai_error, mmdb_error)
+    })
 }
 
 /// Lookup an IP address from sockaddr (Windows implementation)
@@ -297,51 +321,53 @@ pub unsafe extern "C" fn MMDB_lookup_sockaddr(
     sockaddr: *const winapi::shared::ws2def::SOCKADDR,
     mmdb_error: *mut c_int,
 ) -> MMDB_lookup_result_s {
-    let set_error = |err: c_int| {
+    let fallback = {
         if !mmdb_error.is_null() {
-            *mmdb_error = err;
+            *mmdb_error = MMDB_INVALID_DATA_ERROR;
         }
-        MMDB_lookup_result_s {
-            found_entry: false,
-            entry: MMDB_entry_s {
-                mmdb: ptr::null(),
-                _matchy_entry: mem::zeroed(),
-            },
-            netmask: 0,
-        }
+        empty_lookup_result()
     };
 
-    if mmdb.is_null() || sockaddr.is_null() {
-        return set_error(MMDB_INVALID_DATA_ERROR);
-    }
+    ffi_guard(fallback, || {
+        let set_error = |err: c_int| {
+            if !mmdb_error.is_null() {
+                *mmdb_error = err;
+            }
+            empty_lookup_result()
+        };
 
-    use winapi::shared::ws2def::{AF_INET, AF_INET6, SOCKADDR_IN};
-    use winapi::shared::ws2ipdef::SOCKADDR_IN6_LH;
-
-    // Convert sockaddr to IP string
-    let ip_addr = match (*sockaddr).sa_family as i32 {
-        AF_INET => {
-            let sa = sockaddr as *const SOCKADDR_IN;
-            let addr = u32::from_be(*(*sa).sin_addr.S_un.S_addr());
-            IpAddr::V4(Ipv4Addr::from(addr))
+        if mmdb.is_null() || sockaddr.is_null() {
+            return set_error(MMDB_INVALID_DATA_ERROR);
         }
-        AF_INET6 => {
-            let sa = sockaddr as *const SOCKADDR_IN6_LH;
-            let addr = *(*sa).sin6_addr.u.Byte();
-            IpAddr::V6(Ipv6Addr::from(addr))
-        }
-        _ => return set_error(MMDB_INVALID_DATA_ERROR),
-    };
 
-    let ip_str = ip_addr.to_string();
-    let ip_cstr = match CString::new(ip_str) {
-        Ok(s) => s,
-        Err(_) => return set_error(MMDB_OUT_OF_MEMORY_ERROR),
-    };
+        use winapi::shared::ws2def::{AF_INET, AF_INET6, SOCKADDR_IN};
+        use winapi::shared::ws2ipdef::SOCKADDR_IN6_LH;
 
-    // Use MMDB_lookup_string
-    let mut gai_error = 0;
-    MMDB_lookup_string(mmdb, ip_cstr.as_ptr(), &mut gai_error, mmdb_error)
+        // Convert sockaddr to IP string
+        let ip_addr = match (*sockaddr).sa_family as i32 {
+            AF_INET => {
+                let sa = sockaddr as *const SOCKADDR_IN;
+                let addr = u32::from_be(*(*sa).sin_addr.S_un.S_addr());
+                IpAddr::V4(Ipv4Addr::from(addr))
+            }
+            AF_INET6 => {
+                let sa = sockaddr as *const SOCKADDR_IN6_LH;
+                let addr = *(*sa).sin6_addr.u.Byte();
+                IpAddr::V6(Ipv6Addr::from(addr))
+            }
+            _ => return set_error(MMDB_INVALID_DATA_ERROR),
+        };
+
+        let ip_str = ip_addr.to_string();
+        let ip_cstr = match CString::new(ip_str) {
+            Ok(s) => s,
+            Err(_) => return set_error(MMDB_OUT_OF_MEMORY_ERROR),
+        };
+
+        // Use MMDB_lookup_string
+        let mut gai_error = 0;
+        MMDB_lookup_string(mmdb, ip_cstr.as_ptr(), &mut gai_error, mmdb_error)
+    })
 }
 
 /// Get value from entry using array path
@@ -356,15 +382,17 @@ pub unsafe extern "C" fn MMDB_aget_value(
     entry_data: *mut MMDB_entry_data_s,
     path: *const *const c_char,
 ) -> c_int {
-    if start.is_null() || entry_data.is_null() || path.is_null() {
-        return MMDB_INVALID_DATA_ERROR;
-    }
+    ffi_guard(MMDB_INVALID_DATA_ERROR, || {
+        if start.is_null() || entry_data.is_null() || path.is_null() {
+            return MMDB_INVALID_DATA_ERROR;
+        }
 
-    // Call matchy's aget_value directly
-    let matchy_entry = &(*start)._matchy_entry as *const _;
-    let status = matchy_aget_value(matchy_entry, entry_data, path);
+        // Call matchy's aget_value directly
+        let matchy_entry = &(*start)._matchy_entry as *const _;
+        let status = matchy_aget_value(matchy_entry, entry_data, path);
 
-    map_matchy_error(status)
+        map_matchy_error(status)
+    })
 }
 
 /// Get entry data list (tree traversal)
@@ -377,16 +405,20 @@ pub unsafe extern "C" fn MMDB_get_entry_data_list(
     start: *mut MMDB_entry_s,
     entry_data_list: *mut *mut MMDB_entry_data_list_s,
 ) -> c_int {
-    if start.is_null() || entry_data_list.is_null() {
-        return MMDB_INVALID_DATA_ERROR;
-    }
+    ffi_guard(MMDB_INVALID_DATA_ERROR, || {
+        if start.is_null() || entry_data_list.is_null() {
+            return MMDB_INVALID_DATA_ERROR;
+        }
 
-    // Call matchy's get_entry_data_list
-    let matchy_entry = &(*start)._matchy_entry as *const _;
-    let matchy_list_ptr = entry_data_list.cast::<*mut matchy_entry_data_list_t>();
-    let status = matchy_get_entry_data_list(matchy_entry, matchy_list_ptr);
+        *entry_data_list = ptr::null_mut();
 
-    map_matchy_error(status)
+        // Call matchy's get_entry_data_list
+        let matchy_entry = &(*start)._matchy_entry as *const _;
+        let matchy_list_ptr = entry_data_list.cast::<*mut matchy_entry_data_list_t>();
+        let status = matchy_get_entry_data_list(matchy_entry, matchy_list_ptr);
+
+        map_matchy_error(status)
+    })
 }
 
 /// Free entry data list
@@ -395,16 +427,13 @@ pub unsafe extern "C" fn MMDB_get_entry_data_list(
 /// - `entry_data_list` must be from MMDB_get_entry_data_list or NULL
 #[no_mangle]
 pub unsafe extern "C" fn MMDB_free_entry_data_list(entry_data_list: *mut MMDB_entry_data_list_s) {
-    if entry_data_list.is_null() {
-        return;
-    }
+    ffi_guard((), || {
+        if entry_data_list.is_null() {
+            return;
+        }
 
-    let mut current = entry_data_list;
-    while !current.is_null() {
-        let next = (*current).next;
-        let _ = Box::from_raw(current);
-        current = next;
-    }
+        matchy_free_entry_data_list(entry_data_list.cast::<matchy_entry_data_list_t>());
+    });
 }
 
 /// Close database
@@ -413,46 +442,52 @@ pub unsafe extern "C" fn MMDB_free_entry_data_list(entry_data_list: *mut MMDB_en
 /// - `mmdb` must be a valid opened database or NULL
 #[no_mangle]
 pub unsafe extern "C" fn MMDB_close(mmdb: *mut MMDB_s) {
-    if mmdb.is_null() {
-        return;
-    }
+    ffi_guard((), || {
+        if mmdb.is_null() {
+            return;
+        }
 
-    // Close matchy database
-    if !(*mmdb)._matchy_db.is_null() {
-        matchy_close((*mmdb)._matchy_db);
-        (*mmdb)._matchy_db = ptr::null_mut();
-    }
+        // Close matchy database
+        if !(*mmdb)._matchy_db.is_null() {
+            matchy_close((*mmdb)._matchy_db);
+            (*mmdb)._matchy_db = ptr::null_mut();
+        }
 
-    // Free filename
-    if !(*mmdb).filename.is_null() {
-        let _ = CString::from_raw((*mmdb).filename as *mut c_char);
-        (*mmdb).filename = ptr::null();
-    }
+        // Free filename
+        if !(*mmdb).filename.is_null() {
+            let _ = CString::from_raw((*mmdb).filename as *mut c_char);
+            (*mmdb).filename = ptr::null();
+        }
+    });
 }
 
 /// Get library version
 #[no_mangle]
 pub extern "C" fn MMDB_lib_version() -> *const c_char {
-    // Return matchy version with "-compat" suffix
-    concat!(env!("CARGO_PKG_VERSION"), "-compat\0")
-        .as_ptr()
-        .cast::<c_char>()
+    ffi_guard(ptr::null(), || {
+        // Return matchy version with "-compat" suffix
+        concat!(env!("CARGO_PKG_VERSION"), "-compat\0")
+            .as_ptr()
+            .cast::<c_char>()
+    })
 }
 
 /// Convert error code to string
 #[no_mangle]
 pub extern "C" fn MMDB_strerror(error_code: c_int) -> *const c_char {
-    let msg = match error_code {
-        MMDB_SUCCESS => "Success\0",
-        MMDB_FILE_OPEN_ERROR => "Error opening database file\0",
-        MMDB_IO_ERROR => "IO error\0",
-        MMDB_OUT_OF_MEMORY_ERROR => "Out of memory\0",
-        MMDB_INVALID_DATA_ERROR => "Invalid or corrupt data\0",
-        MMDB_INVALID_LOOKUP_PATH_ERROR => "Invalid lookup path\0",
-        MMDB_INVALID_NODE_NUMBER_ERROR => "Invalid node number\0",
-        _ => "Unknown error\0",
-    };
-    msg.as_ptr().cast::<c_char>()
+    ffi_guard(ptr::null(), || {
+        let msg = match error_code {
+            MMDB_SUCCESS => "Success\0",
+            MMDB_FILE_OPEN_ERROR => "Error opening database file\0",
+            MMDB_IO_ERROR => "IO error\0",
+            MMDB_OUT_OF_MEMORY_ERROR => "Out of memory\0",
+            MMDB_INVALID_DATA_ERROR => "Invalid or corrupt data\0",
+            MMDB_INVALID_LOOKUP_PATH_ERROR => "Invalid lookup path\0",
+            MMDB_INVALID_NODE_NUMBER_ERROR => "Invalid node number\0",
+            _ => "Unknown error\0",
+        };
+        msg.as_ptr().cast::<c_char>()
+    })
 }
 
 // ============================================================================
@@ -469,7 +504,7 @@ pub unsafe extern "C" fn MMDB_read_node(
     _node_number: u32,
     _node: *mut c_void,
 ) -> c_int {
-    MMDB_INVALID_NODE_NUMBER_ERROR
+    ffi_guard(MMDB_INVALID_DATA_ERROR, || MMDB_INVALID_NODE_NUMBER_ERROR)
 }
 
 /// Dump entry data list (not implemented)
@@ -482,7 +517,7 @@ pub unsafe extern "C" fn MMDB_dump_entry_data_list(
     _entry_data_list: *const MMDB_entry_data_list_s,
     _indent: c_int,
 ) -> c_int {
-    MMDB_INVALID_DATA_ERROR
+    ffi_guard(MMDB_INVALID_DATA_ERROR, || MMDB_INVALID_DATA_ERROR)
 }
 
 /// Get metadata as entry data list (not implemented)
@@ -494,5 +529,5 @@ pub unsafe extern "C" fn MMDB_get_metadata_as_entry_data_list(
     _mmdb: *const MMDB_s,
     _entry_data_list: *mut *mut MMDB_entry_data_list_s,
 ) -> c_int {
-    MMDB_INVALID_DATA_ERROR
+    ffi_guard(MMDB_INVALID_DATA_ERROR, || MMDB_INVALID_DATA_ERROR)
 }
