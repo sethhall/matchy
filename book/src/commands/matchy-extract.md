@@ -39,7 +39,7 @@ $ cat access.log | matchy extract -
 
 ## Options
 
-### `--format <FORMAT>`
+### `--output-format <FORMAT>`
 
 Output format (default: `json`):
 - `json` - NDJSON format (one JSON object per pattern)
@@ -47,16 +47,16 @@ Output format (default: `json`):
 - `text` - Plain text (one pattern per line, no metadata)
 
 ```console
-$ matchy extract access.log --format json
+$ matchy extract access.log --output-format json
 {"type":"domain","value":"example.com"}
 {"type":"ipv4","value":"192.0.2.1"}
 
-$ matchy extract access.log --format csv
+$ matchy extract access.log --output-format csv
 type,value
 domain,"example.com"
 ipv4,"192.0.2.1"
 
-$ matchy extract access.log --format text
+$ matchy extract access.log --output-format text
 example.com
 192.0.2.1
 ```
@@ -163,7 +163,7 @@ $ matchy extract access.log
 ### Extract Only Domains
 
 ```console
-$ matchy extract access.log --types domain --format text
+$ matchy extract access.log --types domain --output-format text
 example.com
 subdomain.example.org
 malware.net
@@ -177,13 +177,13 @@ Extract unique domains and build a database:
 $ matchy extract suspicious.log \
     --types domain \
     --unique \
-    --format text \
+    --output-format text \
     > domains.txt
 
 $ echo "key,threat_level" > threats.csv
 $ cat domains.txt | sed 's/^/&,high/' >> threats.csv
 
-$ matchy build threats.csv -o threats.mxy
+$ matchy build threats.csv --input-format csv --output threats.mxy
 ```
 
 ### Extract IPs with Statistics
@@ -205,7 +205,7 @@ $ matchy extract access.log --types ip --stats --unique
 ### CSV Output for Spreadsheet Import
 
 ```console
-$ matchy extract firewall.log --format csv > patterns.csv
+$ matchy extract firewall.log --output-format csv > patterns.csv
 $ open patterns.csv  # Opens in Excel/Numbers/etc.
 ```
 

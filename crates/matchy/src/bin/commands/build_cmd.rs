@@ -101,24 +101,31 @@ pub fn cmd_build(
                         if trimmed.contains("\"Event\"") {
                             anyhow::bail!(
                                 "File {} appears to be MISP JSON format.\n\n\
-                                You specified --format text, but this looks like MISP JSON.\n\
-                                Try: --format misp (or -f misp)",
+                                You specified --input-format text, but this looks like MISP JSON.\n\
+                                Try: --input-format misp",
                                 input.display()
                             );
                         } else {
                             eprintln!(
-                                "Warning: {} looks like JSON but you specified --format text.\n\
-                                If this is a JSON file, use --format json instead.",
+                                "Warning: {} looks like JSON but you specified --input-format text.\n\
+                                If this is a JSON file, use --input-format json instead.",
                                 input.display()
                             );
                         }
                     }
                     // Check for CSV-like content
                     let first_line = content.lines().next().unwrap_or("");
-                    if first_line.contains(',') && first_line.split(',').count() > 3 {
+                    if looks_like_csv_entry_header(first_line) {
+                        anyhow::bail!(
+                            "File {} appears to be CSV with an 'entry' or 'key' header.\n\n\
+                            You specified --input-format text, but this looks like CSV.\n\
+                            Try: --input-format csv",
+                            input.display()
+                        );
+                    } else if first_line.contains(',') && first_line.split(',').count() > 1 {
                         eprintln!(
-                            "Warning: {} looks like CSV but you specified --format text.\n\
-                            If this is a CSV file, use --format csv instead.",
+                            "Warning: {} looks like CSV but you specified --input-format text.\n\
+                            If this is a CSV file, use --input-format csv instead.",
                             input.display()
                         );
                     }
@@ -370,4 +377,20 @@ pub fn cmd_build(
     }
 
     Ok(())
+}
+
+fn looks_like_csv_entry_header(first_line: &str) -> bool {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(first_line.as_bytes());
+
+    let Some(Ok(record)) = reader.records().next() else {
+        return false;
+    };
+
+    if record.len() < 2 {
+        return false;
+    }
+
+    matches!(record.get(0).map(str::trim), Some("entry" | "key"))
 }

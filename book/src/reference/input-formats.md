@@ -95,7 +95,7 @@ specific-domain.com
 ### CLI Usage
 
 ```bash
-matchy build -o output.mxy input.txt
+matchy build input.txt --output output.mxy
 ```
 
 ## CSV Format
@@ -171,7 +171,7 @@ ip:192.168.1.0/24,network,Private range
 ### CLI Usage
 
 ```bash
-matchy build -i csv -o output.mxy input.csv
+matchy build --input-format csv --output output.mxy input.csv
 ```
 
 ## JSON Format
@@ -297,7 +297,7 @@ Each object must have `entry` or `key` field:
 ### CLI Usage
 
 ```bash
-matchy build -i json -o output.mxy input.json
+matchy build --input-format json --output output.mxy input.json
 ```
 
 ## MISP Format
@@ -380,7 +380,7 @@ MISP attributes are converted to Matchy metadata:
 ### CLI Usage
 
 ```bash
-matchy build -i misp -o output.mxy threat-feed.json
+matchy build --input-format misp --output output.mxy threat-feed.json
 ```
 
 ## Format Comparison
@@ -446,7 +446,7 @@ UTF-8 BOM (Byte Order Mark) is:
 ### Parse Errors
 
 ```bash
-$ matchy build -i csv bad.csv
+$ matchy build --input-format csv bad.csv --output bad.mxy
 Error: Parse error at line 42: Unclosed quote
 ```
 
@@ -460,7 +460,7 @@ Error: Invalid UTF-8 at byte offset 1234
 ### Format Errors
 
 ```bash
-$ matchy build -i json bad.json
+$ matchy build --input-format json bad.json --output bad.mxy
 Error: Expected object or array at root
 ```
 
@@ -490,7 +490,7 @@ csv-validator input.csv
 jq empty input.json
 
 # Test build
-matchy build --dry-run input.json
+matchy build input.json --input-format json --output test.mxy
 ```
 
 ## See Also

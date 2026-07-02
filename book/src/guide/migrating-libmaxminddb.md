@@ -490,7 +490,7 @@ matchy_lookup(db, "www.google.com", &pattern_result);
 Use `matchy build` to create databases with both IP and pattern data:
 
 ```bash
-matchy build -i ips.csv -i patterns.csv -o enhanced.mxy
+matchy build ips.csv patterns.csv --input-format csv --output enhanced.mxy
 ```
 
 Then query with the MMDB compatibility API as usual.

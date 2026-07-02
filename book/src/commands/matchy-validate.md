@@ -244,7 +244,7 @@ However, validation is not a substitute for other security measures:
 ### Validate After Building
 
 ```bash
-matchy build -i patterns.csv -o database.mxy
+matchy build patterns.csv --input-format csv --output database.mxy
 matchy validate database.mxy
 ```
 

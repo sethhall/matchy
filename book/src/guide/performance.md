@@ -89,7 +89,7 @@ Memory mapping eliminates this overhead entirely.
 Building databases is a one-time cost:
 
 ```console
-$ time matchy build threats.csv -o threats.mxy
+$ time matchy build threats.csv --input-format csv --output threats.mxy
 real    0m1.234s  # 1.2 seconds for 100,000 entries
 ```
 

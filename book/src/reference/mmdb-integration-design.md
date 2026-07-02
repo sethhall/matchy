@@ -105,7 +105,7 @@ let result = db.lookup_ip("8.8.8.8")?;
 IP-only `.mxy` databases work with existing MMDB tools:
 ```bash
 # Build database with Matchy
-matchy build -o geoip.mxy ips.csv
+matchy build ips.csv --input-format csv --output geoip.mxy
 
 # Query with libmaxminddb tools
 mmdbinspect -db geoip.mxy 8.8.8.8  # Works!
@@ -119,10 +119,9 @@ matchy query geoip.mxy 8.8.8.8
 Databases with strings and patterns maintain IP compatibility:
 ```bash
 # Build database with all query types
-matchy build -o full.mxy \
-  --ips ips.csv \
-  --strings domains.csv \
-  --patterns patterns.csv
+matchy build ips.csv domains.csv patterns.csv \
+  --input-format csv \
+  --output full.mxy
 
 # IP lookups work with both tools
 mmdbinspect -db full.mxy 1.2.3.4     # ✅ Works

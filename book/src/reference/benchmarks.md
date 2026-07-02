@@ -248,7 +248,7 @@ grep "QPS" results.txt
 
 ```bash
 # Build your own database
-matchy build -i custom.csv -o test.mxy
+matchy build custom.csv --input-format csv --output test.mxy
 
 # Benchmark it
 time matchy query test.mxy < queries.txt

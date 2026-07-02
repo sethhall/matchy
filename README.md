@@ -19,7 +19,7 @@ Matchy builds memory-mapped databases from threat intelligence feeds, enabling f
 
 ```bash
 # Build a threat database from your intel feeds
-matchy build threats.csv -o threats.mxy
+matchy build threats.csv --output threats.mxy --input-format csv
 
 # Scan your logs for matches (multi-threaded)
 matchy match threats.mxy access.log
@@ -77,10 +77,10 @@ ab5ef3c21d4e...,high,malware,virustotal
 Build the database:
 
 ```bash
-matchy build threats.csv -o threats.mxy --format csv
+matchy build threats.csv --output threats.mxy --input-format csv
 
 # Build MaxMind-compatible MMDB (IP data only)
-matchy build ip-blocklist.csv -o blocklist.mmdb --format csv
+matchy build ip-blocklist.csv --output blocklist.mmdb --input-format csv
 # Works with any tool expecting MMDB format!
 ```
 
@@ -156,4 +156,3 @@ MaxMind-compatible API also available. See **[The Matchy Book](https://matchylab
 **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 Matchy extends MaxMind's MMDB format with [Paraglob](https://github.com/zeek/paraglob)-style glob matching and literal string matching, creating a unified IoC database format.
-

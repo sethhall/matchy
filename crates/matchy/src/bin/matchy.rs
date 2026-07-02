@@ -25,7 +25,7 @@ use commands::{
       • Zero-copy memory-mapped access\n\
       • Attach custom metadata to any entry\n\n\
     Examples:\n\
-      matchy build patterns.txt -o threats.mxy\n\
+      matchy build patterns.txt --output threats.mxy\n\
       matchy query threats.mxy '192.168.1.1'\n\
       matchy query threats.mxy 'evil.example.com'\n\
       matchy inspect threats.mxy --verbose\n\
@@ -46,7 +46,7 @@ enum Commands {
         inputs: Vec<PathBuf>,
 
         /// Output format: json (default, NDJSON), csv, or text (one per line)
-        #[arg(long, default_value = "json")]
+        #[arg(long = "output-format", alias = "format", default_value = "json")]
         format: String,
 
         /// Extraction types (comma-separated): ipv4, ipv6, ip, domain, email, all (default: all)
@@ -106,7 +106,7 @@ enum Commands {
         batch_bytes: usize,
 
         /// Output format: json (default, NDJSON), or summary (statistics only)
-        #[arg(long, default_value = "json")]
+        #[arg(long = "output-format", alias = "format", default_value = "json")]
         format: String,
 
         /// Show detailed statistics in stderr (extraction time, candidate breakdown, etc.)
@@ -204,11 +204,17 @@ enum Commands {
         /// - csv: Comma-separated values with 'entry' or 'key' column
         /// - json: JSON array of {"key": "pattern", "data": {...}}
         /// - misp: MISP threat intelligence JSON format
-        #[arg(short = 'f', long, default_value = "text", value_name = "FORMAT")]
+        #[arg(
+            short = 'f',
+            long = "input-format",
+            alias = "format",
+            default_value = "text",
+            value_name = "FORMAT"
+        )]
         format: String,
 
         /// Custom database type name for metadata (e.g., "MyCompany-ThreatIntel")
-        /// This is NOT the input format - use --format/-f for that
+        /// This is NOT the input format - use --input-format for that
         #[arg(short = 't', long, value_name = "NAME")]
         database_type: Option<String>,
 
@@ -229,7 +235,7 @@ enum Commands {
         debug: bool,
 
         /// Use case-insensitive matching for patterns (default: case-sensitive)
-        #[arg(short = 'i', long)]
+        #[arg(short = 'i', long = "ignore-case", alias = "case-insensitive")]
         case_insensitive: bool,
 
         /// URL where updates to this database can be downloaded

@@ -17,7 +17,7 @@ without writing code. This is perfect for:
 
 ```console
 $ # Build a database from a CSV file
-$ matchy build threats.csv -o threats.mxy
+$ matchy build threats.csv --input-format csv --output threats.mxy
 
 $ # Query it
 $ matchy query threats.mxy 192.0.2.1

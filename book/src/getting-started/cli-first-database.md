@@ -23,7 +23,7 @@ Each row defines an [*entry*][def-entry]:
 Use `matchy build` to create a database:
 
 ```console
-$ matchy build threats.csv -o threats.mxy
+$ matchy build threats.csv --input-format csv --output threats.mxy
 Building database from threats.csv
   Added 4 entries
   Database size: 2,847 bytes

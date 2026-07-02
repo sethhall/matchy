@@ -71,7 +71,7 @@ matchy_close(db);
 
 ```bash
 # Build from CSV
-matchy build -o threats.mxy --format csv threats.csv
+matchy build --output threats.mxy --input-format csv threats.csv
 
 # Query
 matchy query threats.mxy 1.2.3.4

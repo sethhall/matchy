@@ -20,10 +20,10 @@ Enable schema validation with `--database-type`:
 
 ```bash
 # Use the short name - enables ThreatDB schema validation
-matchy build --database-type threatdb threats.csv -o threats.mxy
+matchy build --database-type threatdb threats.csv --input-format csv --output threats.mxy
 
 # Custom names skip validation
-matchy build --database-type "MyCompany-Intel" data.csv -o custom.mxy
+matchy build --database-type "MyCompany-Intel" data.csv --input-format csv --output custom.mxy
 ```
 
 When you use a known schema name like `threatdb`:
@@ -158,7 +158,7 @@ key,threat_level,category,source,confidence,tags
 ### Example: Build with Validation
 
 ```bash
-$ matchy build --database-type threatdb -f json threats.json -o threats.mxy
+$ matchy build --database-type threatdb --input-format json threats.json --output threats.mxy
 Schema validation: enabled (ThreatDB-v1)
 Building database from threats.json
   Added 2 entries
@@ -175,7 +175,7 @@ key,threat_level,category,source
 192.0.2.1,critical,malware,abuse.ch
 10.0.0.1,extreme,badcat,
 
-$ matchy build --database-type threatdb bad.csv -o out.mxy
+$ matchy build --database-type threatdb bad.csv --input-format csv --output out.mxy
 Schema validation failed for entry "10.0.0.1"
 
 Validation errors:
@@ -204,7 +204,7 @@ For now, use a custom `--database-type` name to skip schema validation:
 
 ```bash
 # No validation - your own structure
-matchy build --database-type "MyCompany-ThreatFeed-v2" data.json -o custom.mxy
+matchy build --database-type "MyCompany-ThreatFeed-v2" data.json --input-format json --output custom.mxy
 ```
 
 ## Schema API Reference

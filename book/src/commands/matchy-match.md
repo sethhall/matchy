@@ -93,15 +93,15 @@ Controls how input is divided among worker threads. Larger batches reduce overhe
 $ matchy match threats.mxy huge.log -j auto --batch-bytes 262144  # 256KB batches
 ```
 
-### `--format <FORMAT>`
+### `--output-format <FORMAT>`
 
 Output format (default: `json`):
 - `json` - NDJSON format (one JSON object per match on stdout)
 - `summary` - Statistics only (no match output)
 
 ```console
-$ matchy match threats.mxy access.log --format json
-$ matchy match threats.mxy access.log --format summary --stats
+$ matchy match threats.mxy access.log --output-format json
+$ matchy match threats.mxy access.log --output-format summary --stats
 ```
 
 ### `-s, --stats`

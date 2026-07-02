@@ -289,7 +289,7 @@ Always use atomic rename for updates:
 
 ```bash
 # Build new database
-matchy build new-threats.csv -o threats.mxy.tmp
+matchy build new-threats.csv --input-format csv --output threats.mxy.tmp
 
 # Atomic rename (works on all platforms)
 mv threats.mxy.tmp threats.mxy
@@ -313,7 +313,7 @@ TEMP_DB="${DB_PATH}.tmp"
 
 # Download and build new database
 curl -o threats.csv "https://threat-feed.example.com/latest"
-matchy build threats.csv -o "$TEMP_DB"
+matchy build threats.csv --input-format csv --output "$TEMP_DB"
 
 # Validate before deploying
 matchy validate "$TEMP_DB" --level strict

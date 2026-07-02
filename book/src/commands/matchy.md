@@ -20,7 +20,7 @@ CIDR ranges, exact strings, and glob patterns.
 Build a database from input files.
 
 ```console
-$ matchy build threats.csv -o threats.mxy
+$ matchy build threats.csv --input-format csv --output threats.mxy
 ```
 
 See [matchy build](matchy-build.md) for details.
@@ -81,7 +81,7 @@ matchy {{version}}
 
 ```console
 # 1. Build database
-$ matchy build threats.csv -o threats.mxy
+$ matchy build threats.csv --input-format csv --output threats.mxy
 
 # 2. Inspect it
 $ matchy inspect threats.mxy
@@ -110,7 +110,7 @@ $ matchy inspect GeoLite2-City.mmdb
 Set log level: `error`, `warn`, `info`, `debug`, `trace`
 
 ```console
-$ MATCHY_LOG=debug matchy build data.csv -o db.mxy
+$ MATCHY_LOG=debug matchy build data.csv --input-format csv --output db.mxy
 ```
 
 ## Exit Status

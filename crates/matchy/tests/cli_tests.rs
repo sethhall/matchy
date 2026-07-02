@@ -35,7 +35,10 @@ fn test_build_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Build a unified database"));
+        .stdout(predicate::str::contains("Build a unified database"))
+        .stdout(predicate::str::contains("--input-format"))
+        .stdout(predicate::str::contains("--ignore-case"))
+        .stdout(predicate::str::contains("--case-insensitive").not());
 }
 
 #[test]
@@ -75,7 +78,18 @@ fn test_match_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Match patterns against log files"));
+        .stdout(predicate::str::contains("Match patterns against log files"))
+        .stdout(predicate::str::contains("--output-format"));
+}
+
+#[test]
+fn test_extract_help_prefers_output_format() {
+    matchy_cmd()
+        .arg("extract")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--output-format"));
 }
 
 #[test]
@@ -102,7 +116,7 @@ fn test_build_text_format() {
         .arg(&input_file)
         .arg("-o")
         .arg(&output_file)
-        .arg("--format")
+        .arg("--input-format")
         .arg("text")
         .assert()
         .success()
@@ -140,6 +154,26 @@ fn test_build_with_metadata() {
 
 #[test]
 fn test_build_case_insensitive() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("patterns.txt");
+    let output_file = temp_dir.path().join("test.mxy");
+
+    fs::write(&input_file, "*.EVIL.COM\n").unwrap();
+
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&output_file)
+        .arg("--ignore-case")
+        .assert()
+        .success();
+
+    assert!(output_file.exists());
+}
+
+#[test]
+fn test_build_case_insensitive_alias_still_works() {
     let temp_dir = TempDir::new().unwrap();
     let input_file = temp_dir.path().join("patterns.txt");
     let output_file = temp_dir.path().join("test.mxy");
@@ -427,7 +461,7 @@ fn test_match_stdin() {
         .arg("match")
         .arg(&output_file)
         .arg("-")
-        .arg("--format")
+        .arg("--output-format")
         .arg("json")
         .arg("--threads")
         .arg("1")
@@ -439,7 +473,7 @@ fn test_match_stdin() {
 }
 
 #[test]
-fn test_build_csv_format() {
+fn test_build_csv_format_alias_still_works() {
     let temp_dir = TempDir::new().unwrap();
     let input_file = temp_dir.path().join("data.csv");
     let output_file = temp_dir.path().join("test.mxy");
@@ -463,6 +497,71 @@ fn test_build_csv_format() {
 }
 
 #[test]
+fn test_build_csv_with_input_format_queries_ip() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("simple.csv");
+    let output_file = temp_dir.path().join("simple.mxy");
+
+    let csv_content = "entry,category,threat_level\n\
+192.0.2.1,malware,high\n\
+*.phishing.com,phishing,medium\n\
+exact.com,suspicious,low\n";
+    fs::write(&input_file, csv_content).unwrap();
+
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("--output")
+        .arg(&output_file)
+        .arg("--input-format")
+        .arg("csv")
+        .assert()
+        .success();
+
+    matchy_cmd()
+        .arg("inspect")
+        .arg(&output_file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Combined IP+String database"))
+        .stdout(predicate::str::contains("IP lookups:      ✓"))
+        .stdout(predicate::str::contains("Literals:      ✓ (1 strings)"))
+        .stdout(predicate::str::contains("Globs:         ✓ (1 patterns)"));
+
+    matchy_cmd()
+        .arg("query")
+        .arg(&output_file)
+        .arg("192.0.2.1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"category\": \"malware\""))
+        .stdout(predicate::str::contains("\"cidr\": \"192.0.2.1/32\""));
+}
+
+#[test]
+fn test_build_text_rejects_csv_entry_header() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("simple.csv");
+    let output_file = temp_dir.path().join("simple.mxy");
+
+    fs::write(
+        &input_file,
+        "entry,category,threat_level\n192.0.2.1,malware,high\n",
+    )
+    .unwrap();
+
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("--output")
+        .arg(&output_file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("appears to be CSV"))
+        .stderr(predicate::str::contains("--input-format csv"));
+}
+
+#[test]
 fn test_build_json_format() {
     let temp_dir = TempDir::new().unwrap();
     let input_file = temp_dir.path().join("data.json");
@@ -480,7 +579,7 @@ fn test_build_json_format() {
         .arg(&input_file)
         .arg("-o")
         .arg(&output_file)
-        .arg("--format")
+        .arg("--input-format")
         .arg("json")
         .assert()
         .success();
@@ -531,7 +630,7 @@ fn test_invalid_format() {
         .arg(&input_file)
         .arg("-o")
         .arg(&output_file)
-        .arg("--format")
+        .arg("--input-format")
         .arg("invalid-format")
         .assert()
         .failure()
@@ -645,7 +744,7 @@ fn test_cli_argument_order() {
         .arg("-o")
         .arg(&output_file)
         .arg(&input_file)
-        .arg("--format")
+        .arg("--input-format")
         .arg("text")
         .assert()
         .success();
@@ -713,7 +812,7 @@ fn test_json_output_includes_match_data() {
         .arg("match")
         .arg(&db_file)
         .arg(&log_file)
-        .arg("--format")
+        .arg("--output-format")
         .arg("json")
         .arg("--threads")
         .arg("1")
@@ -973,7 +1072,7 @@ fn test_json_output_parallel_mode() {
         .arg("match")
         .arg(&db_file)
         .arg(&log_file)
-        .arg("--format")
+        .arg("--output-format")
         .arg("json")
         .arg("--threads")
         .arg("2")

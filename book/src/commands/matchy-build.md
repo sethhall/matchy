@@ -11,33 +11,33 @@ matchy build [OPTIONS] <INPUT> --output <OUTPUT>
 ## Description
 
 The `matchy build` command reads entries from input files and builds an optimized
-binary database. The input can be CSV, JSON, JSONL, or TSV format.
+binary database. The input can be plain text, CSV, JSON, or MISP JSON.
 
 ## Options
 
-### `-o, --output <FILE>`
+### `--output <FILE>`
 
 Specify the output database file path.
 
 ```console
-$ matchy build threats.csv -o threats.mxy
+$ matchy build threats.csv --input-format csv --output threats.mxy
 ```
 
-### `--case-sensitive`
+### `--ignore-case`
 
-Use case-sensitive string matching. By default, matching is case-insensitive.
+Use case-insensitive string and glob matching. By default, matching is case-sensitive.
 
 ```console
-$ matchy build domains.csv -o domains.mxy --case-sensitive
+$ matchy build domains.csv --input-format csv --output domains.mxy --ignore-case
 ```
 
-### `--format <FORMAT>`
+### `--input-format <FORMAT>`
 
-Explicitly specify input format: `csv`, `json`, `jsonl`, or `tsv`. If not specified,
-format is detected from file extension.
+Explicitly specify input format: `text`, `csv`, `json`, or `misp`. If not specified,
+input is parsed as plain text with one entry per line.
 
 ```console
-$ matchy build data.txt --format csv -o output.mxy
+$ matchy build data.txt --input-format csv --output output.mxy
 ```
 
 ### `-t, --database-type <NAME>`
@@ -47,10 +47,10 @@ yield values are validated against the schema during build.
 
 ```console
 # Enable ThreatDB schema validation
-$ matchy build threats.csv -o threats.mxy --database-type threatdb
+$ matchy build threats.csv --input-format csv --output threats.mxy --database-type threatdb
 
 # Custom type (no validation)
-$ matchy build data.csv -o data.mxy --database-type "MyCompany-Intel"
+$ matchy build data.csv --input-format csv --output data.mxy --database-type "MyCompany-Intel"
 ```
 
 See [Schemas Reference](../reference/schemas.md) for available schemas and validation details.
@@ -66,20 +66,22 @@ key,threat_level,category
 10.0.0.0/8,medium,internal
 *.evil.com,high,phishing
 
-$ matchy build threats.csv -o threats.mxy
+$ matchy build threats.csv --input-format csv --output threats.mxy
 Building database from threats.csv
   Added 3 entries
 Successfully wrote threats.mxy
 ```
 
-### Build from JSON Lines
+### Build from JSON
 
 ```console
-$ cat data.jsonl
-{"key": "192.0.2.1", "threat": "high"}
-{"key": "*.malware.com", "category": "malware"}
+$ cat data.json
+[
+  {"key": "192.0.2.1", "data": {"threat": "high"}},
+  {"key": "*.malware.com", "data": {"category": "malware"}}
+]
 
-$ matchy build data.jsonl -o database.mxy
+$ matchy build data.json --input-format json --output database.mxy
 ```
 
 ## Entry Type Detection
@@ -103,7 +105,7 @@ literal:*.not-a-glob.txt
 glob:simple-string.com
 ip:192.168.1.1
 
-$ matchy build entries.txt -o output.mxy
+$ matchy build entries.txt --output output.mxy
 ```
 
 | Prefix | Type | Example |
