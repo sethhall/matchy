@@ -954,9 +954,9 @@ impl MispImporter {
                 }
             }
 
-            // Domains - always literals
+            // Domains - literals unless they contain valid Matchy glob syntax.
             "domain" | "hostname" => {
-                builder.add_literal(value, metadata)?;
+                Self::add_domain_indicator(value, metadata, builder)?;
             }
 
             // Domain with IP - extract both, use appropriate methods
@@ -965,8 +965,7 @@ impl MispImporter {
                     let domain = &value[..pipe_pos];
                     let ip = &value[pipe_pos + 1..];
 
-                    // Add domain as literal
-                    builder.add_literal(domain, metadata.clone())?;
+                    Self::add_domain_indicator(domain, metadata.clone(), builder)?;
                     // Add IP using add_ip()
                     builder.add_ip(ip, metadata)?;
                 }
@@ -1076,6 +1075,25 @@ impl MispImporter {
         Ok(())
     }
 
+    fn add_domain_indicator(
+        value: &str,
+        metadata: HashMap<String, DataValue>,
+        builder: &mut DatabaseBuilder,
+    ) -> Result<(), ParaglobError> {
+        if Self::contains_glob_chars(value) && matchy_paraglob::validate_glob_pattern(value).is_ok()
+        {
+            builder.add_glob(value, metadata)?;
+        } else {
+            builder.add_literal(value, metadata)?;
+        }
+
+        Ok(())
+    }
+
+    fn contains_glob_chars(value: &str) -> bool {
+        value.contains('*') || value.contains('?') || value.contains('[')
+    }
+
     /// Extract domain from URL
     fn extract_domain_from_url<'a>(&self, url: &'a str) -> Option<&'a str> {
         // Simple URL parsing
@@ -1149,6 +1167,7 @@ pub struct ImportStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::{Database, QueryResult};
 
     #[test]
     fn test_extract_domain_from_url() {
@@ -1192,5 +1211,91 @@ mod tests {
         let importer = MispImporter::from_json(json).unwrap();
         assert_eq!(importer.events.len(), 1);
         assert_eq!(importer.events[0].attributes.len(), 1);
+    }
+
+    #[test]
+    fn test_domain_wildcard_imports_as_glob() {
+        let json = r#"{
+            "Event": {
+                "uuid": "test-uuid",
+                "info": "Test Event",
+                "Attribute": [
+                    {
+                        "type": "domain",
+                        "value": "*.example.com",
+                        "category": "Network activity",
+                        "comment": "Wildcard phishing domain"
+                    }
+                ],
+                "Object": []
+            }
+        }"#;
+
+        let importer = MispImporter::from_json(json).unwrap();
+        let builder = importer.build_database(MatchMode::CaseSensitive).unwrap();
+        let stats = builder.stats();
+        assert_eq!(stats.literal_entries, 0);
+        assert_eq!(stats.glob_entries, 1);
+
+        let database = Database::from_bytes(builder.build().unwrap()).unwrap();
+        let result = database.lookup("evil2.example.com").unwrap();
+
+        match result {
+            Some(QueryResult::Pattern { data, .. }) => {
+                assert_eq!(data.len(), 1);
+            }
+            other => panic!("expected wildcard domain match, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_domain_without_wildcards_imports_as_literal() {
+        let json = r#"{
+            "Event": {
+                "uuid": "test-uuid",
+                "info": "Test Event",
+                "Attribute": [
+                    {
+                        "type": "domain",
+                        "value": "evil.example.com",
+                        "category": "Network activity",
+                        "comment": "Exact phishing domain"
+                    }
+                ],
+                "Object": []
+            }
+        }"#;
+
+        let importer = MispImporter::from_json(json).unwrap();
+        let builder = importer.build_database(MatchMode::CaseSensitive).unwrap();
+        let stats = builder.stats();
+
+        assert_eq!(stats.literal_entries, 1);
+        assert_eq!(stats.glob_entries, 0);
+    }
+
+    #[test]
+    fn test_misp_pattern_types_remain_literals() {
+        let json = r#"{
+            "Event": {
+                "uuid": "test-uuid",
+                "info": "Test Event",
+                "Attribute": [
+                    {
+                        "type": "pattern-in-traffic",
+                        "value": "GET /admin/*",
+                        "category": "Network activity"
+                    }
+                ],
+                "Object": []
+            }
+        }"#;
+
+        let importer = MispImporter::from_json(json).unwrap();
+        let builder = importer.build_database(MatchMode::CaseSensitive).unwrap();
+        let stats = builder.stats();
+
+        assert_eq!(stats.literal_entries, 1);
+        assert_eq!(stats.glob_entries, 0);
     }
 }

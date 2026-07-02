@@ -326,12 +326,34 @@ Subset of MISP (Malware Information Sharing Platform) JSON format.
 
 | MISP Type | Matchy Classification |
 |-----------|----------------------|
-| `ip-src`, `ip-dst` | IP address |
+| `ip-src`, `ip-dst`, `ip` | IP address or CIDR |
 | `ip-src\|port`, `ip-dst\|port` | IP address (port ignored) |
-| `domain`, `hostname` | Exact string or pattern |
-| `url` | Pattern if contains wildcards |
-| `email` | Pattern if contains wildcards |
-| `other` | Auto-detect |
+| `domain`, `hostname` | Exact string, or Matchy glob if the value contains valid glob syntax |
+| `domain\|ip` | Domain/hostname classification plus IP address |
+| `url`, `uri` | Exact URL plus exact extracted host |
+| `email`, `email-src`, `email-dst`, `email-reply-to` | Exact string |
+| `filename`, `filename-pattern` | Exact string |
+| `pattern-in-file`, `pattern-in-traffic`, `pattern-in-memory` | Exact string |
+| `yara`, `snort`, `sigma` | Exact string |
+
+MISP does not have a dedicated domain-glob attribute type. Matchy treats valid
+glob syntax in `domain` and `hostname` values as a convenience for feeds that
+represent wildcard domains this way:
+
+```json
+{
+  "type": "domain",
+  "value": "*.example.com",
+  "category": "Network activity"
+}
+```
+
+This imports as a Matchy glob and matches values such as `evil.example.com`.
+Normal domain values such as `evil.example.com` remain exact strings and use
+Matchy's literal hash lookup path. MISP's
+broader pattern-like types (`pattern-in-file`, `pattern-in-traffic`,
+`filename-pattern`, and similar) are not interpreted as Matchy glob syntax
+because MISP does not define a single regex or glob language for those values.
 
 ### Example
 
@@ -355,9 +377,9 @@ Subset of MISP (Malware Information Sharing Platform) JSON format.
       },
       {
         "type": "url",
-        "value": "http://*/admin/config.php",
+        "value": "http://evil.example.com/admin/config.php",
         "category": "Payload delivery",
-        "comment": "Malicious URL pattern"
+        "comment": "Malicious URL"
       }
     ]
   }
@@ -370,10 +392,11 @@ MISP attributes are converted to Matchy metadata:
 
 ```json
 {
-  "misp_type": "ip-dst",
-  "misp_category": "Network activity",
-  "misp_comment": "C2 server",
-  "misp_to_ids": true
+  "type": "ip-dst",
+  "category": "Network activity",
+  "comment": "C2 server",
+  "to_ids": true,
+  "event_info": "Malware Campaign 2024-01"
 }
 ```
 
