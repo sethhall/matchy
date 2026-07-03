@@ -30,6 +30,8 @@ use std::mem;
 use std::thread_local;
 use zerocopy::Ref;
 
+const MIN_GLOB_ANCHOR_LITERAL_LEN: usize = 3;
+
 /// Pattern classification for optimization
 #[derive(Debug, Clone)]
 enum PatternType {
@@ -178,6 +180,25 @@ impl PatternType {
             | Self::PureWildcard { data, .. } => data.as_ref(),
         }
     }
+}
+
+fn select_glob_anchor_literal(literals: &[String]) -> Option<&String> {
+    let mut selected: Option<(usize, &String)> = None;
+
+    for (index, literal) in literals.iter().enumerate() {
+        if literal.len() < MIN_GLOB_ANCHOR_LITERAL_LEN {
+            continue;
+        }
+
+        match selected {
+            Some((best_index, best_literal))
+                if best_literal.len() > literal.len()
+                    || (best_literal.len() == literal.len() && best_index > index) => {}
+            _ => selected = Some((index, literal)),
+        }
+    }
+
+    selected.map(|(_, literal)| literal)
 }
 
 /// Incremental builder for constructing Paraglob pattern matchers
@@ -554,14 +575,7 @@ impl ParaglobBuilder {
                         .push(*id);
                 }
                 PatternType::Glob { literals, id, .. } => {
-                    for lit in literals {
-                        // Filter out very short literals (< 3 chars) to reduce false positives
-                        // Short literals like "-", ".", ".com" match too many patterns
-                        if lit.len() < 3 {
-                            continue;
-                        }
-
-                        // O(1) check with HashSet, only clone once for Vec if needed
+                    if let Some(lit) = select_glob_anchor_literal(literals) {
                         let is_new = ac_literals_set.insert(lit.as_str());
                         if is_new {
                             ac_literals.push(lit.clone());

@@ -19,18 +19,18 @@ fn diagnostics_count_literal_candidates_without_glob_verification() {
 }
 
 #[test]
-fn diagnostics_count_candidate_fanout_and_glob_verification() {
-    let patterns = vec!["*shared*needle", "*shared*absent", "??"];
+fn diagnostics_count_selected_anchor_and_glob_verification() {
+    let patterns = vec!["*shared*needle", "*shared*absent"];
     let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
 
     let (matches, diagnostics) = pg.find_all_with_diagnostics("shared needle");
 
     assert_eq!(matches, vec![0]);
     assert_eq!(diagnostics.query_bytes_scanned, "shared needle".len());
-    assert_eq!(diagnostics.ac_literal_hits, 2);
-    assert_eq!(diagnostics.candidate_pattern_ids, 2);
-    assert_eq!(diagnostics.pure_wildcard_checks, 1);
-    assert_eq!(diagnostics.glob_verification_attempts, 2);
+    assert_eq!(diagnostics.ac_literal_hits, 1);
+    assert_eq!(diagnostics.candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.pure_wildcard_checks, 0);
+    assert_eq!(diagnostics.glob_verification_attempts, 1);
     assert_eq!(diagnostics.successful_glob_verifications, 1);
     assert!(diagnostics.serialized_glob_segment_steps > 0);
     assert!(diagnostics.star_backtracking_attempts > 0);
@@ -58,7 +58,7 @@ fn diagnostics_show_star_jumps_to_following_literal() {
 }
 
 #[test]
-fn diagnostics_skip_verification_when_literal_segments_are_absent() {
+fn diagnostics_do_not_enqueue_globs_from_unselected_common_literals() {
     let patterns: Vec<String> = (0..1000)
         .map(|i| format!("*shared*needle_{i:04}"))
         .collect();
@@ -68,7 +68,24 @@ fn diagnostics_skip_verification_when_literal_segments_are_absent() {
     let (matches, diagnostics) = pg.find_all_with_diagnostics("shared but no required suffix");
 
     assert!(matches.is_empty());
-    assert_eq!(diagnostics.candidate_pattern_ids, 1000);
+    assert_eq!(
+        diagnostics.candidate_pattern_ids, 0,
+        "a common literal should not enqueue globs anchored on longer required literals"
+    );
+    assert_eq!(diagnostics.glob_verification_attempts, 0);
+}
+
+#[test]
+fn diagnostics_skip_verification_when_literal_segments_are_absent() {
+    let patterns: Vec<String> = (0..1000).map(|i| format!("*anchor_{i:04}*x")).collect();
+    let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+    let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
+
+    let (matches, diagnostics) = pg.find_all_with_diagnostics("anchor_0500 missing");
+
+    assert!(matches.is_empty());
+    assert_eq!(diagnostics.raw_candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.candidate_pattern_ids, 1);
     assert_eq!(
         diagnostics.glob_verification_attempts, 0,
         "literal-order precheck should skip full verification for impossible candidates"
@@ -84,9 +101,40 @@ fn diagnostics_dedup_candidate_ids_before_verification() {
 
     assert_eq!(matches, vec![0]);
     assert_eq!(
-        diagnostics.raw_candidate_pattern_ids, 2,
-        "both literal anchors should produce the same candidate before deduplication"
+        diagnostics.raw_candidate_pattern_ids, 1,
+        "a glob should be reachable through one selected literal anchor"
     );
+    assert_eq!(diagnostics.candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.glob_verification_attempts, 1);
+}
+
+#[test]
+fn diagnostics_anchor_globs_on_longer_required_literals() {
+    let patterns: Vec<String> = (0..1000)
+        .map(|i| format!("*shared*needle_{i:04}"))
+        .collect();
+    let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+    let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
+
+    let (matches, diagnostics) = pg.find_all_with_diagnostics("shared payload needle_0500");
+
+    assert_eq!(matches, vec![500]);
+    assert_eq!(diagnostics.ac_literal_hits, 1);
+    assert_eq!(diagnostics.raw_candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.glob_verification_attempts, 1);
+    assert_eq!(diagnostics.successful_glob_verifications, 1);
+}
+
+#[test]
+fn single_literal_globs_remain_indexed() {
+    let patterns = vec!["*.evil.com"];
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+
+    let (matches, diagnostics) = pg.find_all_with_diagnostics("cdn.evil.com");
+
+    assert_eq!(matches, vec![0]);
+    assert_eq!(diagnostics.ac_literal_hits, 1);
     assert_eq!(diagnostics.candidate_pattern_ids, 1);
     assert_eq!(diagnostics.glob_verification_attempts, 1);
 }
