@@ -14,6 +14,9 @@ pub mod offset_format; // Public for validation and external format access
 pub mod simd_utils;
 
 // Re-export main types
+#[cfg(feature = "bench-diagnostics")]
+#[doc(hidden)]
+pub use paraglob_offset::LookupDiagnostics;
 pub use paraglob_offset::{Paraglob, ParaglobBuilder};
 
 // Re-export MatchMode from shared crate

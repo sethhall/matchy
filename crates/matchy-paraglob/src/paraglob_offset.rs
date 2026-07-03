@@ -942,6 +942,45 @@ struct PatternDataMetadata {
     count: u32,
 }
 
+/// Lookup counters used by the `bench-diagnostics` feature.
+#[cfg(feature = "bench-diagnostics")]
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LookupDiagnostics {
+    /// Number of query bytes scanned by the lookup.
+    pub query_bytes_scanned: usize,
+    /// Number of unique AC literal IDs found in the query.
+    pub ac_literal_hits: usize,
+    /// Number of unique pattern IDs selected for candidate checking.
+    pub candidate_pattern_ids: usize,
+    /// Number of pure wildcard patterns checked for the query.
+    pub pure_wildcard_checks: usize,
+    /// Number of serialized glob verification attempts.
+    pub glob_verification_attempts: usize,
+    /// Number of serialized glob verification attempts that matched.
+    pub successful_glob_verifications: usize,
+    /// Number of serialized glob segment matcher steps.
+    pub serialized_glob_segment_steps: usize,
+    /// Number of star wildcard backtracking attempts.
+    pub star_backtracking_attempts: usize,
+}
+
+#[cfg(feature = "bench-diagnostics")]
+impl LookupDiagnostics {
+    const fn empty() -> Self {
+        Self {
+            query_bytes_scanned: 0,
+            ac_literal_hits: 0,
+            candidate_pattern_ids: 0,
+            pure_wildcard_checks: 0,
+            glob_verification_attempts: 0,
+            successful_glob_verifications: 0,
+            serialized_glob_segment_steps: 0,
+            star_backtracking_attempts: 0,
+        }
+    }
+}
+
 // Thread-local scratch buffers for zero-allocation queries
 // These are reused across queries within each thread
 thread_local! {
@@ -949,6 +988,10 @@ thread_local! {
     static AC_LITERAL_BUFFER: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
     static RESULT_BUFFER: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     static NORMALIZED_TEXT_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    #[cfg(feature = "bench-diagnostics")]
+    static LOOKUP_DIAGNOSTICS: RefCell<LookupDiagnostics> = const { RefCell::new(LookupDiagnostics::empty()) };
+    #[cfg(feature = "bench-diagnostics")]
+    static LOOKUP_DIAGNOSTICS_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Offset-based Paraglob pattern matcher
@@ -985,6 +1028,34 @@ unsafe impl Send for Paraglob {}
 unsafe impl Sync for Paraglob {}
 
 impl Paraglob {
+    #[cfg(feature = "bench-diagnostics")]
+    fn begin_lookup_diagnostics(query_bytes_scanned: usize) {
+        LOOKUP_DIAGNOSTICS.with(|diagnostics| {
+            let mut diagnostics = diagnostics.borrow_mut();
+            *diagnostics = LookupDiagnostics::empty();
+            diagnostics.query_bytes_scanned = query_bytes_scanned;
+        });
+        LOOKUP_DIAGNOSTICS_ACTIVE.with(|active| active.set(true));
+    }
+
+    #[cfg(feature = "bench-diagnostics")]
+    fn finish_lookup_diagnostics() -> LookupDiagnostics {
+        let diagnostics = LOOKUP_DIAGNOSTICS.with(|diagnostics| diagnostics.borrow().clone());
+        LOOKUP_DIAGNOSTICS_ACTIVE.with(|active| active.set(false));
+        diagnostics
+    }
+
+    #[cfg(feature = "bench-diagnostics")]
+    fn record_lookup_diagnostic(update: impl FnOnce(&mut LookupDiagnostics)) {
+        LOOKUP_DIAGNOSTICS_ACTIVE.with(|active| {
+            if active.get() {
+                LOOKUP_DIAGNOSTICS.with(|diagnostics| {
+                    update(&mut diagnostics.borrow_mut());
+                });
+            }
+        });
+    }
+
     /// Create a new empty Paraglob
     #[must_use]
     pub fn new() -> Self {
@@ -1058,6 +1129,20 @@ impl Paraglob {
         builder.build()
     }
 
+    /// Find all matching pattern IDs and return lookup diagnostics.
+    ///
+    /// This API is available only with the `bench-diagnostics` feature and is
+    /// intended for benchmarks and profiling. Normal lookup behavior is unchanged.
+    #[cfg(feature = "bench-diagnostics")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn find_all_with_diagnostics(&self, text: &str) -> (Vec<u32>, LookupDiagnostics) {
+        Self::begin_lookup_diagnostics(text.len());
+        let matches = self.find_all(text);
+        let diagnostics = Self::finish_lookup_diagnostics();
+        (matches, diagnostics)
+    }
+
     /// Visit matching pattern IDs without allocating an owned result vector.
     ///
     /// Matches are visited before sorting or deduplication. Callers that need the
@@ -1101,6 +1186,13 @@ impl Paraglob {
                     &mut buf.borrow_mut(),
                 );
             });
+            #[cfg(feature = "bench-diagnostics")]
+            AC_LITERAL_BUFFER.with(|buf| {
+                let ac_literal_hits = buf.borrow().len();
+                Self::record_lookup_diagnostic(|diagnostics| {
+                    diagnostics.ac_literal_hits = ac_literal_hits;
+                });
+            });
 
             // Map AC literal IDs to pattern IDs using hash table lookup (O(1))
             AC_LITERAL_BUFFER.with(|ac_buf| {
@@ -1116,6 +1208,13 @@ impl Paraglob {
                         });
                     }
                 }
+            });
+            #[cfg(feature = "bench-diagnostics")]
+            CANDIDATE_BUFFER.with(|buf| {
+                let candidate_pattern_ids = buf.borrow().len();
+                Self::record_lookup_diagnostic(|diagnostics| {
+                    diagnostics.candidate_pattern_ids = candidate_pattern_ids;
+                });
             });
         }
 
@@ -1157,6 +1256,11 @@ impl Paraglob {
                 let _entry = *entry_ref;
 
                 // Check glob pattern using zero-copy matcher
+                #[cfg(feature = "bench-diagnostics")]
+                Self::record_lookup_diagnostic(|diagnostics| {
+                    diagnostics.pure_wildcard_checks += 1;
+                    diagnostics.glob_verification_attempts += 1;
+                });
                 if let Ok(true) = Self::match_glob_from_buffer(
                     buffer,
                     wildcard.pattern_id,
@@ -1164,6 +1268,10 @@ impl Paraglob {
                     self.mode,
                     header.glob_segments_offset as usize,
                 ) {
+                    #[cfg(feature = "bench-diagnostics")]
+                    Self::record_lookup_diagnostic(|diagnostics| {
+                        diagnostics.successful_glob_verifications += 1;
+                    });
                     visit(wildcard.pattern_id);
                 }
             }
@@ -1192,7 +1300,21 @@ impl Paraglob {
                     visit(entry.pattern_id);
                 } else {
                     // Glob pattern - do glob matching
+                    if !Self::glob_literal_segments_match_in_order(
+                        buffer,
+                        entry.pattern_id,
+                        text,
+                        self.mode,
+                        header.glob_segments_offset as usize,
+                    ) {
+                        continue;
+                    }
+
                     // Check glob pattern using zero-copy matcher
+                    #[cfg(feature = "bench-diagnostics")]
+                    Self::record_lookup_diagnostic(|diagnostics| {
+                        diagnostics.glob_verification_attempts += 1;
+                    });
                     if let Ok(true) = Self::match_glob_from_buffer(
                         buffer,
                         entry.pattern_id,
@@ -1200,6 +1322,10 @@ impl Paraglob {
                         self.mode,
                         header.glob_segments_offset as usize,
                     ) {
+                        #[cfg(feature = "bench-diagnostics")]
+                        Self::record_lookup_diagnostic(|diagnostics| {
+                            diagnostics.successful_glob_verifications += 1;
+                        });
                         visit(entry.pattern_id);
                     }
                 }
@@ -1506,6 +1632,10 @@ impl Paraglob {
             return Ok(false);
         }
         *steps_remaining -= 1;
+        #[cfg(feature = "bench-diagnostics")]
+        Self::record_lookup_diagnostic(|diagnostics| {
+            diagnostics.serialized_glob_segment_steps += 1;
+        });
 
         // If we've consumed all segments, we match if we've also consumed all text
         if seg_idx >= segment_count {
@@ -1589,9 +1719,29 @@ impl Paraglob {
                     return Ok(true); // Star at end matches everything
                 }
 
+                if let Some(next_literal) =
+                    Self::next_literal_segment(buffer, first_segment_offset, seg_idx, segment_count)
+                {
+                    return Self::match_star_before_literal(
+                        buffer,
+                        text,
+                        first_segment_offset,
+                        segment_count,
+                        text_pos,
+                        seg_idx + 1,
+                        mode,
+                        steps_remaining,
+                        next_literal,
+                    );
+                }
+
                 // Try matching star with 0, 1, 2, ... characters
                 let mut pos = text_pos;
                 loop {
+                    #[cfg(feature = "bench-diagnostics")]
+                    Self::record_lookup_diagnostic(|diagnostics| {
+                        diagnostics.star_backtracking_attempts += 1;
+                    });
                     if Self::match_segments_impl(
                         buffer,
                         text,
@@ -1726,6 +1876,192 @@ impl Paraglob {
             }
             _ => Ok(false), // Invalid segment type
         }
+    }
+
+    fn glob_literal_segments_match_in_order(
+        buffer: &[u8],
+        pattern_id: u32,
+        text: &str,
+        mode: MatchMode,
+        glob_segments_offset: usize,
+    ) -> bool {
+        let index_offset =
+            glob_segments_offset + (pattern_id as usize) * mem::size_of::<GlobSegmentIndex>();
+        if index_offset + mem::size_of::<GlobSegmentIndex>() > buffer.len() {
+            return true;
+        }
+
+        let Ok((index_ref, _)) = Ref::<_, GlobSegmentIndex>::from_prefix(&buffer[index_offset..])
+        else {
+            return true;
+        };
+        let index = *index_ref;
+        let mut search_offset = 0usize;
+
+        for seg_idx in 0..index.segment_count as usize {
+            let Some(literal) =
+                Self::literal_segment_at(buffer, index.first_segment_offset as usize, seg_idx)
+            else {
+                continue;
+            };
+
+            let Some(relative_match) =
+                Self::find_literal_bytes(&text.as_bytes()[search_offset..], literal, mode)
+            else {
+                return false;
+            };
+            search_offset += relative_match + literal.len();
+        }
+
+        true
+    }
+
+    fn literal_segment_at(
+        buffer: &[u8],
+        first_segment_offset: usize,
+        seg_idx: usize,
+    ) -> Option<&[u8]> {
+        use crate::offset_format::GlobSegmentHeader;
+
+        let seg_offset = first_segment_offset + seg_idx * mem::size_of::<GlobSegmentHeader>();
+        if seg_offset + mem::size_of::<GlobSegmentHeader>() > buffer.len() {
+            return None;
+        }
+
+        let seg_slice = &buffer[seg_offset..];
+        let (seg_header_ref, _) = Ref::<_, GlobSegmentHeader>::from_prefix(seg_slice).ok()?;
+        let seg_header = *seg_header_ref;
+        if seg_header.segment_type != 0 || seg_header.data_len == 0 {
+            return None;
+        }
+
+        let data_offset = seg_header.data_offset as usize;
+        let data_len = seg_header.data_len as usize;
+        if data_offset + data_len > buffer.len() {
+            return None;
+        }
+
+        Some(&buffer[data_offset..data_offset + data_len])
+    }
+
+    fn find_literal_bytes(haystack: &[u8], needle: &[u8], mode: MatchMode) -> Option<usize> {
+        match mode {
+            MatchMode::CaseSensitive => memchr::memmem::find(haystack, needle),
+            MatchMode::CaseInsensitive => {
+                if haystack.len() < needle.len() {
+                    return None;
+                }
+
+                (0..=haystack.len() - needle.len()).find(|&offset| {
+                    Self::bytes_eq_ignore_ascii_case(
+                        &haystack[offset..offset + needle.len()],
+                        needle,
+                    )
+                })
+            }
+        }
+    }
+
+    fn next_literal_segment(
+        buffer: &[u8],
+        first_segment_offset: usize,
+        seg_idx: usize,
+        segment_count: usize,
+    ) -> Option<&[u8]> {
+        let next_seg_idx = seg_idx.checked_add(1)?;
+        if next_seg_idx >= segment_count {
+            return None;
+        }
+
+        Self::literal_segment_at(buffer, first_segment_offset, next_seg_idx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn match_star_before_literal(
+        buffer: &[u8],
+        text: &str,
+        first_segment_offset: usize,
+        segment_count: usize,
+        text_pos: usize,
+        next_seg_idx: usize,
+        mode: MatchMode,
+        steps_remaining: &mut usize,
+        literal: &[u8],
+    ) -> Result<bool, ParaglobError> {
+        if text_pos > text.len() || !text.is_char_boundary(text_pos) {
+            return Ok(false);
+        }
+
+        let remaining = &text.as_bytes()[text_pos..];
+
+        match mode {
+            MatchMode::CaseSensitive => {
+                for relative_pos in memchr::memmem::find_iter(remaining, literal) {
+                    let candidate_pos = text_pos + relative_pos;
+                    if !text.is_char_boundary(candidate_pos) {
+                        continue;
+                    }
+                    #[cfg(feature = "bench-diagnostics")]
+                    Self::record_lookup_diagnostic(|diagnostics| {
+                        diagnostics.star_backtracking_attempts += 1;
+                    });
+                    if Self::match_segments_impl(
+                        buffer,
+                        text,
+                        first_segment_offset,
+                        segment_count,
+                        candidate_pos,
+                        next_seg_idx,
+                        mode,
+                        steps_remaining,
+                    )? {
+                        return Ok(true);
+                    }
+                }
+            }
+            MatchMode::CaseInsensitive => {
+                if remaining.len() < literal.len() {
+                    return Ok(false);
+                }
+
+                for relative_pos in 0..=remaining.len() - literal.len() {
+                    let candidate_pos = text_pos + relative_pos;
+                    if !text.is_char_boundary(candidate_pos) {
+                        continue;
+                    }
+                    let candidate = &remaining[relative_pos..relative_pos + literal.len()];
+                    if !Self::bytes_eq_ignore_ascii_case(candidate, literal) {
+                        continue;
+                    }
+                    #[cfg(feature = "bench-diagnostics")]
+                    Self::record_lookup_diagnostic(|diagnostics| {
+                        diagnostics.star_backtracking_attempts += 1;
+                    });
+                    if Self::match_segments_impl(
+                        buffer,
+                        text,
+                        first_segment_offset,
+                        segment_count,
+                        candidate_pos,
+                        next_seg_idx,
+                        mode,
+                        steps_remaining,
+                    )? {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn bytes_eq_ignore_ascii_case(left: &[u8], right: &[u8]) -> bool {
+        left.len() == right.len()
+            && left
+                .iter()
+                .zip(right)
+                .all(|(left_byte, right_byte)| left_byte.eq_ignore_ascii_case(right_byte))
     }
 
     /// Load from buffer (for deserialization)

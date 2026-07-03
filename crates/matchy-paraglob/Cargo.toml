@@ -19,6 +19,9 @@ anyhow.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 
+[features]
+bench-diagnostics = []
+
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
@@ -30,6 +33,11 @@ harness = false
 [[bench]]
 name = "ac_root_bench"
 harness = false
+
+[[bench]]
+name = "lookup_diagnostics_bench"
+harness = false
+required-features = ["bench-diagnostics"]
 
 [lints]
 workspace = true
