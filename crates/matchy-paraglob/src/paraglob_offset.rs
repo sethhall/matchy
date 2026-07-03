@@ -962,6 +962,13 @@ enum GlobCandidateCheck {
     NoMatch,
 }
 
+struct FixedWindowShape {
+    start_seg_idx: usize,
+    end_seg_idx: usize,
+    has_leading_star: bool,
+    has_trailing_star: bool,
+}
+
 /// Lookup counters used by the `bench-diagnostics` feature.
 #[cfg(feature = "bench-diagnostics")]
 #[doc(hidden)]
@@ -1650,9 +1657,9 @@ impl Paraglob {
             })?;
         let index = *index_ref;
 
-        if let Some(matches) = Self::match_simple_glob_from_buffer(
+        if let Some(matches) = Self::match_fixed_window_glob_from_buffer(
             buffer,
-            text.as_bytes(),
+            text,
             index.first_segment_offset as usize,
             index.segment_count as usize,
             mode,
@@ -1694,9 +1701,9 @@ impl Paraglob {
         };
         let index = *index_ref;
 
-        if let Some(matches) = Self::match_simple_glob_from_buffer(
+        if let Some(matches) = Self::match_fixed_window_glob_from_buffer(
             buffer,
-            text.as_bytes(),
+            text,
             index.first_segment_offset as usize,
             index.segment_count as usize,
             mode,
@@ -1711,40 +1718,111 @@ impl Paraglob {
         }
     }
 
-    fn match_simple_glob_from_buffer(
+    fn match_fixed_window_glob_from_buffer(
         buffer: &[u8],
-        text: &[u8],
+        text: &str,
         first_segment_offset: usize,
         segment_count: usize,
         mode: MatchMode,
     ) -> Option<bool> {
-        if !(2..=3).contains(&segment_count) {
+        if Self::fixed_window_quick_reject(buffer, first_segment_offset, segment_count) {
             return None;
         }
 
-        let (literal, has_leading_star, has_trailing_star) =
-            Self::single_literal_star_shape(buffer, first_segment_offset, segment_count)?;
+        let shape = Self::fixed_window_shape(buffer, first_segment_offset, segment_count)?;
 
-        Some(match (has_leading_star, has_trailing_star) {
-            (true, true) => Self::find_literal_bytes(text, literal, mode).is_some(),
-            (true, false) => Self::bytes_end_with(text, literal, mode),
-            (false, true) => Self::bytes_start_with(text, literal, mode),
+        if shape.end_seg_idx == shape.start_seg_idx + 1 {
+            if let Some(literal) =
+                Self::literal_segment_at(buffer, first_segment_offset, shape.start_seg_idx)
+            {
+                let text_bytes = text.as_bytes();
+                return Some(match (shape.has_leading_star, shape.has_trailing_star) {
+                    (true, true) => Self::find_literal_bytes(text_bytes, literal, mode).is_some(),
+                    (true, false) => Self::bytes_end_with(text_bytes, literal, mode),
+                    (false, true) => Self::bytes_start_with(text_bytes, literal, mode),
+                    (false, false) => return None,
+                });
+            }
+        }
+
+        Some(match (shape.has_leading_star, shape.has_trailing_star) {
+            (true, true) => Self::fixed_window_matches_anywhere(
+                buffer,
+                text,
+                first_segment_offset,
+                &shape,
+                mode,
+            ),
+            (true, false) => {
+                Self::fixed_window_matches_suffix(buffer, text, first_segment_offset, &shape, mode)
+            }
+            (false, true) => Self::fixed_window_matches_at(
+                buffer,
+                text,
+                first_segment_offset,
+                shape.start_seg_idx,
+                shape.end_seg_idx,
+                0,
+                mode,
+            )
+            .is_some(),
             (false, false) => return None,
         })
     }
 
-    fn single_literal_star_shape(
+    fn fixed_window_quick_reject(
         buffer: &[u8],
         first_segment_offset: usize,
         segment_count: usize,
-    ) -> Option<(&[u8], bool, bool)> {
+    ) -> bool {
+        if segment_count <= 3 {
+            return false;
+        }
+
+        let Some(first_type) = Self::segment_type_at(buffer, first_segment_offset, 0) else {
+            return false;
+        };
+
+        if first_type == 1 {
+            return Self::segment_type_at(buffer, first_segment_offset, 2) == Some(1);
+        }
+
+        Self::segment_type_at(buffer, first_segment_offset, 1) == Some(1)
+    }
+
+    fn fixed_window_shape(
+        buffer: &[u8],
+        first_segment_offset: usize,
+        segment_count: usize,
+    ) -> Option<FixedWindowShape> {
         use crate::offset_format::GlobSegmentHeader;
 
-        let mut literal = None;
+        if segment_count < 2 {
+            return None;
+        }
+
+        let mut start_seg_idx = 0usize;
+        let mut end_seg_idx = segment_count;
         let mut has_leading_star = false;
         let mut has_trailing_star = false;
 
-        for seg_idx in 0..segment_count {
+        if Self::segment_type_at(buffer, first_segment_offset, 0)? == 1 {
+            has_leading_star = true;
+            start_seg_idx = 1;
+        }
+
+        if Self::segment_type_at(buffer, first_segment_offset, segment_count - 1)? == 1 {
+            has_trailing_star = true;
+            end_seg_idx -= 1;
+        }
+
+        if !has_leading_star && !has_trailing_star || start_seg_idx >= end_seg_idx {
+            return None;
+        }
+
+        Self::literal_segment_at(buffer, first_segment_offset, start_seg_idx)?;
+
+        for seg_idx in start_seg_idx..end_seg_idx {
             let seg_offset = first_segment_offset + seg_idx * mem::size_of::<GlobSegmentHeader>();
             if seg_offset + mem::size_of::<GlobSegmentHeader>() > buffer.len() {
                 return None;
@@ -1756,28 +1834,244 @@ impl Paraglob {
 
             match seg_header.segment_type {
                 0 => {
-                    if literal.is_some() {
+                    Self::literal_segment_at(buffer, first_segment_offset, seg_idx)?;
+                }
+                2 | 3 => {}
+                _ => return None,
+            }
+        }
+
+        Some(FixedWindowShape {
+            start_seg_idx,
+            end_seg_idx,
+            has_leading_star,
+            has_trailing_star,
+        })
+    }
+
+    fn segment_type_at(buffer: &[u8], first_segment_offset: usize, seg_idx: usize) -> Option<u8> {
+        use crate::offset_format::GlobSegmentHeader;
+
+        let seg_offset = first_segment_offset + seg_idx * mem::size_of::<GlobSegmentHeader>();
+        buffer.get(seg_offset).copied()
+    }
+
+    fn fixed_window_matches_anywhere(
+        buffer: &[u8],
+        text: &str,
+        first_segment_offset: usize,
+        shape: &FixedWindowShape,
+        mode: MatchMode,
+    ) -> bool {
+        Self::visit_fixed_window_candidate_positions(
+            buffer,
+            text,
+            first_segment_offset,
+            shape,
+            mode,
+            |candidate_pos| {
+                Self::fixed_window_matches_at(
+                    buffer,
+                    text,
+                    first_segment_offset,
+                    shape.start_seg_idx,
+                    shape.end_seg_idx,
+                    candidate_pos,
+                    mode,
+                )
+                .is_some()
+            },
+        )
+    }
+
+    fn fixed_window_matches_suffix(
+        buffer: &[u8],
+        text: &str,
+        first_segment_offset: usize,
+        shape: &FixedWindowShape,
+        mode: MatchMode,
+    ) -> bool {
+        Self::visit_fixed_window_candidate_positions(
+            buffer,
+            text,
+            first_segment_offset,
+            shape,
+            mode,
+            |candidate_pos| {
+                Self::fixed_window_matches_at(
+                    buffer,
+                    text,
+                    first_segment_offset,
+                    shape.start_seg_idx,
+                    shape.end_seg_idx,
+                    candidate_pos,
+                    mode,
+                )
+                .is_some_and(|end_pos| end_pos == text.len())
+            },
+        )
+    }
+
+    fn visit_fixed_window_candidate_positions(
+        buffer: &[u8],
+        text: &str,
+        first_segment_offset: usize,
+        shape: &FixedWindowShape,
+        mode: MatchMode,
+        mut visit: impl FnMut(usize) -> bool,
+    ) -> bool {
+        if let Some(first_literal) =
+            Self::literal_segment_at(buffer, first_segment_offset, shape.start_seg_idx)
+        {
+            let text_bytes = text.as_bytes();
+            match mode {
+                MatchMode::CaseSensitive => {
+                    for candidate_pos in memchr::memmem::find_iter(text_bytes, first_literal) {
+                        if text.is_char_boundary(candidate_pos) && visit(candidate_pos) {
+                            return true;
+                        }
+                    }
+                }
+                MatchMode::CaseInsensitive => {
+                    if text_bytes.len() < first_literal.len() {
+                        return false;
+                    }
+
+                    for candidate_pos in 0..=text_bytes.len() - first_literal.len() {
+                        if !text.is_char_boundary(candidate_pos) {
+                            continue;
+                        }
+                        let candidate =
+                            &text_bytes[candidate_pos..candidate_pos + first_literal.len()];
+                        if Self::bytes_eq_ignore_ascii_case(candidate, first_literal)
+                            && visit(candidate_pos)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        false
+    }
+
+    fn fixed_window_matches_at(
+        buffer: &[u8],
+        text: &str,
+        first_segment_offset: usize,
+        start_seg_idx: usize,
+        end_seg_idx: usize,
+        mut text_pos: usize,
+        mode: MatchMode,
+    ) -> Option<usize> {
+        use crate::offset_format::GlobSegmentHeader;
+
+        if text_pos > text.len() || !text.is_char_boundary(text_pos) {
+            return None;
+        }
+
+        for seg_idx in start_seg_idx..end_seg_idx {
+            let seg_offset = first_segment_offset + seg_idx * mem::size_of::<GlobSegmentHeader>();
+            if seg_offset + mem::size_of::<GlobSegmentHeader>() > buffer.len() {
+                return None;
+            }
+
+            let seg_slice = &buffer[seg_offset..];
+            let (seg_header_ref, _) = Ref::<_, GlobSegmentHeader>::from_prefix(seg_slice).ok()?;
+            let seg_header = *seg_header_ref;
+
+            match seg_header.segment_type {
+                0 => {
+                    let literal = Self::literal_segment_at(buffer, first_segment_offset, seg_idx)?;
+                    let remaining = text.as_bytes().get(text_pos..)?;
+                    if !Self::bytes_start_with(remaining, literal, mode) {
                         return None;
                     }
-                    literal = Self::literal_segment_at(buffer, first_segment_offset, seg_idx);
+                    text_pos += literal.len();
                 }
-                1 => {
-                    if literal.is_some() {
-                        has_trailing_star = true;
-                    } else {
-                        has_leading_star = true;
+                2 => {
+                    let ch = text.get(text_pos..)?.chars().next()?;
+                    text_pos += ch.len_utf8();
+                }
+                3 => {
+                    let ch = text.get(text_pos..)?.chars().next()?;
+                    if !Self::char_class_matches(buffer, seg_header, ch, mode)? {
+                        return None;
                     }
+                    text_pos += ch.len_utf8();
                 }
                 _ => return None,
             }
         }
 
-        let literal = literal?;
-        if !has_leading_star && !has_trailing_star {
+        Some(text_pos)
+    }
+
+    fn char_class_matches(
+        buffer: &[u8],
+        seg_header: crate::offset_format::GlobSegmentHeader,
+        ch: char,
+        mode: MatchMode,
+    ) -> Option<bool> {
+        use crate::offset_format::CharClassItemEncoded;
+
+        let ch_normalized = match mode {
+            MatchMode::CaseSensitive => ch,
+            MatchMode::CaseInsensitive => ch.to_ascii_lowercase(),
+        };
+
+        let data_offset = seg_header.data_offset as usize;
+        let data_len = seg_header.data_len as usize;
+        let item_size = mem::size_of::<CharClassItemEncoded>();
+        let item_count = data_len / item_size;
+
+        if data_offset + data_len > buffer.len() {
             return None;
         }
 
-        Some((literal, has_leading_star, has_trailing_star))
+        let negated = seg_header.flags & 1 != 0;
+        let mut in_class = false;
+
+        for i in 0..item_count {
+            let item_offset = data_offset + i * item_size;
+            let item_slice = &buffer[item_offset..];
+            let (item_ref, _) = Ref::<_, CharClassItemEncoded>::from_prefix(item_slice).ok()?;
+            let item = *item_ref;
+
+            let matches_item = match item.item_type {
+                0 => {
+                    let class_ch = char::from_u32(item.char1)?;
+                    let class_ch_normalized = match mode {
+                        MatchMode::CaseSensitive => class_ch,
+                        MatchMode::CaseInsensitive => class_ch.to_ascii_lowercase(),
+                    };
+                    ch_normalized == class_ch_normalized
+                }
+                1 => {
+                    let start = char::from_u32(item.char1)?;
+                    let end = char::from_u32(item.char2)?;
+                    let start_norm = match mode {
+                        MatchMode::CaseSensitive => start,
+                        MatchMode::CaseInsensitive => start.to_ascii_lowercase(),
+                    };
+                    let end_norm = match mode {
+                        MatchMode::CaseSensitive => end,
+                        MatchMode::CaseInsensitive => end.to_ascii_lowercase(),
+                    };
+                    ch_normalized >= start_norm && ch_normalized <= end_norm
+                }
+                _ => false,
+            };
+
+            if matches_item {
+                in_class = true;
+                break;
+            }
+        }
+
+        Some(if negated { !in_class } else { in_class })
     }
 
     /// Recursive matching implementation that works directly on serialized segments

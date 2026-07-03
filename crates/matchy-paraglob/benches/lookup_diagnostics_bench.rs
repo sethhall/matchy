@@ -90,6 +90,24 @@ fn lookup_cases() -> Vec<LookupCase> {
             query: "SUB.evil0500.com".to_string(),
             mode: MatchMode::CaseInsensitive,
         },
+        LookupCase {
+            name: "suffix_question_domain",
+            patterns: numbered_patterns(LARGE_COUNT, |i| format!("*.evil{i:04}.?om")),
+            query: "sub.evil0500.com".to_string(),
+            mode: MatchMode::CaseSensitive,
+        },
+        LookupCase {
+            name: "suffix_class_domain",
+            patterns: numbered_patterns(LARGE_COUNT, |i| format!("*.evil{i:04}.[co]om")),
+            query: "sub.evil0500.com".to_string(),
+            mode: MatchMode::CaseSensitive,
+        },
+        LookupCase {
+            name: "prefix_question_domain",
+            patterns: numbered_patterns(LARGE_COUNT, |i| format!("evil{i:04}?.com*")),
+            query: "evil0500x.com/path".to_string(),
+            mode: MatchMode::CaseSensitive,
+        },
     ]
 }
 

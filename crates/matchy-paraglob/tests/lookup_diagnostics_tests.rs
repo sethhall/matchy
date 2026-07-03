@@ -126,6 +126,66 @@ fn diagnostics_fast_path_simple_suffix_rejects_non_suffix_match() {
 }
 
 #[test]
+fn diagnostics_fast_path_suffix_window_with_question() {
+    assert_simple_glob_uses_fast_path("*.evil.?om", "cdn.evil.com", &[0]);
+}
+
+#[test]
+fn diagnostics_fast_path_suffix_window_with_char_class() {
+    assert_simple_glob_uses_fast_path("*.evil.[co]om", "cdn.evil.com", &[0]);
+}
+
+#[test]
+fn diagnostics_fast_path_suffix_window_with_char_class_range() {
+    assert_simple_glob_uses_fast_path("*.evil.[a-d]om", "cdn.evil.com", &[0]);
+}
+
+#[test]
+fn diagnostics_fast_path_suffix_window_with_negated_char_class() {
+    assert_simple_glob_uses_fast_path("*.evil.[!x]om", "cdn.evil.com", &[0]);
+}
+
+#[test]
+fn diagnostics_fast_path_suffix_window_with_char_class_case_insensitive() {
+    assert_simple_glob_uses_fast_path_with_mode(
+        "*.Evil.[CO]OM",
+        "cdn.evil.com",
+        MatchMode::CaseInsensitive,
+        &[0],
+    );
+}
+
+#[test]
+fn diagnostics_fast_path_prefix_window_with_question() {
+    assert_simple_glob_uses_fast_path("evil?.com*", "evil1.com/path", &[0]);
+}
+
+#[test]
+fn diagnostics_fast_path_contains_window_with_char_class() {
+    assert_simple_glob_uses_fast_path("*.evil.[co]om*", "cdn.evil.com/path", &[0]);
+}
+
+#[test]
+fn diagnostics_fast_path_window_rejects_non_matching_char_class() {
+    assert_simple_glob_uses_fast_path("*.evil.[ab]om", "cdn.evil.com", &[]);
+}
+
+#[test]
+fn diagnostics_window_with_non_literal_start_uses_general_verifier() {
+    let patterns = vec!["*?.evil.com"];
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+
+    let (matches, diagnostics) = pg.find_all_with_diagnostics("a.evil.com");
+
+    assert_eq!(matches, vec![0]);
+    assert_eq!(diagnostics.raw_candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.literal_order_precheck_attempts, 1);
+    assert_eq!(diagnostics.glob_verification_attempts, 1);
+    assert!(diagnostics.serialized_glob_segment_steps > 0);
+}
+
+#[test]
 fn diagnostics_do_not_enqueue_globs_from_unselected_common_literals() {
     let patterns: Vec<String> = (0..1000)
         .map(|i| format!("*shared*needle_{i:04}"))
