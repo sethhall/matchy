@@ -93,7 +93,7 @@ pub enum ExtractedItem<'a> {
     Ipv4(Ipv4Addr),
     /// IPv6 address
     Ipv6(Ipv6Addr),
-    /// File hash (MD5, SHA1, or SHA256)
+    /// File hash (MD5, SHA1, SHA256, SHA384, or SHA512)
     Hash(HashType, &'a str),
     /// Bitcoin address (all formats: legacy, P2SH, bech32)
     Bitcoin(&'a str),
@@ -108,7 +108,7 @@ impl<'a> ExtractedItem<'a> {
     ///
     /// Returns a consistent string representation of the item type:
     /// - `"Domain"`, `"Email"`, `"IPv4"`, `"IPv6"`
-    /// - `"MD5"`, `"SHA1"`, `"SHA256"`, `"SHA384"` for hashes
+    /// - `"MD5"`, `"SHA1"`, `"SHA256"`, `"SHA384"`, `"SHA512"` for hashes
     /// - `"Bitcoin"`, `"Ethereum"`, `"Monero"` for cryptocurrency addresses
     ///
     /// This is useful for logging, output formatting, and avoiding repetitive

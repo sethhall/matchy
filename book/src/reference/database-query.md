@@ -58,13 +58,15 @@ let db = Database::from("database.mxy")
 ### Error Handling
 
 ```rust
-match Database::open("database.mxy") {
+use matchy::{Database, DatabaseError};
+
+match Database::from("database.mxy").open() {
     Ok(db) => { /* success */ }
-    Err(MatchyError::FileNotFound { path }) => {
-        eprintln!("Database not found: {}", path);
+    Err(DatabaseError::Io(msg)) => {
+        eprintln!("I/O error: {}", msg);
     }
-    Err(MatchyError::InvalidFormat { reason }) => {
-        eprintln!("Invalid database format: {}", reason);
+    Err(DatabaseError::Format(err)) => {
+        eprintln!("Invalid database format: {}", err);
     }
     Err(e) => eprintln!("Error: {}", e),
 }
@@ -75,15 +77,15 @@ match Database::open("database.mxy") {
 ### lookup() - Direct String Lookup
 
 ```rust
-pub fn lookup<S: AsRef<str>>(&self, query: S) -> Result<Option<QueryResult>, MatchyError>
+pub fn lookup(&self, query: &str) -> Result<Option<QueryResult>, DatabaseError>
 ```
 
 Basic usage:
 
 ```rust
 match db.lookup("192.0.2.1")? {
+    Some(QueryResult::NotFound) | None => println!("Not found"),
     Some(result) => println!("Found: {:?}", result),
-    None => println!("Not found"),
 }
 ```
 
@@ -131,7 +133,9 @@ for item in extractor.extract_from_line(log_line) {
 - `item`: The extracted match from `Extractor`
 - `input`: Original input buffer (needed to extract string slices)
 
-**Returns:** `Ok(Some(QueryResult))` if found, `Ok(None)` if not found
+**Returns:** `Ok(Some(QueryResult))` when a matching lookup table exists. Check
+for `QueryResult::NotFound` to handle misses. `Ok(None)` means the database has
+no applicable lookup table for that query type.
 
 See the [Querying guide](../guide/querying.md#extract-and-lookup-pattern) for more examples.
 
@@ -143,19 +147,18 @@ See the [Querying guide](../guide/querying.md#extract-and-lookup-pattern) for mo
 
 ```rust
 QueryResult::Ip {
-    data: Option<HashMap<String, DataValue>>,
+    data: DataValue,
     prefix_len: u8,
+    data_offset: u32,
 }
 ```
 
 Example:
 ```rust
 match db.lookup("192.0.2.1")? {
-    Some(QueryResult::Ip { data, prefix_len }) => {
+    Some(QueryResult::Ip { data, prefix_len, .. }) => {
         println!("Matched IP with prefix /{}", prefix_len);
-        if let Some(d) = data {
-            println!("Data: {:?}", d);
-        }
+        println!("Data: {:?}", data);
     }
     _ => {}
 }
@@ -166,14 +169,15 @@ match db.lookup("192.0.2.1")? {
 ```rust
 QueryResult::Pattern {
     pattern_ids: Vec<u32>,
-    data: Vec<Option<HashMap<String, DataValue>>>,
+    data: Vec<Option<DataValue>>,
+    data_offsets: Vec<u32>,
 }
 ```
 
 Example:
 ```rust
 match db.lookup("mail.google.com")? {
-    Some(QueryResult::Pattern { pattern_ids, data }) => {
+    Some(QueryResult::Pattern { pattern_ids, data, .. }) => {
         println!("Matched {} pattern(s)", pattern_ids.len());
         for (i, pattern_data) in data.iter().enumerate() {
             println!("Pattern {}: {:?}", pattern_ids[i], pattern_data);
@@ -184,24 +188,8 @@ match db.lookup("mail.google.com")? {
 ```
 
 **Note**: A query can match multiple patterns. All matching patterns are returned.
-
-### Exact String Match
-
-```rust
-QueryResult::ExactString {
-    data: Option<HashMap<String, DataValue>>,
-}
-```
-
-Example:
-```rust
-match db.lookup("example.com")? {
-    Some(QueryResult::ExactString { data }) => {
-        println!("Exact match: {:?}", data);
-    }
-    _ => {}
-}
-```
+Literal string matches are returned through `QueryResult::Pattern`; exact
+strings and glob patterns share the same string lookup result type.
 
 ## Complete Example
 
@@ -209,7 +197,7 @@ match db.lookup("example.com")? {
 use matchy::{Database, QueryResult};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = Database::open("database.mxy")?;
+    let db = Database::from("database.mxy").open()?;
     
     // Query different types
     let queries = vec![
@@ -227,10 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(QueryResult::Pattern { pattern_ids, .. }) => {
                 println!("{}: Pattern match ({} patterns)", query, pattern_ids.len());
             }
-            Some(QueryResult::ExactString { .. }) => {
-                println!("{}: Exact match", query);
-            }
-            None => {
+            Some(QueryResult::NotFound) | None => {
                 println!("{}: No match", query);
             }
         }
@@ -248,7 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 use std::sync::Arc;
 use std::thread;
 
-let db = Arc::new(Database::open("database.mxy")?);
+let db = Arc::new(Database::from("database.mxy").open()?);
 
 let handles: Vec<_> = (0..4).map(|i| {
     let db = Arc::clone(&db);
@@ -381,7 +366,7 @@ match db.lookup(query)? {
 Databases are immutable once opened:
 
 ```rust
-let db = Database::open("database.mxy")?;
+let db = Database::from("database.mxy").open()?;
 // db.lookup(...) - OK
 // db.add_entry(...) - No such method!
 ```
@@ -398,7 +383,7 @@ std::fs::write("database.mxy.tmp", &db_bytes)?;
 std::fs::rename("database.mxy.tmp", "database.mxy")?;
 
 // Reopen
-let db = Database::open("database.mxy")?;
+let db = Database::from("database.mxy").open()?;
 ```
 
 ## See Also

@@ -29,4 +29,4 @@ let mode = MatchMode::CaseInsensitive;
 
 - Zero dependencies
 - `Copy + Clone + Debug + PartialEq + Eq`
-- Used by: matchy-glob, matchy-ac, matchy-paraglob, matchy-literal-hash, matchy-format
+- Used by: matchy-ac, matchy-paraglob, matchy-literal-hash, matchy-format

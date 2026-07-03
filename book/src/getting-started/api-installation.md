@@ -20,7 +20,7 @@ If you're only using Matchy as a library and don't need CLI components, save ~40
 matchy = { version = "{{version_minor}}", default-features = false }
 ```
 
-This excludes CLI-only dependencies (`clap`, `notify`, `ctrlc`, `csv`) while keeping all core functionality.
+This excludes CLI-only dependencies (`clap`, `ctrlc`, `csv`) while keeping all core functionality.
 
 Then run `cargo build`:
 
@@ -72,7 +72,8 @@ $ cargo build --release
 
 ```console
 $ sudo cp target/release/libmatchy.* /usr/local/lib/
-$ sudo cp include/matchy.h /usr/local/include/
+$ sudo mkdir -p /usr/local/include/matchy
+$ sudo cp crates/matchy/include/matchy/*.h /usr/local/include/matchy/
 ```
 
 3. Update library cache (Linux):

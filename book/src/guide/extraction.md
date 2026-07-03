@@ -1,6 +1,6 @@
 # Pattern Extraction
 
-Matchy includes a high-performance pattern extractor for finding domains, IP addresses (IPv4 and IPv6), email addresses, and file hashes (MD5, SHA1, SHA256, SHA384) in unstructured text like log files.
+Matchy includes a high-performance pattern extractor for finding domains, IP addresses (IPv4 and IPv6), email addresses, file hashes, and cryptocurrency addresses in unstructured text like log files.
 
 ## Overview
 
@@ -122,7 +122,7 @@ for match_item in extractor.extract_from_line(line) {
 
 ### File Hashes
 
-Extracts MD5, SHA1, and SHA256 file hashes:
+Extracts MD5, SHA1, SHA256, SHA384, and SHA512 file hashes:
 
 ```rust
 use matchy::extractor::{ExtractedItem, HashType};
@@ -135,6 +135,8 @@ for match_item in extractor.extract_from_line(line) {
             HashType::Md5 => "MD5",
             HashType::Sha1 => "SHA1",
             HashType::Sha256 => "SHA256",
+            HashType::Sha384 => "SHA384",
+            HashType::Sha512 => "SHA512",
         };
         println!("{}: {}", type_str, hash);
     }
@@ -144,7 +146,7 @@ for match_item in extractor.extract_from_line(line) {
 ```
 
 **Features:**
-- **Boundary distance detection**: Finds tokens of exact length (32/40/64 hex chars)
+- **Boundary distance detection**: Finds tokens of exact length (32/40/64/96/128 hex chars)
 - **SIMD hex validation**: Auto-vectorized lookup table for blazing speed
 - **Case insensitive**: Accepts both lowercase and uppercase hex
 - **Zero false positives**: Rejects UUIDs (with dashes) and non-hex strings
@@ -155,6 +157,7 @@ for match_item in extractor.extract_from_line(line) {
 - **SHA1**: 40 hex characters (e.g., `2fd4e1c67a2d28fced849ee1bb76e7391b93eb12`)
 - **SHA256**: 64 hex characters (e.g., `2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae`)
 - **SHA384**: 96 hex characters (e.g., `cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7`)
+- **SHA512**: 128 hex characters
 
 ## Configuration
 
@@ -181,7 +184,10 @@ let extractor = Extractor::builder()
 | `extract_ipv4` | `true` | Extract IPv4 addresses |
 | `extract_ipv6` | `true` | Extract IPv6 addresses |
 | `extract_emails` | `true` | Extract email addresses |
-| `extract_hashes` | `true` | Extract file hashes (MD5, SHA1, SHA256, SHA384) |
+| `extract_hashes` | `true` | Extract file hashes (MD5, SHA1, SHA256, SHA384, SHA512) |
+| `extract_bitcoin` | `true` | Extract Bitcoin addresses |
+| `extract_ethereum` | `true` | Extract Ethereum addresses |
+| `extract_monero` | `true` | Extract Monero addresses |
 | `min_domain_labels` | `2` | Minimum labels (2 = example.com, 3 = api.example.com) |
 | `require_word_boundaries` | `true` | Ensure patterns have word boundaries |
 
@@ -302,8 +308,8 @@ The `matchy match` command uses the extractor internally:
 matchy match threats.mxy access.log
 
 # Each match is a JSON line:
-# {"timestamp":"123.456","line_number":1,"matched_text":"evil.com","match_type":"pattern",...}
-# {"timestamp":"123.789","line_number":2,"matched_text":"1.2.3.4","match_type":"ip",...}
+# {"timestamp":"123.456","source":"access.log","matched_text":"evil.com","match_type":"pattern",...}
+# {"timestamp":"123.789","source":"access.log","matched_text":"1.2.3.4","match_type":"ip",...}
 
 # Show statistics (to stderr)
 matchy match threats.mxy access.log --stats

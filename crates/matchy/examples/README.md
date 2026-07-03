@@ -52,15 +52,13 @@ Shows how to set custom database metadata:
 
 **Run:** `cargo run --example custom_metadata`
 
-### `incremental_builder.rs`
-Demonstrates incremental pattern building with associated data:
-- Adding patterns one at a time
-- Attaching rich threat intelligence metadata
-- Duplicate pattern detection
-- Useful for streaming threat feeds
-- Pattern data retrieval after building
+### `prefix_convention.rs`
+Demonstrates explicit entry type prefixes:
+- `literal:` for exact strings that contain glob characters
+- `glob:` for strings that should use glob matching
+- `ip:` for explicit IP/CIDR parsing
 
-**Run:** `cargo run --example incremental_builder`
+**Run:** `cargo run --example prefix_convention`
 
 ## Querying Databases
 
@@ -81,7 +79,7 @@ Querying unified databases with both IP and pattern data:
 - Displaying results for both query types
 - Useful for threat intelligence lookups
 
-**Run:** `cargo run --example combined_query -- combined_database.mmdb`
+**Run:** `cargo run --example combined_query -- combined_database.mxy`
 
 ### `lookup_extracted_demo.rs`
 Demonstrates the efficient extract-and-lookup pattern:
@@ -95,16 +93,21 @@ Demonstrates the efficient extract-and-lookup pattern:
 
 ## Pattern Matching
 
-### `glob_demo.rs`
-Educational demo showing glob pattern matching features:
-- Basic wildcards (`*`, `?`)
-- Character classes (`[...]`, `[!...]`)
-- Case sensitivity modes
-- Escape sequences
-- UTF-8 support
-- Performance characteristics
+### `extractor_demo.rs`
+Educational demo showing pattern extraction features:
+- Domain, IP, email, hash, and cryptocurrency extraction
+- Word-boundary handling
+- Output from the `matchy-extractor` API
 
-**Run:** `cargo run --example glob_demo`
+**Run:** `cargo run --example extractor_demo`
+
+### `hash_demo.rs`
+Demonstrates file hash extraction:
+- MD5, SHA1, SHA256, SHA384, and SHA512 detection
+- False-positive rejection
+- Chunk processing
+
+**Run:** `cargo run --example hash_demo`
 
 ## C API Examples
 
@@ -119,22 +122,21 @@ Demonstrates the enhanced C API for structured data access:
 
 **Build and run:**
 ```bash
-make -C examples
-./examples/enhanced_api_test
+cargo build --release -p matchy
+gcc -o /tmp/enhanced_api_test crates/matchy/examples/enhanced_api_test.c \
+    -Icrates/matchy/include -Ltarget/release -lmatchy -lpthread -ldl -lm
+LD_LIBRARY_PATH=target/release /tmp/enhanced_api_test
 ```
 
 ## Performance & Testing
 
-### `production_test.rs`
-Real-world production usage example demonstrating:
-- Building pattern matchers
-- Matching performance with realistic workloads
-- Serialization to disk
-- Zero-copy memory-mapped loading
-- Multi-process memory sharing benefits
-- Batch processing patterns
+### `parallel_processing.rs`
+Real-world batch processing example demonstrating:
+- Multi-threaded log processing
+- Extraction and lookup in worker threads
+- Aggregating match statistics
 
-**Run:** `cargo run --release --example production_test`
+**Run:** `cargo run --release --example parallel_processing`
 
 ### `matchy bench` (Built-in Benchmarking Tool)
 Comprehensive benchmarking tool for all database types:
@@ -175,17 +177,20 @@ cargo run --example build_misp_database -- misp-example.json
 
 # Querying
 cargo run --example geoip_query -- GeoLite2-Country.mmdb 8.8.8.8
-cargo run --example combined_query -- combined_database.mmdb
+cargo run --example combined_query -- combined_database.mxy
 
-# Pattern matching demo
-cargo run --example glob_demo
+# Pattern extraction demos
+cargo run --example extractor_demo
+cargo run --example hash_demo
 
 # C API example
-make -C examples
-./examples/enhanced_api_test
+cargo build --release -p matchy
+gcc -o /tmp/enhanced_api_test crates/matchy/examples/enhanced_api_test.c \
+    -Icrates/matchy/include -Ltarget/release -lmatchy -lpthread -ldl -lm
+LD_LIBRARY_PATH=target/release /tmp/enhanced_api_test
 
 # Performance validation
-cargo run --release --example production_test
+cargo run --release --example parallel_processing
 
 # Benchmarking (built-in tool)
 cargo build --release
@@ -206,8 +211,8 @@ cargo test --test integration_tests
 
 2. **Query it for threats:**
    ```bash
-   cargo run --example combined_query -- combined_database.mmdb evil.com
-   cargo run --example combined_query -- combined_database.mmdb 192.168.1.100
+   cargo run --example combined_query -- combined_database.mxy evil.com
+   cargo run --example combined_query -- combined_database.mxy 192.168.1.100
    ```
 
 3. **Import MISP threat intelligence:**

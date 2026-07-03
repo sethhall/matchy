@@ -1,6 +1,6 @@
 // Example demonstrating the enhanced C API with structured data access
 
-#include "../include/matchy.h"
+#include "matchy/matchy.h"
 #include <stdio.h>
 #include <stdlib.h>
 

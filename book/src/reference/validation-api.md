@@ -15,7 +15,7 @@ let report = validate_database(Path::new("database.mxy"), ValidationLevel::Stric
 if report.is_valid() {
     println!("✓ Database is safe to use");
     // Safe to open and use
-    let db = Database::open("database.mxy")?;
+    let db = Database::from("database.mxy").open()?;
 } else {
     eprintln!("✗ Validation failed:");
     for error in &report.errors {
@@ -66,7 +66,6 @@ println!("  {}", report.stats.summary());
 pub enum ValidationLevel {
     Standard,  // Basic safety checks
     Strict,    // Deep analysis (default)
-    Audit,     // Security audit mode
 }
 ```
 
@@ -95,24 +94,6 @@ Comprehensive validation including:
 let report = validate_database(path, ValidationLevel::Strict)?;
 ```
 
-### Audit
-
-All strict checks plus security analysis:
-- Track unsafe code locations
-- Document trust assumptions
-- Report validation bypasses
-
-```rust
-let report = validate_database(path, ValidationLevel::Audit)?;
-
-if report.is_valid() {
-    println!("Unsafe code locations: {}", 
-        report.stats.unsafe_code_locations.len());
-    println!("Trust assumptions: {}", 
-        report.stats.trust_assumptions.len());
-}
-```
-
 ## ValidationReport
 
 ```rust
@@ -137,7 +118,7 @@ Returns `true` if there are no errors (warnings are allowed).
 ```rust
 if report.is_valid() {
     // Safe to use
-    let db = Database::open(path)?;
+    let db = Database::from(path).open()?;
 }
 ```
 
@@ -193,10 +174,11 @@ pub struct DatabaseStats {
     pub string_data_size: u32,
     pub has_data_section: bool,
     pub has_ac_literal_mapping: bool,
-    pub max_ac_depth: u8,
     pub state_encoding_distribution: [u32; 4],
-    pub unsafe_code_locations: Vec<UnsafeCodeLocation>,
-    pub trust_assumptions: Vec<TrustAssumption>,
+    pub database_type: Option<String>,
+    pub schema_validated: bool,
+    pub schema_entries_checked: u32,
+    pub schema_validation_failures: u32,
 }
 ```
 
@@ -212,7 +194,7 @@ Returns a human-readable summary:
 
 ```rust
 println!("{}", report.stats.summary());
-// Output: "Version: v2, Nodes: 1234, Patterns: 56 (20 literal, 36 glob), IPs: 100, Size: 128 KB"
+// Output: "Version: v5, Nodes: 1234, Patterns: 56 (20 literal, 36 glob), IPs: 100, Size: 128 KB"
 ```
 
 ### Example Usage
@@ -227,7 +209,10 @@ println!("  Patterns:     {} ({} literal, {} glob)",
     stats.pattern_count, stats.literal_count, stats.glob_count);
 println!("  IP entries:   {}", stats.ip_entry_count);
 println!("  AC nodes:     {}", stats.ac_node_count);
-println!("  Max depth:    {}", stats.max_ac_depth);
+if let Some(database_type) = &stats.database_type {
+    println!("  Type:         {}", database_type);
+}
+println!("  Schema check: {}", stats.schema_validated);
 ```
 
 ## Complete Example
@@ -262,7 +247,7 @@ fn load_safe_database(path: &Path) -> Result<Database, Box<dyn std::error::Error
     println!("  {}", report.stats.summary());
     
     // Safe to open
-    Ok(Database::open(path)?)
+    Ok(Database::from(path).open()?)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -282,9 +267,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Pattern: Validate Once, Use Many Times
 
 ```rust
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
-use parking_lot::RwLock;
 
 struct DatabaseCache {
     databases: Arc<RwLock<HashMap<String, Arc<Database>>>>,
@@ -294,7 +278,7 @@ impl DatabaseCache {
     fn load(&self, path: &str) -> Result<Arc<Database>, Box<dyn std::error::Error>> {
         // Check cache first
         {
-            let cache = self.databases.read();
+            let cache = self.databases.read().unwrap();
             if let Some(db) = cache.get(path) {
                 return Ok(Arc::clone(db));
             }
@@ -314,9 +298,9 @@ impl DatabaseCache {
         }
         
         // Load and cache
-        let db = Arc::new(Database::open(path)?);
+        let db = Arc::new(Database::from(path).open()?);
         
-        let mut cache = self.databases.write();
+        let mut cache = self.databases.write().unwrap();
         cache.insert(path.to_string(), Arc::clone(&db));
         
         Ok(db)
@@ -358,7 +342,7 @@ let rx = validate_database_async("large.mxy".to_string())?;
 // Check result when ready
 if let Ok(report) = rx.recv_timeout(Duration::from_secs(5)) {
     if report.is_valid() {
-        let db = Database::open("large.mxy")?;
+        let db = Database::from("large.mxy").open()?;
     }
 }
 ```
@@ -368,7 +352,7 @@ if let Ok(report) = rx.recv_timeout(Duration::from_secs(5)) {
 Validation errors are separate from database errors:
 
 ```rust
-use matchy::{MatchyError, validation::ValidationLevel};
+use matchy::{MatchyError, validation::{validate_database, ValidationLevel}};
 
 match validate_database(path, ValidationLevel::Strict) {
     Ok(report) if report.is_valid() => {
@@ -382,11 +366,11 @@ match validate_database(path, ValidationLevel::Strict) {
             eprintln!("  - {}", error);
         }
     }
-    Err(MatchyError::FileNotFound { path }) => {
-        eprintln!("Database file not found: {}", path);
-    }
-    Err(MatchyError::IoError(e)) => {
+    Err(MatchyError::Io(e)) => {
         eprintln!("I/O error during validation: {}", e);
+    }
+    Err(MatchyError::Format(e)) => {
+        eprintln!("Format error during validation: {}", e);
     }
     Err(e) => {
         eprintln!("Validation error: {}", e);
@@ -417,7 +401,7 @@ fn load_user_database(user_file: &Path) -> Result<Database, Box<dyn std::error::
         return Err("Untrusted database failed validation".into());
     }
     
-    Database::open(user_file).map_err(Into::into)
+    Database::from(user_file).open().map_err(Into::into)
 }
 ```
 
@@ -439,36 +423,6 @@ fn validate_with_size_limit(
     }
     
     validate_database(path, ValidationLevel::Strict).map_err(Into::into)
-}
-```
-
-### Use Audit Mode for Security Review
-
-```rust
-fn security_audit(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let report = validate_database(path, ValidationLevel::Audit)?;
-    
-    println!("Security Audit Report:");
-    println!("  Valid: {}", report.is_valid());
-    println!("  Unsafe code locations: {}", 
-        report.stats.unsafe_code_locations.len());
-    
-    for location in &report.stats.unsafe_code_locations {
-        println!("    • {} ({:?})", 
-            location.location, location.operation);
-        println!("      {}", location.justification);
-    }
-    
-    println!("  Trust assumptions: {}", 
-        report.stats.trust_assumptions.len());
-    
-    for assumption in &report.stats.trust_assumptions {
-        println!("    • {}", assumption.context);
-        println!("      Bypasses: {}", assumption.bypassed_check);
-        println!("      Risk: {}", assumption.risk);
-    }
-    
-    Ok(())
 }
 ```
 

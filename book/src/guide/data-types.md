@@ -21,9 +21,6 @@ Ordered lists of values (can contain mixed types).
 ### Maps
 Key-value pairs (like JSON objects or hash maps).
 
-### Null
-Explicit null/missing value.
-
 ## Tool-Specific Representations
 
 How you specify data types depends on your tool:
@@ -52,7 +49,8 @@ See tool-specific docs for complete details:
 
 ## Nested Data
 
-Maps and arrays can be nested to arbitrary depth:
+Maps and arrays can be nested. Validation rejects data deeper than 64 total
+levels:
 
 ```json
 {

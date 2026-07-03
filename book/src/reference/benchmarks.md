@@ -250,8 +250,11 @@ grep "QPS" results.txt
 # Build your own database
 matchy build custom.csv --input-format csv --output test.mxy
 
-# Benchmark it
-time matchy query test.mxy < queries.txt
+# Time representative single queries
+time matchy query test.mxy example.com
+
+# Or process representative logs with stats
+matchy match test.mxy access.log --stats
 ```
 
 ## Performance Tuning

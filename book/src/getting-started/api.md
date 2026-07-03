@@ -30,7 +30,7 @@ let db_bytes = builder.build()?;
 std::fs::write("threats.mxy", &db_bytes)?;
 
 // Query database
-let db = Database::open("threats.mxy")?;
+let db = Database::from("threats.mxy").open()?;
 if let Some(result) = db.lookup("192.0.2.1")? {
     println!("Found: {:?}", result);
 }
@@ -39,7 +39,7 @@ if let Some(result) = db.lookup("192.0.2.1")? {
 ## Example (C)
 
 ```c
-#include "matchy.h"
+#include <matchy/matchy.h>
 
 // Build database
 matchy_builder_t *builder = matchy_builder_new();
@@ -52,10 +52,12 @@ matchy_t *db = matchy_open("threats.mxy");
 matchy_result_t result = matchy_query(db, "192.0.2.1");
 if (result.found) {
     char *json = matchy_result_to_json(&result);
-    printf("Found: %s\n", json);
-    matchy_free_string(json);
-    matchy_free_result(&result);
+    if (json != NULL) {
+        printf("Found: %s\n", json);
+        matchy_free_string(json);
+    }
 }
+matchy_free_result(&result);
 matchy_close(db);
 ```
 

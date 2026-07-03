@@ -62,11 +62,11 @@ Open the database and query it:
 ```rust
 use matchy::{Database, QueryResult};
 
-let db = Database::open("example.mxy")?;
+let db = Database::from("example.mxy").open()?;
 
 // Query an IP address
 match db.lookup("192.0.2.1")? {
-    Some(QueryResult::Ip { data, prefix_len }) => {
+    Some(QueryResult::Ip { data, prefix_len, .. }) => {
         println!("Found IP: {:?}", data);
     }
     _ => println!("Not found"),
@@ -79,7 +79,7 @@ The database is memory-mapped, so it loads in under 1 millisecond regardless of 
 
 ```rust
 match db.lookup("phishing.evil.com")? {
-    Some(QueryResult::Pattern { pattern_ids, data }) => {
+    Some(QueryResult::Pattern { pattern_ids, data, .. }) => {
         println!("Matched pattern: *.evil.com");
         println!("Data: {:?}", data[0]);
     }
@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write("example.mxy", &database_bytes)?;
     
     // Open and query
-    let db = Database::open("example.mxy")?;
+    let db = Database::from("example.mxy").open()?;
     
     if let Some(result) = db.lookup("192.0.2.1")? {
         println!("Found: {:?}", result);

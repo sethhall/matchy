@@ -75,7 +75,7 @@ fn test_ip_lookup_finds_exact_match() {
 /// # Examples
 ///
 /// ```
-/// let db = Database::open("db.mxy")?;
+/// let db = Database::from("db.mxy").open()?;
 /// let result = db.lookup("1.2.3.4")?;
 /// ```
 pub fn lookup(&self, query: &str) -> Result<Option<QueryResult>> {

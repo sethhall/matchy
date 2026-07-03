@@ -67,9 +67,7 @@ key,threat_level,category
 *.evil.com,high,phishing
 
 $ matchy build threats.csv --input-format csv --output threats.mxy
-Building database from threats.csv
-  Added 3 entries
-Successfully wrote threats.mxy
+✓ Database built: threats.mxy
 ```
 
 ### Build from JSON

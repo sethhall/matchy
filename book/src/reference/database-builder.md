@@ -58,11 +58,11 @@ let builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
 ### Method Signature
 
 ```rust
-pub fn add_entry<S: AsRef<str>>(
+pub fn add_entry(
     &mut self,
-    key: S,
+    key: &str,
     data: HashMap<String, DataValue>
-) -> Result<(), MatchyError>
+) -> Result<(), FormatError>
 ```
 
 ### Examples
@@ -100,7 +100,7 @@ builder.add_entry("example.com", data)?;
 ### Method Signature
 
 ```rust
-pub fn build(self) -> Result<Vec<u8>, MatchyError>
+pub fn build(self) -> Result<Vec<u8>, FormatError>
 ```
 
 ### Usage
@@ -152,17 +152,17 @@ The builder validates entries when added:
 
 **Invalid IP addresses:**
 ```rust
-builder.add_entry("256.256.256.256", data)?; // Error: InvalidEntry
+builder.add_entry("256.256.256.256", data)?; // Error: FormatError
 ```
 
 **Invalid CIDR:**
 ```rust
-builder.add_entry("10.0.0.0/33", data)?; // Error: InvalidEntry (IPv4 max is /32)
+builder.add_entry("10.0.0.0/33", data)?; // Error: FormatError (IPv4 max is /32)
 ```
 
 **Invalid pattern:**
 ```rust
-builder.add_entry("[unclosed", data)?; // Error: PatternError
+builder.add_entry("[unclosed", data)?; // Error: FormatError
 ```
 
 ### Schema Validation
@@ -243,7 +243,8 @@ let mut builder = DatabaseBuilder::new(MatchMode::CaseInsensitive);
 
 for entry in large_dataset {
     let mut data = HashMap::new();
-    data.insert("value".to_string(), DataValue::from_json(&entry.data)?);
+    let value: DataValue = serde_json::from_value(entry.data.clone())?;
+    data.insert("value".to_string(), value);
     builder.add_entry(&entry.key, data)?;
 }
 
@@ -257,13 +258,7 @@ Performance: ~100,000 IP/string entries per second, ~10,000 patterns per second.
 ```rust
 match builder.add_entry(key, data) {
     Ok(()) => println!("Added entry"),
-    Err(MatchyError::InvalidEntry { key, reason }) => {
-        eprintln!("Invalid entry {}: {}", key, reason);
-    }
-    Err(MatchyError::PatternError { pattern, reason }) => {
-        eprintln!("Invalid pattern {}: {}", pattern, reason);
-    }
-    Err(e) => eprintln!("Other error: {}", e),
+    Err(err) => eprintln!("Invalid entry or format: {}", err),
 }
 ```
 

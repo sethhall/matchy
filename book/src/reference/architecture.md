@@ -296,7 +296,7 @@ Unsafe code limited to C FFI:
 ```rust
 // Validation at boundary
 if ptr.is_null() {
-    return ERROR_INVALID_PARAM;
+    return MATCHY_ERROR_INVALID_PARAM;
 }
 
 // Panic catching

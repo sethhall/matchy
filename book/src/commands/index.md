@@ -11,4 +11,4 @@ This section documents the Matchy command-line interface.
 * [matchy extract](matchy-extract.md) --- Extract patterns (domains, IPs, emails) from log files
 * [matchy inspect](matchy-inspect.md) --- Inspect database contents and structure
 * [matchy validate](matchy-validate.md) --- Validate database safety and correctness
-* [matchy bench](matchy-bench.md) --- Benchmark database query performance
+* [matchy bench](matchy-bench.md) --- Benchmark synthetic build, load, and query performance

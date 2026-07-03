@@ -786,7 +786,7 @@ int32_t matchy_builder_save(struct matchy_builder_t *builder, const char *filena
  # Example
  ```c
  uint8_t *buffer = NULL;
- size_t size = 0;
+ uintptr_t size = 0;
  if (matchy_builder_build(builder, &buffer, &size) == MATCHY_SUCCESS) {
      // Use buffer...
      free(buffer);
@@ -864,8 +864,8 @@ void matchy_init_open_options(struct matchy_open_options_t *options);
  }
 
  // Queries automatically use latest database version
- matchy_result_t result;
- matchy_lookup(db, "1.2.3.4", &result);
+ matchy_result_t result = matchy_query(db, "1.2.3.4");
+ matchy_free_result(&result);
  ```
  */
 struct matchy_t *matchy_open_with_options(const char *filename, const struct matchy_open_options_t *options);
@@ -915,7 +915,8 @@ struct matchy_t *matchy_open(const char *filename);
  * NULL on failure
 
  # Safety
- * `buffer` must point to a valid readable buffer of `size` bytes
+ * `buffer` must point to a valid readable buffer of `size` bytes for the
+   duration of this call. The database copies the buffer before returning.
  */
 struct matchy_t *matchy_open_buffer(const uint8_t *buffer, uintptr_t size);
 
@@ -1023,8 +1024,10 @@ void matchy_close(struct matchy_t *db);
  if (result.found) {
      // Option 1: Get as JSON
      char *json = matchy_result_to_json(&result);
-     printf("Found: %s\n", json);
-     matchy_free_string(json);
+     if (json != NULL) {
+         printf("Found: %s\n", json);
+         matchy_free_string(json);
+     }
 
      // Option 2: Access structured data
      matchy_entry_s entry;

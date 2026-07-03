@@ -22,57 +22,77 @@ Path to the database file to query.
 
 The string to search for. Can be an IP address, domain, or any string.
 
+## Options
+
+### `-q, --quiet`
+
+Suppress output and use only the exit status.
+
 ## Examples
 
 ### Query an IP Address
 
 ```console
 $ matchy query threats.mxy 192.0.2.1
-Found: IP address 192.0.2.1/32
-  threat_level: "high"
-  category: "malware"
+[
+  {
+    "category": "malware",
+    "cidr": "192.0.2.1/32",
+    "prefix_len": 32,
+    "threat_level": "high"
+  }
+]
 ```
 
 ### Query a CIDR Range
 
 ```console
 $ matchy query threats.mxy 10.5.5.5
-Found: IP address 10.5.5.5 (matched 10.0.0.0/8)
-  threat_level: "medium"
-  category: "internal"
+[
+  {
+    "category": "internal",
+    "cidr": "10.0.0.0/8",
+    "prefix_len": 8,
+    "threat_level": "medium"
+  }
+]
 ```
 
 ### Query a Pattern
 
 ```console
 $ matchy query threats.mxy phishing.evil.com
-Found: Pattern match
-  Matched patterns: *.evil.com
-  threat_level: "high"
-  category: "phishing"
+[
+  {
+    "category": "phishing",
+    "threat_level": "high"
+  }
+]
 ```
 
 ### Query an Exact String
 
 ```console
 $ matchy query threats.mxy evil.com
-Found: Exact string match
-  threat_level: "critical"
+[
+  {
+    "category": "domain",
+    "threat_level": "critical"
+  }
+]
 ```
 
 ### No Match
 
 ```console
 $ matchy query threats.mxy safe.com
-Not found
+[]
 ```
 
 ## Output Format
 
-The output shows:
-- Match type (IP, CIDR, pattern, exact string)
-- Matched entry details
-- Associated data fields
+The output is a JSON array of matching data objects. IP matches include the
+matched `cidr` and `prefix_len` fields in addition to the entry data.
 
 ## Exit Status
 

@@ -28,8 +28,8 @@ Provides drop-in replacements for `libmaxminddb` functions.
 
 | libmaxminddb | Matchy Equivalent |
 |--------------|-------------------|
-| `MMDB_lookup_string()` | `matchy_lookup()` |
-| `MMDB_lookup_sockaddr()` | `matchy_lookup_ip()` |
+| `MMDB_lookup_string()` | `matchy_query()` |
+| `MMDB_lookup_sockaddr()` | `matchy_query()` with a string form of the address |
 
 ### Data Access
 
@@ -49,11 +49,11 @@ Matchy extends MMDB with:
 
 ### 2. Error Handling
 
-Matchy uses integer error codes:
+Most Matchy C helpers use integer error codes. Queries return a result struct:
 ```c
-int32_t err = matchy_lookup(db, "192.0.2.1", &result);
-if (err != MATCHY_SUCCESS) {
-    // Handle error
+matchy_result_t result = matchy_query(db, "192.0.2.1");
+if (result.found) {
+    // Use result
 }
 ```
 
@@ -66,14 +66,13 @@ MMDB_lookup_result result = MMDB_lookup_string(mmdb, "192.0.2.1",
 
 ### 3. Result Lifetime
 
-Matchy requires explicit result freeing:
+Matchy query results are zero-allocation structs:
 ```c
-matchy_result_t *result = NULL;
-matchy_lookup(db, query, &result);
-if (result) {
+matchy_result_t result = matchy_query(db, query);
+if (result.found) {
     // Use result
-    matchy_free_result(result);  // Required!
 }
+matchy_free_result(&result);  // No-op today; kept for ABI compatibility
 ```
 
 ### 4. Data Types
@@ -115,11 +114,10 @@ Matchy uses MMDB-compatible data types but with extended support:
                                                    &gai_error, &mmdb_error);
    
    // New
-   matchy_result_t *result = NULL;
-   int32_t err = matchy_lookup(db, ip, &result);
-   if (err == MATCHY_SUCCESS && result) {
+   matchy_result_t result = matchy_query(db, ip);
+   if (result.found) {
        // Use result
-       matchy_free_result(result);
+       matchy_free_result(&result);
    }
    ```
 

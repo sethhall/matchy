@@ -18,8 +18,10 @@ ln -sf $(pwd)/target/release/libmatchy.dylib /usr/local/lib/
 # Link library (Linux)
 ln -sf $(pwd)/target/release/libmatchy.so /usr/local/lib/
 
-# Link header
-ln -sf $(pwd)/include/matchy.h /usr/local/include/
+# Link headers
+mkdir -p /usr/local/include/matchy
+ln -sf $(pwd)/crates/matchy/include/matchy/matchy.h /usr/local/include/matchy/matchy.h
+ln -sf $(pwd)/crates/matchy/include/matchy/maxminddb.h /usr/local/include/matchy/maxminddb.h
 ```
 
 ## Cleanup
@@ -27,7 +29,8 @@ ln -sf $(pwd)/include/matchy.h /usr/local/include/
 ```bash
 rm ~/.cargo/bin/matchy
 rm /usr/local/lib/libmatchy.*
-rm /usr/local/include/matchy.h
+rm /usr/local/include/matchy/matchy.h
+rm /usr/local/include/matchy/maxminddb.h
 ```
 
 ## See Also

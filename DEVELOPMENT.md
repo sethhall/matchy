@@ -307,7 +307,9 @@ Two C APIs provided (`matchy/src/c_api/`):
 1. **Native API** (`matchy_*` functions) - Full Matchy functionality
 2. **MaxMind-compatible API** (`MMDB_*` functions) - Drop-in replacement for libmaxminddb
 
-Both use opaque handles and return error codes. All string data passed as `const char*` with explicit lengths. No C++ exceptions across FFI boundary.
+Both use opaque handles and C-compatible return values. String inputs are
+null-terminated `const char*` unless a function explicitly takes a byte length.
+No C++ exceptions cross the FFI boundary.
 
 **Panic safety**: All `extern "C"` functions wrapped in `catch_unwind()`. Panics convert to error codes rather than aborting.
 
@@ -319,7 +321,7 @@ The `matchy-extractor` crate finds structured data in unstructured text: IPs, do
 - **IPv4/IPv6**: Standard address formats
 - **Domains**: Validated against Public Suffix List (PSL)
 - **Emails**: RFC-like validation with PSL TLD checks
-- **File hashes**: MD5, SHA1, SHA256, SHA384 (hex, length-based detection)
+- **File hashes**: MD5, SHA1, SHA256, SHA384, SHA512 (hex, length-based detection)
 - **Crypto addresses**: Bitcoin (Base58Check + Bech32), Ethereum (EIP-55), Monero (Keccak256)
 
 **Performance**: ~450 MB/s single-threaded. Uses SIMD via `memchr` for anchor detection (dots, @, 0x prefix). Expands boundaries, validates checksums where applicable.
@@ -328,7 +330,7 @@ The `matchy-extractor` crate finds structured data in unstructured text: IPs, do
 ```rust
 let extractor = Extractor::new()?;
 for item in extractor.extract_from_line(log_line.as_bytes()) {
-    // item.text, item.match_type
+    println!("{}: {}", item.item.type_name(), item.as_str(log_line.as_bytes()));
 }
 ```
 
@@ -339,7 +341,7 @@ The `matchy/src/processing/` module provides infrastructure for scanning files a
 **Key types**:
 - `LineFileReader` - Streams file in chunks, handles gzip automatically
 - `Worker` - Combines extractor + database(s), processes batches
-- `LineMatch` - Match result with file/line context
+- `MatchResult` - Match result with source and byte-offset context
 - `WorkerStats` - Accumulates processing statistics
 
 **Multi-database support**: One `Worker` can query multiple databases. Useful for cross-referencing threat feeds and allowlists.
@@ -356,9 +358,9 @@ for batch in reader.batches() {
     for match_item in worker.process_lines(&batch?)? {
         println!("{}:{} - {} in {}",
             match_item.source.display(),
-            match_item.line_number,
-            match_item.match_result.matched_text,
-            match_item.match_result.database_id);
+            match_item.byte_offset,
+            match_item.matched_text,
+            match_item.database_id);
     }
 }
 ```
@@ -367,10 +369,9 @@ for batch in reader.batches() {
 
 For untrusted databases, use validation before loading. Validation logic is distributed across crates, with each crate validating its own structures.
 
-**Three levels**:
-1. **Basic** (~1ms): Magic bytes, version, critical offsets
-2. **Standard** (~5ms): All offsets, UTF-8, structure integrity
-3. **Strict** (~10ms): Graph analysis, cycle detection, efficiency warnings
+**Two levels**:
+1. **Standard**: All offsets, UTF-8, and structure integrity
+2. **Strict**: Standard checks plus deeper graph analysis, cycle detection, and efficiency warnings
 
 **What's checked**:
 - Binary format integrity

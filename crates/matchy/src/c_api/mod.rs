@@ -1,8 +1,9 @@
 //! C API for Matchy
 //!
 //! Provides stable C FFI bindings for building and querying databases from C/C++
-//! and other languages. The API uses opaque handles and integer error codes for
-//! maximum compatibility across language boundaries.
+//! and other languages. The API uses opaque handles plus C-compatible result
+//! structs or integer error codes for maximum compatibility across language
+//! boundaries.
 //!
 //! # API Modules
 //!
@@ -15,7 +16,7 @@
 //! - Null pointer checks on all inputs
 //! - Panic catching at FFI boundaries  
 //! - Opaque handles for resource management
-//! - Integer error codes (no exceptions)
+//! - C-compatible result values or integer error codes (no exceptions)
 //! - Memory ownership clearly documented
 //!
 //! # Basic Usage Pattern
@@ -64,8 +65,10 @@
 //! if (result.found) {
 //!     // Option A: Get data as JSON string
 //!     char *json = matchy_result_to_json(&result);
-//!     printf("Found: %s\n", json);
-//!     matchy_free_string(json);
+//!     if (json != NULL) {
+//!         printf("Found: %s\n", json);
+//!         matchy_free_string(json);
+//!     }
 //!     
 //!     // Option B: Access structured data (MMDB-compatible API)
 //!     matchy_entry_s entry;
@@ -142,7 +145,7 @@
 //!
 //! # Error Handling
 //!
-//! All functions return error codes. Common values:
+//! Functions that report integer status use these common error codes:
 //! - `MATCHY_SUCCESS` (0) - Success
 //! - `MATCHY_ERROR_INVALID_PARAM` - Null pointer or invalid argument  
 //! - `MATCHY_ERROR_FILE_NOT_FOUND` - Database file doesn't exist

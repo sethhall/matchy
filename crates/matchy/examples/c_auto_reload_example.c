@@ -6,14 +6,14 @@
  * pick up threat intelligence updates without restarting.
  *
  * Compile:
- *   gcc -o auto_reload c_auto_reload_example.c \
- *       -I../include/matchy \
- *       -L../target/release \
+ *   gcc -o /tmp/auto_reload crates/matchy/examples/c_auto_reload_example.c \
+ *       -Icrates/matchy/include \
+ *       -Ltarget/release \
  *       -lmatchy \
  *       -lpthread -ldl -lm
  *
  * Run:
- *   ./auto_reload threats.mxy
+ *   LD_LIBRARY_PATH=target/release /tmp/auto_reload threats.mxy
  *
  * In another terminal, update the database:
  *   cp new_threats.mxy threats.mxy
@@ -25,7 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include "matchy.h"
+#include "matchy/matchy.h"
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
@@ -69,19 +69,16 @@ int main(int argc, char *argv[]) {
         printf("\n[Iteration %d]\n", iteration);
 
         for (int i = 0; test_queries[i] != NULL; i++) {
-            matchy_result_t result;
             const char *query = test_queries[i];
+            matchy_result_t result = matchy_query(db, query);
 
-            if (matchy_lookup(db, query, &result) == MATCHY_SUCCESS) {
-                if (result.found) {
-                    printf("  ✓ %s: MATCH (prefix_len=%u)\n", 
-                           query, result.prefix_len);
-                } else {
-                    printf("  ✗ %s: not found\n", query);
-                }
+            if (result.found) {
+                printf("  ✓ %s: MATCH (prefix_len=%u)\n",
+                       query, result.prefix_len);
             } else {
-                printf("  ! %s: lookup error\n", query);
+                printf("  ✗ %s: not found\n", query);
             }
+            matchy_free_result(&result);
         }
 
         // Get statistics
@@ -105,6 +102,6 @@ int main(int argc, char *argv[]) {
     }
 
     // Cleanup (never reached in this example, but good practice)
-    matchy_free(db);
+    matchy_close(db);
     return 0;
 }

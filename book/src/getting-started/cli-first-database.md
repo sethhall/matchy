@@ -102,11 +102,10 @@ Performance estimate:
 
 ## Benchmark performance
 
-Test query performance with `matchy bench`:
+Run a synthetic combined benchmark with `matchy bench`:
 
 ```console
-$ matchy bench threats.mxy
-Running benchmarks on threats.mxy...
+$ matchy bench combined
 
 IP lookups:     7,234,891 queries/sec (138ns avg)
 Pattern lookups: 2,156,892 queries/sec (463ns avg)

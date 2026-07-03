@@ -5,11 +5,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: {} <combined-database.pgb> [query]", args[0]);
+        eprintln!("Usage: {} <combined-database.mxy> [query]", args[0]);
         eprintln!("\nExample:");
-        eprintln!("  {} GeoLite2-Country-Threats.pgb", args[0]);
-        eprintln!("  {} GeoLite2-Country-Threats.pgb evil.com", args[0]);
-        eprintln!("  {} GeoLite2-Country-Threats.pgb 8.8.8.8", args[0]);
+        eprintln!("  {} combined_database.mxy", args[0]);
+        eprintln!("  {} combined_database.mxy evil.com", args[0]);
+        eprintln!("  {} combined_database.mxy 8.8.8.8", args[0]);
         std::process::exit(1);
     }
 

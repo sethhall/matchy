@@ -218,7 +218,7 @@ The C API follows strict safety rules:
 **1. Null checks on every pointer:**
 ```rust
 if db.is_null() || query.is_null() {
-    return MATCHY_ERROR_INVALID_PARAM;
+    return empty_matchy_result();
 }
 ```
 
@@ -227,7 +227,7 @@ if db.is_null() || query.is_null() {
 let result = std::panic::catch_unwind(|| {
     // ... actual work ...
 });
-result.unwrap_or(MATCHY_ERROR_UNKNOWN)
+result.unwrap_or_else(|_| empty_matchy_result())
 ```
 
 **3. Opaque handles for ownership:**
@@ -236,7 +236,7 @@ result.unwrap_or(MATCHY_ERROR_UNKNOWN)
 pub struct matchy_t { _private: [u8; 0] }
 ```
 
-Panics never cross FFI boundaries - they're caught and converted to error codes.
+Panics never cross FFI boundaries - they're caught and converted to documented error codes or sentinel return values.
 
 ## Design Trade-offs
 

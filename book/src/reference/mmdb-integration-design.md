@@ -96,7 +96,7 @@ This means:
 Matchy is a drop-in replacement for libmaxminddb:
 ```rust
 // Works with any standard MMDB file
-let db = Database::open("GeoLite2-City.mmdb")?;
+let db = Database::from("GeoLite2-City.mmdb").open()?;
 let result = db.lookup_ip("8.8.8.8")?;
 ```
 
@@ -162,7 +162,7 @@ flowchart TD
 Regardless of format, the API remains consistent:
 ```rust
 // Single API works for all database types
-let db = Database::open("database.mxy")?;
+let db = Database::from("database.mxy").open()?;
 
 // Query based on input type
 let ip_result = db.lookup("192.168.1.1")?;      // IP lookup

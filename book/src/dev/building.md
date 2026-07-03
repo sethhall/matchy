@@ -71,7 +71,7 @@ The C header is auto-generated on release builds:
 
 ```bash
 cargo build --release
-# Generates: include/matchy.h
+# Generates: crates/matchy/include/matchy/matchy.h
 ```
 
 ## Cross-Compilation

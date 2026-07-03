@@ -20,8 +20,8 @@ The `matchy extract` command scans log files or streams to automatically extract
 **Key features:**
 - SIMD-accelerated extraction (200-500 MB/sec typical throughput)
 - Multiple output formats: JSON, CSV, plain text
-- Configurable extraction types
-- Unicode/IDN domain support with automatic punycode conversion
+- Configurable IP, domain, and email extraction
+- Unicode/IDN domain extraction with the matched text preserved in output
 - Word boundary detection for accurate extraction
 - Deduplication with `--unique` flag
 
@@ -63,23 +63,22 @@ example.com
 
 ### `--types <TYPES>`
 
-Comma-separated extraction types (default: `all`):
+Comma-separated extraction types. The current CLI accepts:
 - `ipv4` or `ip4` - IPv4 addresses only
 - `ipv6` or `ip6` - IPv6 addresses only
 - `ip` - Both IPv4 and IPv6
 - `domain` or `domains` - Domain names
 - `email` or `emails` - Email addresses
-- `hash` or `hashes` - File hashes (MD5, SHA1, SHA256, SHA384)
-- `bitcoin` or `btc` - Bitcoin addresses (all formats)
-- `ethereum` or `eth` - Ethereum addresses
-- `monero` or `xmr` - Monero addresses
-- `crypto` - All cryptocurrency addresses
-- `all` - Extract everything (default)
+- `all` - IPv4, IPv6, domains, and emails
+
+Hash and cryptocurrency extractors are enabled by the underlying extractor and
+may appear in output, but the current CLI `--types` parser does not accept
+`hash`, `bitcoin`, `ethereum`, `monero`, or `crypto` as selectable values.
 
 ```console
 $ matchy extract access.log --types ipv4,domain
-$ matchy extract access.log --types ip        # IPv4 + IPv6
-$ matchy extract access.log --types all       # Everything
+$ matchy extract access.log --types ip        # IPv4 + IPv6, plus always-enabled hash/crypto extraction
+$ matchy extract access.log --types all       # IPv4 + IPv6 + domains + emails
 ```
 
 ### `--min-labels <NUMBER>`
@@ -281,9 +280,10 @@ Extracts domain names with proper TLD validation:
 - `subdomain.example.org`
 - `multi.level.subdomain.co.uk`
 
-**Unicode/IDN support:** International domain names are automatically converted to punycode:
+**Unicode/IDN support:** International domain names are extracted and emitted as
+the matched text:
 - Input: `münchen.de`
-- Output: `xn--mnchen-3ya.de`
+- Output: `münchen.de`
 
 **TLD validation:** Only domains with valid top-level domains are extracted (uses embedded TLD automaton with Public Suffix List data).
 
@@ -301,6 +301,7 @@ Extracts common cryptographic hashes:
 - **SHA1**: 40 hex characters (e.g., `2fd4e1c67a2d28fced849ee1bb76e7391b93eb12`)
 - **SHA256**: 64 hex characters
 - **SHA384**: 96 hex characters
+- **SHA512**: 128 hex characters
 
 Useful for malware analysis and threat intelligence feeds.
 

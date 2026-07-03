@@ -98,11 +98,11 @@ println!("✅ Database built: {} bytes", database_bytes.len());
 use matchy::{Database, QueryResult};
 
 // Open the database (memory-mapped, loads in <1ms)
-let db = Database::open("threats.mxy")?;
+let db = Database::from("threats.mxy").open()?;
 
 // Query IP address
 match db.lookup("192.0.2.1")? {
-    Some(QueryResult::Ip { data, prefix_len }) => {
+    Some(QueryResult::Ip { data, prefix_len, .. }) => {
         println!("Found IP: {:?}", data);
         println!("Matched CIDR: /{}", prefix_len);
     }
@@ -111,7 +111,7 @@ match db.lookup("192.0.2.1")? {
 
 // Query domain (matches pattern *.evil.com)
 match db.lookup("phishing.evil.com")? {
-    Some(QueryResult::Pattern { pattern_ids, data }) => {
+    Some(QueryResult::Pattern { pattern_ids, data, .. }) => {
         println!("Matched {} patterns", pattern_ids.len());
         for (i, threat_data) in data.iter().enumerate() {
             if let Some(d) = threat_data {

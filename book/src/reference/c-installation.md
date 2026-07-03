@@ -6,12 +6,13 @@ Installing Matchy for C/C++ development.
 
 ```bash
 # Download release
-wget https://github.com/user/matchy/releases/latest/libmatchy.tar.gz
+wget https://github.com/matchylabs/matchy/releases/latest/libmatchy.tar.gz
 tar xzf libmatchy.tar.gz
 
 # Install
 sudo cp lib/libmatchy.* /usr/local/lib/
-sudo cp include/matchy.h /usr/local/include/
+sudo mkdir -p /usr/local/include/matchy
+sudo cp include/matchy/*.h /usr/local/include/matchy/
 sudo ldconfig  # Linux only
 ```
 
@@ -19,13 +20,14 @@ sudo ldconfig  # Linux only
 
 ```bash
 # Build
-git clone https://github.com/user/matchy.git
+git clone https://github.com/matchylabs/matchy.git
 cd matchy
 cargo build --release
 
 # Install
 sudo cp target/release/libmatchy.* /usr/local/lib/
-sudo cp include/matchy.h /usr/local/include/
+sudo mkdir -p /usr/local/include/matchy
+sudo cp crates/matchy/include/matchy/*.h /usr/local/include/matchy/
 sudo ldconfig  # Linux only
 ```
 
@@ -41,7 +43,7 @@ includedir=${prefix}/include
 
 Name: matchy
 Description: Matchy database library
-Version: 0.1.0
+Version: 2.0.1
 Libs: -L${libdir} -lmatchy
 Cflags: -I${includedir}
 ```

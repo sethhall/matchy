@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write("threats.mxy", &db_bytes)?;
     
     // Query
-    let db = Database::open("threats.mxy")?;
+    let db = Database::from("threats.mxy").open()?;
     
     if let Some(QueryResult::Ip { data, .. }) = db.lookup("198.51.100.1")? {
         println!("Threat found: {:?}", data);
@@ -58,11 +58,11 @@ use matchy::{Database, QueryResult};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open a standard MaxMind GeoLite2 database
-    let db = Database::open("GeoLite2-City.mmdb")?;
+    let db = Database::from("GeoLite2-City.mmdb").open()?;
     
     // Look up IP address
     match db.lookup("8.8.8.8")? {
-        Some(QueryResult::Ip { data, prefix_len }) => {
+        Some(QueryResult::Ip { data, prefix_len, .. }) => {
             println!("IP: 8.8.8.8/{}", prefix_len);
             println!("Data: {:#?}", data);
         }
@@ -94,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_bytes = builder.build()?;
     std::fs::write("patterns.mxy", &db_bytes)?;
     
-    let db = Database::open("patterns.mxy")?;
+    let db = Database::from("patterns.mxy").open()?;
     
     // Query against 50,000 patterns - still fast!
     let start = std::time::Instant::now();

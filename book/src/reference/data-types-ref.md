@@ -7,12 +7,13 @@ Matchy databases store arbitrary data with each entry using the `DataValue` type
 `DataValue` is a Rust enum supporting these types:
 
 - **Bool**: Boolean values
-- **U16**: 16-bit unsigned integers
-- **U32**: 32-bit unsigned integers
-- **U64**: 64-bit unsigned integers
-- **I32**: 32-bit signed integers
-- **F32**: 32-bit floating point
-- **F64**: 64-bit floating point
+- **Uint16**: 16-bit unsigned integers
+- **Uint32**: 32-bit unsigned integers
+- **Uint64**: 64-bit unsigned integers
+- **Uint128**: 128-bit unsigned integers
+- **Int32**: 32-bit signed integers
+- **Float**: 32-bit floating point
+- **Double**: 64-bit floating point
 - **String**: UTF-8 text
 - **Bytes**: Arbitrary binary data
 - **Array**: Ordered list of values
@@ -25,17 +26,19 @@ See [Data Types](../guide/data-types.md) for conceptual overview.
 
 ```rust
 pub enum DataValue {
-    Bool(bool),
-    U16(u16),
-    U32(u32),
-    U64(u64),
-    I32(i32),
-    F32(f32),
-    F64(f64),
+    Pointer(u32),
     String(String),
+    Double(f64),
     Bytes(Vec<u8>),
-    Array(Vec<DataValue>),
+    Uint16(u16),
+    Uint32(u32),
     Map(HashMap<String, DataValue>),
+    Int32(i32),
+    Uint64(u64),
+    Uint128(u128),
+    Array(Vec<DataValue>),
+    Bool(bool),
+    Float(f32),
     Timestamp(i64),  // Unix epoch seconds
 }
 ```
@@ -48,16 +51,16 @@ pub enum DataValue {
 use matchy::DataValue;
 
 let bool_val = DataValue::Bool(true);
-let int_val = DataValue::U32(42);
+let int_val = DataValue::Uint32(42);
 let str_val = DataValue::String("hello".to_string());
 ```
 
-### Using From/Into
+### From JSON
 
 ```rust
-let val: DataValue = 42u32.into();
-let val: DataValue = "text".to_string().into();
-let val: DataValue = true.into();
+let val: DataValue = serde_json::from_value(serde_json::json!(42))?;
+let val: DataValue = serde_json::from_value(serde_json::json!("text"))?;
+let val: DataValue = serde_json::from_value(serde_json::json!(true))?;
 ```
 
 ## Working with Maps
@@ -70,9 +73,9 @@ use matchy::DataValue;
 
 let mut data = HashMap::new();
 data.insert("country".to_string(), DataValue::String("US".to_string()));
-data.insert("asn".to_string(), DataValue::U32(15169));
-data.insert("lat".to_string(), DataValue::F64(37.751));
-data.insert("lon".to_string(), DataValue::F64(-97.822));
+data.insert("asn".to_string(), DataValue::Uint32(15169));
+data.insert("lat".to_string(), DataValue::Double(37.751));
+data.insert("lon".to_string(), DataValue::Double(-97.822));
 ```
 
 ## Working with Arrays
@@ -125,7 +128,7 @@ data.insert("location".to_string(), DataValue::Map(location));
 ```rust
 match value {
     DataValue::String(s) => println!("String: {}", s),
-    DataValue::U32(n) => println!("Number: {}", n),
+    DataValue::Uint32(n) => println!("Number: {}", n),
     DataValue::Map(m) => {
         for (k, v) in m {
             println!("{}: {:?}", k, v);
@@ -147,7 +150,7 @@ fn get_string(val: &DataValue) -> Option<&str> {
 
 fn get_u32(val: &DataValue) -> Option<u32> {
     match val {
-        DataValue::U32(n) => Some(*n),
+        DataValue::Uint32(n) => Some(*n),
         _ => None,
     }
 }
@@ -156,29 +159,29 @@ fn get_u32(val: &DataValue) -> Option<u32> {
 ## Complete Example
 
 ```rust
-use matchy::{DatabaseBuilder, DataValue};
+use matchy::{DatabaseBuilder, DataValue, MatchMode};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut builder = DatabaseBuilder::new();
+    let mut builder = DatabaseBuilder::new(MatchMode::CaseInsensitive);
     
     // IP with rich data
     let mut ip_data = HashMap::new();
     ip_data.insert("country".to_string(), DataValue::String("US".to_string()));
-    ip_data.insert("asn".to_string(), DataValue::U32(15169));
+    ip_data.insert("asn".to_string(), DataValue::Uint32(15169));
     ip_data.insert("tags".to_string(), DataValue::Array(vec![
         DataValue::String("datacenter".to_string()),
         DataValue::String("cloud".to_string()),
     ]));
     
-    builder.add_ip_entry("8.8.8.8/32", Some(ip_data))?;
+    builder.add_entry("8.8.8.8", ip_data)?;
     
     // Pattern with metadata
     let mut pattern_data = HashMap::new();
     pattern_data.insert("category".to_string(), DataValue::String("search".to_string()));
-    pattern_data.insert("priority".to_string(), DataValue::U16(100));
+    pattern_data.insert("priority".to_string(), DataValue::Uint16(100));
     
-    builder.add_pattern_entry("*.google.com", Some(pattern_data))?;
+    builder.add_entry("*.google.com", pattern_data)?;
     
     let db_bytes = builder.build()?;
     std::fs::write("database.mxy", &db_bytes)?;
@@ -194,12 +197,13 @@ DataValue types are serialized to the MMDB binary format:
 | DataValue | MMDB Type | Notes |
 |-----------|-----------|-------|
 | Bool | boolean | 1 bit |
-| U16 | uint16 | 2 bytes |
-| U32 | uint32 | 4 bytes |
-| U64 | uint64 | 8 bytes |
-| I32 | int32 | 4 bytes |
-| F32 | float | IEEE 754 |
-| F64 | double | IEEE 754 |
+| Uint16 | uint16 | 2 bytes |
+| Uint32 | uint32 | 4 bytes |
+| Uint64 | uint64 | 8 bytes |
+| Uint128 | uint128 | 16 bytes |
+| Int32 | int32 | 4 bytes |
+| Float | float | IEEE 754 |
+| Double | double | IEEE 754 |
 | String | utf8_string | Length-prefixed |
 | Bytes | bytes | Length-prefixed |
 | Array | array | Recursive |
@@ -210,11 +214,11 @@ See [Binary Format](binary-format.md) for encoding details.
 
 ## Size Limits
 
-- **Strings**: Up to 16 MB per string
-- **Bytes**: Up to 16 MB per byte array
-- **Arrays**: Up to 65,536 elements
-- **Maps**: Up to 65,536 key-value pairs
-- **Nesting**: Up to 64 levels deep
+- **Strings**: Up to about 16.8 MB per encoded string
+- **Bytes**: Up to about 16.8 MB per encoded byte array
+- **Arrays**: Up to about 16.8 million encoded elements
+- **Maps**: Up to about 16.8 million encoded key-value pairs
+- **Nesting**: Validation rejects total nesting deeper than 64 levels
 
 ## Performance
 
@@ -223,15 +227,15 @@ Data types have different serialization costs:
 | Type | Cost | Notes |
 |------|------|-------|
 | Bool, integers | O(1) | Fixed size |
-| F32, F64 | O(1) | Fixed size |
+| Float, Double | O(1) | Fixed size |
 | String | O(n) | Length-dependent |
 | Bytes | O(n) | Length-dependent |
 | Array | O(n × m) | n = length, m = element cost |
 | Map | O(n × m) | n = entries, m = value cost |
 
 Prefer smaller types when possible:
-- Use U16 instead of U32 if values fit
-- Use I32 instead of F64 for integers
+- Use Uint16 instead of Uint32 if values fit
+- Use Int32 instead of Double for integers
 - Avoid deep nesting
 
 ## Serialization Example
@@ -239,15 +243,15 @@ Prefer smaller types when possible:
 ```rust
 use matchy::{Database, QueryResult, DataValue};
 
-let db = Database::open("database.mxy")?;
+let db = Database::from("database.mxy").open()?;
 
-if let Some(QueryResult::Ip { data: Some(data), .. }) = db.lookup("8.8.8.8")? {
+if let Some(QueryResult::Ip { data: DataValue::Map(data), .. }) = db.lookup("8.8.8.8")? {
     // Extract specific fields
     if let Some(DataValue::String(country)) = data.get("country") {
         println!("Country: {}", country);
     }
     
-    if let Some(DataValue::U32(asn)) = data.get("asn") {
+    if let Some(DataValue::Uint32(asn)) = data.get("asn") {
         println!("ASN: {}", asn);
     }
     
@@ -273,7 +277,7 @@ use serde_json::json;
 fn to_json(val: &DataValue) -> serde_json::Value {
     match val {
         DataValue::Bool(b) => json!(b),
-        DataValue::U32(n) => json!(n),
+        DataValue::Uint32(n) => json!(n),
         DataValue::String(s) => json!(s),
         DataValue::Array(arr) => {
             json!(arr.iter().map(to_json).collect::<Vec<_>>())

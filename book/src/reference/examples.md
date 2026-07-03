@@ -27,13 +27,13 @@ std::fs::write("db.mxy", &bytes)?;
 ```rust
 use matchy::{Database, QueryResult};
 
-let db = Database::open("db.mxy")?;
+let db = Database::from("db.mxy").open()?;
 
 match db.lookup("1.2.3.4")? {
-    Some(QueryResult::Ip { data, prefix_len }) => {
+    Some(QueryResult::Ip { data, prefix_len, .. }) => {
         println!("IP match: {:?}", data);
     }
-    Some(QueryResult::Pattern { pattern_ids, data }) => {
+    Some(QueryResult::Pattern { pattern_ids, data, .. }) => {
         println!("Pattern match: {} patterns", pattern_ids.len());
     }
     _ => println!("No match"),
@@ -45,7 +45,7 @@ match db.lookup("1.2.3.4")? {
 ### Building
 
 ```c
-#include "matchy.h"
+#include <matchy/matchy.h>
 
 matchy_builder_t *builder = matchy_builder_new();
 matchy_builder_add(builder, "1.2.3.4", "{\"threat\": \"high\"}");
@@ -61,9 +61,9 @@ matchy_result_t result = matchy_query(db, "1.2.3.4");
 
 if (result.found) {
     printf("Match found!\n");
-    matchy_free_result(&result);
 }
 
+matchy_free_result(&result);
 matchy_close(db);
 ```
 

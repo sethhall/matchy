@@ -139,6 +139,7 @@ See **[API docs](https://docs.rs/matchy)** for building databases, querying, and
 
 matchy_t *db = matchy_open("threats.mxy");
 matchy_result_t result = matchy_query(db, "1.2.3.4");
+matchy_free_result(&result);
 matchy_close(db);
 ```
 

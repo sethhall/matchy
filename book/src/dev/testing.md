@@ -58,7 +58,7 @@ fn test_end_to_end_workflow() {
     
     // Save and load
     std::fs::write("test.mxy", &bytes).unwrap();
-    let db = Database::open("test.mxy").unwrap();
+    let db = Database::from("test.mxy").open().unwrap();
     
     // Query
     let result = db.lookup("1.2.3.4").unwrap();
@@ -82,7 +82,7 @@ fn setup() -> Database {
     builder.add_ip("1.2.3.4", HashMap::new()).unwrap();
     let bytes = builder.build().unwrap();
     std::fs::write("test.mxy", &bytes).unwrap();
-    Database::open("test.mxy").unwrap()
+    Database::from("test.mxy").open().unwrap()
 }
 
 #[test]

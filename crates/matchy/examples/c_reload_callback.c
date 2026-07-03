@@ -8,11 +8,11 @@
  * - Receiving reload success/failure notifications
  *
  * Build:
- *   gcc -o c_reload_callback examples/c_reload_callback.c \
- *       -I./include -L./target/release -lmatchy -lpthread -ldl -lm
+ *   gcc -o /tmp/c_reload_callback crates/matchy/examples/c_reload_callback.c \
+ *       -Icrates/matchy/include -Ltarget/release -lmatchy -lpthread -ldl -lm
  *
  * Run:
- *   LD_LIBRARY_PATH=./target/release ./c_reload_callback
+ *   LD_LIBRARY_PATH=target/release /tmp/c_reload_callback
  */
 
 #include <stdio.h>
@@ -70,7 +70,7 @@ int main(void) {
     
     /* Build and save */
     uint8_t *buffer = NULL;
-    size_t size = 0;
+    uintptr_t size = 0;
     if (matchy_builder_build(builder, &buffer, &size) != MATCHY_SUCCESS) {
         fprintf(stderr, "Failed to build database\n");
         matchy_builder_free(builder);
@@ -113,11 +113,12 @@ int main(void) {
     
     /* Test initial lookup */
     printf("Testing initial lookup:\n");
-    matchy_result_t result;
-    matchy_lookup(db, "192.168.1.1", &result);
+    matchy_result_t result = matchy_query(db, "192.168.1.1");
     printf("  192.168.1.1: %s\n", result.found ? "Found" : "Not found");
-    matchy_lookup(db, "example.com", &result);
+    matchy_free_result(&result);
+    result = matchy_query(db, "example.com");
     printf("  example.com: %s\n\n", result.found ? "Found" : "Not found");
+    matchy_free_result(&result);
     
     /* Modify database to trigger reload */
     printf("Modifying database file to trigger reload...\n");
@@ -140,12 +141,15 @@ int main(void) {
     
     /* Test lookup after reload */
     printf("Testing lookup after reload:\n");
-    matchy_lookup(db, "10.0.0.1", &result);
+    result = matchy_query(db, "10.0.0.1");
     printf("  10.0.0.1 (new): %s\n", result.found ? "Found" : "Not found");
-    matchy_lookup(db, "new-domain.com", &result);
+    matchy_free_result(&result);
+    result = matchy_query(db, "new-domain.com");
     printf("  new-domain.com (new): %s\n", result.found ? "Found" : "Not found");
-    matchy_lookup(db, "192.168.1.1", &result);
+    matchy_free_result(&result);
+    result = matchy_query(db, "192.168.1.1");
     printf("  192.168.1.1 (old): %s\n\n", result.found ? "Found" : "Not found");
+    matchy_free_result(&result);
     
     /* Print reload statistics */
     printf("═══════════════════════════════════════════════════════════════\n");

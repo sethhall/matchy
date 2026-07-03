@@ -64,6 +64,16 @@ $ matchy match threats.mxy *.log -j 1        # Sequential
 - When output order matters
 - Debugging/testing
 
+### `--readers <READERS>`
+
+Set the number of reader threads used for I/O and decompression when running
+with more than one worker thread. If omitted, matchy auto-tunes the reader and
+worker split. Use more readers for compressed inputs.
+
+```console
+$ matchy match threats.mxy logs/*.gz --readers 4 --threads 12
+```
+
 ### `-f, --follow`
 
 Follow log file(s) for new data (like `tail -f`).
@@ -146,6 +156,28 @@ $ matchy match threats.mxy access.log --cache-size 50000
 $ matchy match threats.mxy access.log --cache-size 0  # No cache
 ```
 
+### `--extractors <EXTRACTORS>`
+
+Enable or disable extractors by name. Names include `ipv4`, `ipv6`, `domain`,
+`email`, `hash`, `bitcoin`, `ethereum`, and `monero`. Group aliases include
+`ip` and `crypto`. Prefix a name with `-` to disable it.
+
+```console
+$ matchy match threats.mxy access.log --extractors ip,domain
+$ matchy match threats.mxy access.log --extractors -crypto,-hash
+```
+
+By default, matchy selects extractors from database capabilities.
+
+### `--debug-routing`
+
+Print file routing and workload decisions to stderr. This is mainly useful for
+debugging tests and parallel processing behavior.
+
+### `--watch`
+
+Automatically reload the database when the database file changes on disk.
+
 ## Examples
 
 ### Scan Apache Access Log
@@ -158,8 +190,8 @@ $ matchy match threats.mxy /var/log/apache2/access.log --stats
 [INFO] Extractor configured for: IPs, strings
 [INFO] Processing stdin...
 
-{"timestamp":"1697500800.123","line_number":1,"matched_text":"192.0.2.1","input_line":"192.0.2.1 - - [17/Oct/2024:10:00:00 +0000] \"GET /login HTTP/1.1\" 200 1234","match_type":"ip","prefix_len":32,"cidr":"192.0.2.1/32","data":{"threat_level":"high","category":"malware"}}
-{"timestamp":"1697500800.456","line_number":5,"matched_text":"evil.com","input_line":"Request from evil.com blocked","match_type":"pattern","pattern_count":1,"data":[{"threat_level":"critical"}]}
+{"timestamp":"1697500800.123","source":"/var/log/apache2/access.log","matched_text":"192.0.2.1","match_type":"ip","prefix_len":32,"cidr":"192.0.2.1/32","data":{"threat_level":"high","category":"malware"}}
+{"timestamp":"1697500800.456","source":"/var/log/apache2/access.log","matched_text":"evil.com","match_type":"pattern","pattern_count":1,"data":[{"threat_level":"critical"}]}
 
 [INFO] Processing complete
 [INFO] Lines processed: 15,234
@@ -209,8 +241,8 @@ $ matchy match threats.mxy /var/log/app.log -f --stats
 [INFO] Extractor configured for: IPs, strings
 [INFO] Watching for changes... (Ctrl+C to stop)
 
-{"timestamp":"1697500850.123","line_number":42,"matched_text":"malware.com", ...}
-{"timestamp":"1697500851.456","line_number":43,"matched_text":"192.0.2.50", ...}
+{"timestamp":"1697500850.123","source":"/var/log/app.log","matched_text":"malware.com", ...}
+{"timestamp":"1697500851.456","source":"/var/log/app.log","matched_text":"192.0.2.50", ...}
 ^C
 [INFO] Shutting down...
 [INFO] Lines processed: 89
@@ -283,9 +315,8 @@ Each match is a JSON object on a single line:
 ```json
 {
   "timestamp": "1697500800.123",
-  "line_number": 42,
+  "source": "access.log",
   "matched_text": "192.0.2.1",
-  "input_line": "Original log line containing the match...",
   "match_type": "ip",
   "prefix_len": 24,
   "cidr": "192.0.2.0/24",
@@ -300,9 +331,8 @@ Each match is a JSON object on a single line:
 ```json
 {
   "timestamp": "1697500800.456",
-  "line_number": 127,
+  "source": "access.log",
   "matched_text": "evil.example.com",
-  "input_line": "DNS query for evil.example.com",
   "match_type": "pattern",
   "pattern_count": 2,
   "data": [
@@ -317,9 +347,8 @@ Each match is a JSON object on a single line:
 | Field | Type | Description |
 |-------|------|-------------|
 | `timestamp` | string | Unix timestamp with milliseconds |
-| `line_number` | number | Line number in input file |
+| `source` | string | Input file path when available |
 | `matched_text` | string | The extracted text that matched |
-| `input_line` | string | Complete original log line |
 | `match_type` | string | `"ip"` or `"pattern"` |
 | `prefix_len` | number | IP: CIDR prefix length |
 | `cidr` | string | IP: Canonical CIDR notation |

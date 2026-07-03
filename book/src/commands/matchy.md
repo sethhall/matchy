@@ -35,6 +35,26 @@ $ matchy query threats.mxy 192.0.2.1
 
 See [matchy query](matchy-query.md) for details.
 
+### matchy match
+
+Scan log files or stdin for entries that match a database.
+
+```console
+$ matchy match threats.mxy access.log --stats
+```
+
+See [matchy match](matchy-match.md) for details.
+
+### matchy extract
+
+Extract IoC candidates from log files or stdin.
+
+```console
+$ matchy extract access.log --types all
+```
+
+See [matchy extract](matchy-extract.md) for details.
+
 ### matchy inspect
 
 Inspect database contents and structure.
@@ -45,12 +65,22 @@ $ matchy inspect threats.mxy
 
 See [matchy inspect](matchy-inspect.md) for details.
 
-### matchy bench
+### matchy validate
 
-Benchmark database query performance.
+Validate a database file for safety and consistency.
 
 ```console
-$ matchy bench threats.mxy
+$ matchy validate threats.mxy --level strict
+```
+
+See [matchy validate](matchy-validate.md) for details.
+
+### matchy bench
+
+Benchmark synthetic database build, load, and query performance.
+
+```console
+$ matchy bench combined
 ```
 
 See [matchy bench](matchy-bench.md) for details.
@@ -89,8 +119,11 @@ $ matchy inspect threats.mxy
 # 3. Query it
 $ matchy query threats.mxy 192.0.2.1
 
-# 4. Benchmark it
-$ matchy bench threats.mxy
+# 4. Scan logs against it
+$ matchy match threats.mxy access.log --stats
+
+# 5. Run a synthetic benchmark
+$ matchy bench combined
 ```
 
 ### Working with GeoIP

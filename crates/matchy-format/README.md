@@ -87,5 +87,5 @@ The builder automatically detects entry types:
 - `matchy-paraglob` - Glob pattern matching
 - `matchy-literal-hash` - Exact string matching
 - `matchy-data-format` - Data encoding/decoding
-- `matchy-glob` - Glob parsing
+- `matchy-ac` / `matchy-paraglob` - Glob parsing and automaton construction
 - `matchy-match-mode` - Shared MatchMode enum

@@ -1,7 +1,7 @@
-//! Demo of file hash extraction (MD5, SHA1, SHA256)
+//! Demo of file hash extraction (MD5, SHA1, SHA256, SHA384, SHA512)
 //!
 //! Shows the SIMD-accelerated hash extractor that finds file hashes using:
-//! - Boundary distance detection (exact token lengths: 32/40/64 hex chars)
+//! - Boundary distance detection (exact token lengths: 32/40/64/96/128 hex chars)
 //! - Auto-vectorized hex validation (lookup table + LLVM SIMD)
 //! - Zero false positives (rejects UUIDs, timestamps, etc.)
 //!
@@ -160,7 +160,7 @@ Line 6: Uppercase SHA1 2FD4E1C67A2D28FCED849EE1BB76E7391B93EB12
 
     println!("\n=== Algorithm Details ===");
     println!("✨ Boundary distance detection");
-    println!("   → Find word boundaries, check distances (32/40/64 chars)");
+    println!("   → Find word boundaries, check distances (32/40/64/96/128 chars)");
     println!("✨ SIMD hex validation");
     println!("   → Lookup table + LLVM auto-vectorization");
     println!("✨ Zero false positives");

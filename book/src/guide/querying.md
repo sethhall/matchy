@@ -131,7 +131,7 @@ for (line_num, line) in reader.lines().enumerate() {
                         eprintln!("  Data: {:?}", d);
                     }
                 }
-                QueryResult::Ip { data, prefix_len } => {
+                QueryResult::Ip { data, prefix_len, .. } => {
                     eprintln!("  Matched /{} CIDR: {:?}", prefix_len, data);
                 }
                 _ => {}

@@ -45,7 +45,7 @@ If you're embedding Matchy in your application and don't need CLI components:
 matchy = { version = "{{version_minor}}", default-features = false }
 ```
 
-This saves ~40 transitive dependencies by excluding CLI-only features (`clap`, `notify`, `ctrlc`, `csv`).
+This saves transitive dependencies by excluding CLI-only features (`clap`, `ctrlc`, `csv`).
 
 Then run:
 
@@ -134,7 +134,7 @@ sudo cp target/release/libmatchy.* /usr/local/lib/
 
 # Copy headers
 sudo mkdir -p /usr/local/include/matchy
-sudo cp include/matchy/*.h /usr/local/include/matchy/
+sudo cp crates/matchy/include/matchy/*.h /usr/local/include/matchy/
 
 # Update library cache (Linux)
 sudo ldconfig
@@ -167,11 +167,12 @@ cargo bench
 ### Try examples
 
 ```bash
-# Production workload test
-cargo run --release --example production_test
+# Parallel processing workload test
+cargo run --release --example parallel_processing
 
-# Glob pattern demonstrations
-cargo run --release --example glob_demo
+# Extraction demonstrations
+cargo run --release --example extractor_demo
+cargo run --release --example hash_demo
 
 # Combined IP + pattern database
 cargo run --release --example combined_query

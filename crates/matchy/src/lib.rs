@@ -108,9 +108,8 @@ mod builder_ext;
 /// Batch processing infrastructure for efficient file analysis
 ///
 /// General-purpose building blocks for sequential or parallel line-oriented processing:
-/// - `LineFileReader` - Chunks files with gzip support
 /// - `Worker` - Processes batches with extraction + matching  
-/// - `LineBatch`, `MatchResult`, `LineMatch` - Data structures
+/// - `WorkerBuilder`, `WorkerStats`, `MatchResult` - Data structures
 pub mod processing;
 /// Schema validation for yield values
 ///

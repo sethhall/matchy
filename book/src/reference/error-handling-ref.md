@@ -1,385 +1,208 @@
 # Error Handling Reference
 
-All fallible operations in Matchy return `Result<T, MatchyError>`.
+Matchy exposes a small set of public error types. Builder workflows use
+`MatchyError` or component errors such as `FormatError`; database opening and
+querying use `DatabaseError`.
 
-## MatchyError Type
+## Public Error Types
 
 ```rust
 pub enum MatchyError {
-    /// File does not exist
-    FileNotFound { path: String },
-    
-    /// Invalid database format
-    InvalidFormat { reason: String },
-    
-    /// Corrupted database data
-    CorruptData { offset: usize, reason: String },
-    
-    /// Invalid entry (IP, pattern, string)
-    InvalidEntry { entry: String, reason: String },
-    
-    /// I/O error
-    IoError(std::io::Error),
-    
-    /// Memory mapping failed
-    MmapError(String),
-    
-    /// Pattern compilation failed
-    PatternError { pattern: String, reason: String },
-    
-    /// Internal error
-    InternalError(String),
+    Paraglob(matchy_paraglob::error::ParaglobError),
+    Format(matchy_format::FormatError),
+    Io(std::io::Error),
+    Database(String),
+    Validation(String),
 }
 ```
 
-## Common Error Patterns
+```rust
+pub enum DatabaseError {
+    Io(String),
+    Format(matchy_format::mmdb::MmdbError),
+    Unsupported(String),
+    Config(String),
+}
+```
 
-### Opening a Database
+`DatabaseBuilder` methods are re-exported from `matchy-format` and return
+`FormatError` directly. The `?` operator can still convert those errors into
+`Box<dyn std::error::Error>` in examples and applications.
+
+## Opening A Database
 
 ```rust
-use matchy::{Database, MatchyError};
+use matchy::{Database, DatabaseError};
 
-match Database::open("database.mxy") {
-    Ok(db) => { /* success */ }
-    Err(MatchyError::FileNotFound { path }) => {
-        eprintln!("Database not found: {}", path);
-        // Handle missing file - maybe create default?
+match Database::from("database.mxy").open() {
+    Ok(db) => {
+        println!("Loaded database");
     }
-    Err(MatchyError::InvalidFormat { reason }) => {
-        eprintln!("Invalid format: {}", reason);
-        // File exists but not valid matchy database
+    Err(DatabaseError::Io(msg)) => {
+        eprintln!("File or mmap error: {msg}");
     }
-    Err(MatchyError::CorruptData { offset, reason }) => {
-        eprintln!("Corrupted at offset {}: {}", offset, reason);
-        // Database is damaged - rebuild required
+    Err(DatabaseError::Format(err)) => {
+        eprintln!("Invalid database format: {err}");
     }
-    Err(e) => {
-        eprintln!("Unexpected error: {}", e);
-        return Err(e.into());
+    Err(err) => {
+        eprintln!("Database error: {err}");
     }
 }
 ```
 
-### Building a Database
+## Building A Database
 
 ```rust
-use matchy::{DatabaseBuilder, MatchyError};
+use matchy::{DatabaseBuilder, DataValue, MatchMode};
+use std::collections::HashMap;
 
-let mut builder = DatabaseBuilder::new();
+let mut builder = DatabaseBuilder::new(MatchMode::CaseInsensitive);
 
-// Add entries with error handling
-match builder.add_ip_entry("192.0.2.1/32", None) {
-    Ok(_) => {}
-    Err(MatchyError::InvalidEntry { entry, reason }) => {
-        eprintln!("Invalid IP '{}': {}", entry, reason);
-        // Skip this entry and continue
-    }
-    Err(e) => return Err(e.into()),
-}
+let mut data = HashMap::new();
+data.insert("category".to_string(), DataValue::String("malware".to_string()));
 
-// Build with error handling
-match builder.build() {
-    Ok(bytes) => {
-        std::fs::write("database.mxy", &bytes)?;
+match builder.add_entry("*.evil.com", data) {
+    Ok(()) => {}
+    Err(err) => {
+        eprintln!("Entry was rejected: {err}");
     }
-    Err(MatchyError::InternalError(msg)) => {
-        eprintln!("Build failed: {}", msg);
-        return Err(msg.into());
-    }
-    Err(e) => return Err(e.into()),
 }
 ```
 
-### Querying
+Schema validation errors are also reported when entries are added:
 
 ```rust
-use matchy::{Database, MatchyError};
+use matchy::{DatabaseBuilder, DatabaseBuilderExt, DataValue, MatchMode};
+use std::collections::HashMap;
 
-let db = Database::open("database.mxy")?;
+let mut builder = DatabaseBuilder::new(MatchMode::CaseInsensitive)
+    .with_schema("threatdb")?;
+
+let mut data = HashMap::new();
+data.insert("threat_level".to_string(), DataValue::String("high".to_string()));
+
+if let Err(err) = builder.add_entry("192.0.2.1", data) {
+    eprintln!("ThreatDB schema validation failed: {err}");
+}
+```
+
+## Querying
+
+```rust
+use matchy::{Database, QueryResult};
+
+let db = Database::from("database.mxy").open()?;
 
 match db.lookup("example.com") {
+    Ok(Some(QueryResult::NotFound)) | Ok(None) => {
+        println!("No match");
+    }
     Ok(Some(result)) => {
-        println!("Found: {:?}", result);
+        println!("Found: {result:?}");
     }
-    Ok(None) => {
-        println!("Not found");
-    }
-    Err(MatchyError::CorruptData { offset, reason }) => {
-        eprintln!("Data corruption at {}: {}", offset, reason);
-        // Database may be partially readable
-    }
-    Err(e) => {
-        eprintln!("Lookup error: {}", e);
-        return Err(e.into());
+    Err(err) => {
+        eprintln!("Lookup error: {err}");
     }
 }
 ```
 
-## Error Context
+`Ok(None)` means the database has no applicable lookup table for the query type.
+For example, an IP query against a string-only database can return `None`.
+Misses in an existing table are represented by `QueryResult::NotFound`.
 
-Use `context` methods to add helpful information:
+## Adding Context
+
+With standard error handling:
 
 ```rust
 use matchy::Database;
 
 fn load_db(path: &str) -> Result<Database, Box<dyn std::error::Error>> {
-    Database::open(path)
-        .map_err(|e| format!("Failed to load database from '{}': {}", path, e).into())
+    Database::from(path)
+        .open()
+        .map_err(|err| format!("failed to load database from {path}: {err}").into())
 }
 ```
 
-Or with `anyhow`:
+With `anyhow`:
 
 ```rust
 use anyhow::{Context, Result};
 use matchy::Database;
 
 fn load_db(path: &str) -> Result<Database> {
-    Database::open(path)
-        .with_context(|| format!("Failed to load database from '{}'", path))
+    Database::from(path)
+        .open()
+        .with_context(|| format!("failed to load database from {path}"))
 }
 ```
 
-## Validation Errors
-
-### IP Address Validation
+## Retry Logic
 
 ```rust
-builder.add_ip_entry("not-an-ip", None)?;
-// Error: InvalidEntry { entry: "not-an-ip", reason: "Invalid IP address" }
-
-builder.add_ip_entry("192.0.2.1/33", None)?;
-// Error: InvalidEntry { entry: "192.0.2.1/33", reason: "Invalid prefix length" }
-```
-
-### Pattern Validation
-
-```rust
-builder.add_pattern_entry("*.*.com", None)?;
-// Error: PatternError { pattern: "*.*.com", reason: "Multiple wildcards" }
-
-builder.add_pattern_entry("[invalid", None)?;
-// Error: PatternError { pattern: "[invalid", reason: "Unclosed bracket" }
-```
-
-### String Validation
-
-```rust
-builder.add_exact_entry("", None)?;
-// Error: InvalidEntry { entry: "", reason: "Empty string" }
-```
-
-## Error Recovery
-
-### Partial Success
-
-Continue after validation errors:
-
-```rust
-let entries = vec!["192.0.2.1", "not-valid", "10.0.0.1"];
-let mut success_count = 0;
-let mut error_count = 0;
-
-for entry in entries {
-    match builder.add_ip_entry(entry, None) {
-        Ok(_) => success_count += 1,
-        Err(e) => {
-            eprintln!("Skipping invalid entry '{}': {}", entry, e);
-            error_count += 1;
-        }
-    }
-}
-
-println!("Added {} entries, skipped {} invalid", success_count, error_count);
-```
-
-### Fallback Databases
-
-```rust
-let db = Database::open("primary.mxy")
-    .or_else(|_| Database::open("backup.mxy"))
-    .or_else(|_| Database::open("default.mxy"))?;
-```
-
-### Retry Logic
-
-```rust
-use std::time::Duration;
+use matchy::{Database, DatabaseError};
 use std::thread;
+use std::time::Duration;
 
-fn open_with_retry(path: &str, max_attempts: u32) -> Result<Database, MatchyError> {
+fn open_with_retry(path: &str, max_attempts: u32) -> Result<Database, DatabaseError> {
     for attempt in 1..=max_attempts {
-        match Database::open(path) {
+        match Database::from(path).open() {
             Ok(db) => return Ok(db),
-            Err(MatchyError::IoError(_)) if attempt < max_attempts => {
-                eprintln!("Attempt {} failed, retrying...", attempt);
-                thread::sleep(Duration::from_millis(100 * attempt as u64));
+            Err(DatabaseError::Io(_)) if attempt < max_attempts => {
+                thread::sleep(Duration::from_millis(100 * u64::from(attempt)));
             }
-            Err(e) => return Err(e),
+            Err(err) => return Err(err),
         }
     }
     unreachable!()
 }
 ```
 
-## Display Implementation
-
-All errors implement `Display`:
-
-```rust
-use matchy::MatchyError;
-
-let err = MatchyError::FileNotFound { 
-    path: "missing.mxy".to_string() 
-};
-
-println!("{}", err);
-// Output: Database file not found: missing.mxy
-
-eprintln!("Error: {}", err);
-// Stderr: Error: Database file not found: missing.mxy
-```
-
-## Error Conversion
-
-### To std::io::Error
-
-```rust
-impl From<MatchyError> for std::io::Error {
-    fn from(err: MatchyError) -> Self {
-        match err {
-            MatchyError::FileNotFound { path } => {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("Database not found: {}", path)
-                )
-            }
-            MatchyError::IoError(e) => e,
-            _ => std::io::Error::new(std::io::ErrorKind::Other, err.to_string()),
-        }
-    }
-}
-```
-
-### To `Box<dyn Error>`
-
-```rust
-fn do_work() -> Result<(), Box<dyn std::error::Error>> {
-    let db = Database::open("db.mxy")?;
-    // MatchyError automatically converts
-    Ok(())
-}
-```
-
-## Best Practices
-
-### 1. Match Specific Errors First
-
-```rust
-match db.lookup(query) {
-    Ok(Some(result)) => { /* handle result */ }
-    Ok(None) => { /* handle not found */ }
-    Err(MatchyError::CorruptData { .. }) => { /* handle corruption */ }
-    Err(e) => { /* generic handler */ }
-}
-```
-
-### 2. Provide Context
-
-```rust
-builder.add_ip_entry(ip, data)
-    .map_err(|e| format!("Failed to add IP '{}': {}", ip, e))?;
-```
-
-### 3. Log Errors
-
-```rust
-use log::{error, warn};
-
-match Database::open(path) {
-    Ok(db) => db,
-    Err(e) => {
-        error!("Failed to open database '{}': {}", path, e);
-        return Err(e.into());
-    }
-}
-```
-
-### 4. Use Result Type Aliases
-
-```rust
-type Result<T> = std::result::Result<T, MatchyError>;
-
-fn my_function() -> Result<Database> {
-    Database::open("database.mxy")
-}
-```
-
 ## Complete Example
 
 ```rust
-use matchy::{Database, DatabaseBuilder, MatchyError};
+use matchy::{Database, DatabaseBuilder, DataValue, MatchMode, QueryResult};
+use std::collections::HashMap;
 use std::fs;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Try to open existing database
-    let db = match Database::open("cache.mxy") {
-        Ok(db) => {
-            println!("Loaded existing database");
-            db
-        }
-        Err(MatchyError::FileNotFound { .. }) => {
-            println!("Building new database...");
-            build_database()?
-        }
-        Err(e) => {
-            eprintln!("Error opening database: {}", e);
-            return Err(e.into());
-        }
+    let db = match Database::from("cache.mxy").open() {
+        Ok(db) => db,
+        Err(_) => build_database()?,
     };
-    
-    // Query with error handling
-    let queries = vec!["192.0.2.1", "example.com", "*.google.com"];
-    for query in queries {
+
+    for query in ["192.0.2.1", "example.com", "login.evil.com"] {
         match db.lookup(query) {
+            Ok(Some(QueryResult::NotFound)) | Ok(None) => {
+                println!("{query}: no match");
+            }
             Ok(Some(result)) => {
-                println!("{}: {:?}", query, result);
+                println!("{query}: {result:?}");
             }
-            Ok(None) => {
-                println!("{}: Not found", query);
-            }
-            Err(e) => {
-                eprintln!("{}: Error - {}", query, e);
+            Err(err) => {
+                eprintln!("{query}: {err}");
             }
         }
     }
-    
+
     Ok(())
 }
 
 fn build_database() -> Result<Database, Box<dyn std::error::Error>> {
-    let mut builder = DatabaseBuilder::new();
-    
-    // Add entries with individual error handling
-    let entries = vec![
-        ("192.0.2.1", "Valid IP"),
-        ("not-an-ip", "Invalid - will skip"),
-        ("10.0.0.0/8", "Valid CIDR"),
-    ];
-    
-    for (entry, description) in entries {
-        match builder.add_ip_entry(entry, None) {
-            Ok(_) => println!("Added: {} ({})", entry, description),
-            Err(e) => eprintln!("Skipped: {} - {}", entry, e),
-        }
-    }
-    
-    // Build and save
+    let mut builder = DatabaseBuilder::new(MatchMode::CaseInsensitive);
+
+    let mut ip_data = HashMap::new();
+    ip_data.insert("description".to_string(), DataValue::String("test IP".to_string()));
+    builder.add_entry("192.0.2.1", ip_data)?;
+
+    let mut pattern_data = HashMap::new();
+    pattern_data.insert("category".to_string(), DataValue::String("phishing".to_string()));
+    builder.add_entry("*.evil.com", pattern_data)?;
+
     let db_bytes = builder.build()?;
     fs::write("cache.mxy", &db_bytes)?;
-    
-    // Reopen
-    Database::open("cache.mxy").map_err(Into::into)
+
+    Ok(Database::from("cache.mxy").open()?)
 }
 ```
 

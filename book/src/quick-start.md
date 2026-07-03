@@ -55,12 +55,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Database built: {} bytes", database_bytes.len());
 
     // 6. Open database (memory-mapped)
-    let db = Database::open("threats.mxy")?;
+    let db = Database::from("threats.mxy").open()?;
     println!("✅ Database loaded in <1ms");
 
     // 7. Query IP address
     match db.lookup("1.2.3.4")? {
-        Some(QueryResult::Ip { data, prefix_len }) => {
+        Some(QueryResult::Ip { data, prefix_len, .. }) => {
             println!("🔍 IP match: {:?} (/{prefix_len})", data);
         }
         _ => println!("No match"),
@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 8. Query pattern
     match db.lookup("malware.evil.com")? {
-        Some(QueryResult::Pattern { pattern_ids, data }) => {
+        Some(QueryResult::Pattern { pattern_ids, data, .. }) => {
             println!("🔍 Pattern match: {} patterns", pattern_ids.len());
             for (i, d) in data.iter().enumerate() {
                 if let Some(threat_data) = d {
@@ -88,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Complete C example:
 
 ```c
-#include "matchy.h"
+#include <matchy/matchy.h>
 #include <stdio.h>
 
 int main() {
@@ -129,19 +129,23 @@ int main() {
     matchy_result_t result = matchy_query(db, "1.2.3.4");
     if (result.found) {
         char *json = matchy_result_to_json(&result);
-        printf("🔍 IP match: %s\n", json);
-        matchy_free_string(json);
-        matchy_free_result(&result);
+        if (json != NULL) {
+            printf("🔍 IP match: %s\n", json);
+            matchy_free_string(json);
+        }
     }
+    matchy_free_result(&result);
 
     // 6. Query pattern
     result = matchy_query(db, "malware.evil.com");
     if (result.found) {
         char *json = matchy_result_to_json(&result);
-        printf("🔍 Pattern match: %s\n", json);
-        matchy_free_string(json);
-        matchy_free_result(&result);
+        if (json != NULL) {
+            printf("🔍 Pattern match: %s\n", json);
+            matchy_free_string(json);
+        }
     }
+    matchy_free_result(&result);
 
     // 7. Cleanup
     matchy_close(db);
@@ -154,7 +158,7 @@ int main() {
 Compile and run:
 
 ```bash
-gcc -o example example.c -I./include -L./target/release -lmatchy
+gcc -o example example.c -I./crates/matchy/include -L./target/release -lmatchy
 LD_LIBRARY_PATH=./target/release ./example
 ```
 

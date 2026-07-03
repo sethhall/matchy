@@ -31,8 +31,8 @@ opts.auto_reload = true;
 matchy_t *db = matchy_open_with_options("threats.mxy", &opts);
 
 // Queries automatically use latest version
-matchy_result_t result;
-matchy_lookup(db, "192.168.1.1", &result);
+matchy_result_t result = matchy_query(db, "192.168.1.1");
+matchy_free_result(&result);
 
 matchy_close(db);
 ```

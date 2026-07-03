@@ -32,7 +32,6 @@ Validation strictness level. Default: `strict`
 Levels:
 - **`standard`**: Basic checks - offsets, UTF-8, structure
 - **`strict`**: Deep analysis - cycles, redundancy, consistency (default)
-- **`audit`**: Track unsafe code paths and trust assumptions
 
 ### `-j, --json`
 
@@ -105,16 +104,6 @@ Provides structured output with:
 
 Useful for CI/CD pipelines and automated testing.
 
-### Audit Mode
-
-Track where unsafe code is used and what trust assumptions are made:
-
-```bash
-matchy validate --level audit --verbose database.mxy
-```
-
-This mode is useful for security audits and understanding the trust model.
-
 ## Exit Status
 
 - **0**: Validation passed (no errors)
@@ -143,16 +132,6 @@ Comprehensive validation including:
 - Pattern reachability
 
 **Use when**: Validating databases from untrusted sources (default)
-
-### Audit
-
-All strict checks plus:
-- Track all unsafe code locations
-- Document trust assumptions
-- Report where `--trusted` mode bypasses validation
-- Security analysis
-
-**Use when**: Performing security audits
 
 ## Common Validation Errors
 

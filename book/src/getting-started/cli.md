@@ -25,10 +25,10 @@ Found: IP address 192.0.2.1
   threat_level: "high"
   category: "malware"
 
-$ # Benchmark performance
-$ matchy bench threats.mxy
-Queries per second: 7,234,891
-Average latency: 138ns
+$ # Run a synthetic benchmark
+$ matchy bench ip
+IP queries/sec: 7,234,891
+Average query latency: 138ns
 ```
 
 After completing this section, check out the [CLI Commands](../commands/index.md)

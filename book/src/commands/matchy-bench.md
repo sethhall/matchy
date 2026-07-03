@@ -95,6 +95,26 @@ matchy bench ip --hit-rate 50    # 50% of queries find matches
 matchy bench ip --hit-rate 90    # 90% of queries find matches
 ```
 
+### `--cache-size <CACHE_SIZE>`
+
+LRU cache capacity used during the query benchmark. Default: `10000`. Use `0`
+to disable the cache.
+
+```bash
+matchy bench ip --cache-size 0        # Disable cache
+matchy bench ip --cache-size 50000    # Larger query cache
+```
+
+### `--cache-hit-rate <CACHE_HIT_RATE>`
+
+Simulated cache hit rate percentage (0-100). Default: `0`, which generates all
+unique queries. Higher values model repeated query patterns in production logs.
+
+```bash
+matchy bench ip --cache-hit-rate 80
+matchy bench combined --cache-hit-rate 90
+```
+
 ### `--pattern-style <PATTERN_STYLE>`
 
 Pattern style for pattern benchmarks. Default: `complex`

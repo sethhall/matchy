@@ -13,7 +13,7 @@ Different entry types have different performance characteristics:
 **Complexity**: O(32) for IPv4, O(128) for IPv6 (address bit length)
 
 ```console
-$ matchy bench database.mxy
+$ matchy bench ip
 IP address lookups:  7,234,891 queries/sec (138ns avg)
 ```
 
@@ -27,7 +27,7 @@ at 32 bits (IPv4) or 128 bits (IPv6), making performance predictable.
 **Complexity**: O(1) constant time
 
 ```console
-$ matchy bench database.mxy
+$ matchy bench literal
 Exact string lookups: 8,932,441 queries/sec (112ns avg)
 ```
 
@@ -40,7 +40,7 @@ Exact strings use hash table lookups, making them the fastest entry type.
 **Complexity**: O(n + m) where n = query length, m = number of matches
 
 ```console
-$ matchy bench database.mxy
+$ matchy bench pattern
 Pattern lookups: 2,156,892 queries/sec (463ns avg)
   (50,000 patterns in database)
 ```
@@ -234,26 +234,16 @@ After v1.2.0: String interning
 Real-world savings: 10-50% database size reduction for typical threat intel datasets
 ```
 
-## Benchmarking Your Database
+## Benchmarking
 
-Use the CLI to benchmark your specific database:
+Use the CLI to run synthetic benchmarks for each database type:
 
 ```console
-$ matchy bench threats.mxy
-Database: threats.mxy
-Size: 15,847,293 bytes
-Entries: 125,000
-
-Running benchmarks...
-
-IP lookups:       6,892,443 queries/sec (145ns avg)
-Pattern lookups:  1,823,901 queries/sec (548ns avg)
-String lookups:   8,234,892 queries/sec (121ns avg)
-
-Completed 3,000,000 queries in 1.234 seconds
+$ matchy bench combined
 ```
 
-This shows real-world performance with your data.
+For a specific database, time representative `matchy query` calls or run
+`matchy match --stats` against representative logs.
 
 ## Performance Expectations
 
@@ -380,8 +370,8 @@ int main() {
     matchy_t *db = matchy_open_with_options("threats.mxy", &opts);
     
     // Queries automatically use latest database
-    matchy_result_t result;
-    matchy_lookup(db, "192.168.1.1", &result);
+    matchy_result_t result = matchy_query(db, "192.168.1.1");
+    matchy_free_result(&result);
     
     matchy_close(db);
 }

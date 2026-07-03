@@ -178,7 +178,7 @@ cargo build --release
 # Profile with Instruments
 xcrun xctrace record --template 'Time Profiler' \
   --output profile.trace \
-  --launch target/release/matchy bench database.mxy
+  --launch target/release/matchy bench combined
 
 # Open in Instruments
 open profile.trace

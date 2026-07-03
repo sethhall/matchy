@@ -50,12 +50,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Built database: {} bytes", database_bytes.len());
     
     // Open the database (memory-mapped)
-    let db = Database::open("threats.mxy")?;
+    let db = Database::from("threats.mxy").open()?;
     println!("✅ Loaded database");
     
     // Query an IP address
     match db.lookup("192.0.2.1")? {
-        Some(QueryResult::Ip { data, prefix_len }) => {
+        Some(QueryResult::Ip { data, prefix_len, .. }) => {
             println!("🔍 IP match (/{}):", prefix_len);
             println!("  {:?}", data);
         }
@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Query a pattern
     match db.lookup("phishing.evil.com")? {
-        Some(QueryResult::Pattern { pattern_ids, data }) => {
+        Some(QueryResult::Pattern { pattern_ids, data, .. }) => {
             println!("🔍 Pattern match:");
             println!("  Matched {} pattern(s)", pattern_ids.len());
             println!("  {:?}", data[0]);
@@ -144,11 +144,11 @@ can write it to a file or transmit it over a network.
 ### 4. Open and query
 
 ```rust
-let db = Database::open("threats.mxy")?;
+let db = Database::from("threats.mxy").open()?;
 let result = db.lookup("192.0.2.1")?;
 ```
 
-`Database::open()` memory-maps the file, loading it in under 1ms. The `lookup()` method
+`Database::from(...).open()` memory-maps the file, loading it in under 1ms. The `lookup()` method
 returns an `Option<QueryResult>` that indicates whether a match was found and what type
 of match it was.
 

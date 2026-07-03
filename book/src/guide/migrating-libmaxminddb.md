@@ -481,8 +481,10 @@ MMDB_lookup_result_s result = MMDB_lookup_string(&mmdb, "8.8.8.8", ...);
 
 // Pattern matching with matchy API
 // Query with a string, database contains patterns like "*.google.com"
-matchy_result_t *pattern_result = NULL;
-matchy_lookup(db, "www.google.com", &pattern_result);
+matchy_result_t pattern_result = matchy_query(db, "www.google.com");
+if (pattern_result.found) {
+    matchy_free_result(&pattern_result);
+}
 ```
 
 ### Building Enhanced Databases

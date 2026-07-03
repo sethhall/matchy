@@ -43,19 +43,18 @@ std::fs::write("database.mxy", &db_bytes)?;
 ```rust
 use matchy::{Database, QueryResult};
 
-let db = Database::open("database.mxy")?;
+let db = Database::from("database.mxy").open()?;
 
 match db.lookup("192.0.2.1")? {
-    Some(QueryResult::Ip { data, prefix_len }) => {
+    Some(QueryResult::Ip { data, prefix_len, .. }) => {
         println!("IP match: {:?}", data);
+        println!("Prefix length: {}", prefix_len);
     }
-    Some(QueryResult::Pattern { pattern_ids, data }) => {
+    Some(QueryResult::Pattern { pattern_ids, data, .. }) => {
         println!("Pattern match: {} patterns", pattern_ids.len());
+        println!("Data: {:?}", data);
     }
-    Some(QueryResult::ExactString { data }) => {
-        println!("Exact match: {:?}", data);
-    }
-    None => println!("No match"),
+    Some(QueryResult::NotFound) | None => println!("No match"),
 }
 ```
 
@@ -73,41 +72,50 @@ matchy
 
 ## Error Handling
 
-All operations return `Result<T, MatchyError>`:
+Builder operations return `Result<T, MatchyError>`, while database opening and
+querying return `Result<T, DatabaseError>`:
 
 ```rust
-use matchy::MatchyError;
+use matchy::{Database, DatabaseError, MatchyError};
 
 match builder.build() {
     Ok(db_bytes) => { /* success */ }
-    Err(MatchyError::IoError(e)) => { /* I/O error */ }
-    Err(MatchyError::InvalidFormat { .. }) => { /* format error */ }
+    Err(MatchyError::Io(e)) => { /* I/O error */ }
+    Err(MatchyError::Format(e)) => { /* builder or format error */ }
     Err(e) => { /* other error */ }
+}
+
+match Database::from("database.mxy").open() {
+    Ok(db) => { /* success */ }
+    Err(DatabaseError::Io(msg)) => { /* file or mmap error */ }
+    Err(DatabaseError::Format(e)) => { /* invalid database format */ }
+    Err(e) => { /* other database error */ }
 }
 ```
 
 Common error types:
-- `IoError` - File I/O failures
-- `InvalidFormat` - Corrupt or wrong database format
-- `InvalidEntry` - Invalid key/data during building
-- `PatternError` - Invalid pattern syntax
+- `MatchyError::Io` - File I/O failures from builder workflows
+- `MatchyError::Format` - Format or entry validation failures during build
+- `MatchyError::Paraglob` - Pattern compilation failures
+- `DatabaseError::Io` - File or mmap failures while opening
+- `DatabaseError::Format` - Corrupt or unsupported database data while opening or querying
 
 ## Type Conversion
 
-### From JSON
+### From JSON Values
 
 ```rust
 use matchy::DataValue;
 use serde_json::Value;
 
 let json: Value = serde_json::from_str(r#"{"key": "value"}"#)?;
-let data = DataValue::from_json(&json)?;
+let data: DataValue = serde_json::from_value(json)?;
 ```
 
 ### To JSON
 
 ```rust
-let json = data.to_json()?;
+let json = serde_json::to_value(&data)?;
 println!("{}", serde_json::to_string_pretty(&json)?);
 ```
 
@@ -120,7 +128,7 @@ println!("{}", serde_json::to_string_pretty(&json)?);
 ```rust
 use std::sync::Arc;
 
-let db = Arc::new(Database::open("database.mxy")?);
+let db = Arc::new(Database::from("database.mxy").open()?);
 
 // Clone Arc and move to threads
 let db_clone = Arc::clone(&db);
@@ -135,7 +143,7 @@ Databases use memory mapping (`mmap`) for instant loading:
 
 ```rust
 // Opens instantly regardless of database size
-let db = Database::open("large-database.mxy")?;
+let db = Database::from("large-database.mxy").open()?;
 // Database is memory-mapped, not loaded into heap
 ```
 

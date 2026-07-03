@@ -11,7 +11,7 @@ MaxMind's GeoIP databases use the MMDB format. Matchy can read these files direc
 use matchy::Database;
 
 // Open a MaxMind GeoLite2 database
-let db = Database::open("GeoLite2-City.mmdb")?;
+let db = Database::from("GeoLite2-City.mmdb").open()?;
 
 // Query an IP address
 match db.lookup("8.8.8.8")? {
@@ -99,7 +99,7 @@ $ matchy query GeoLite2-City.mmdb 1.1.1.1
 From Rust:
 
 ```rust
-let db = Database::open("GeoLite2-City.mmdb")?;
+let db = Database::from("GeoLite2-City.mmdb").open()?;
 
 if let Some(result) = db.lookup("1.1.1.1")? {
     // Access location data

@@ -7,7 +7,7 @@ Let's build and query a [*database*][def-database] using the C API.
 Create `example.c`:
 
 ```c
-#include "matchy.h"
+#include <matchy/matchy.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -56,19 +56,23 @@ int main() {
     matchy_result_t result = matchy_query(db, "192.0.2.1");
     if (result.found) {
         char *json = matchy_result_to_json(&result);
-        printf("🔍 IP match: %s\n", json);
-        matchy_free_string(json);
-        matchy_free_result(&result);
+        if (json != NULL) {
+            printf("🔍 IP match: %s\n", json);
+            matchy_free_string(json);
+        }
     }
+    matchy_free_result(&result);
     
     // Query a pattern
     result = matchy_query(db, "phishing.evil.com");
     if (result.found) {
         char *json = matchy_result_to_json(&result);
-        printf("🔍 Pattern match: %s\n", json);
-        matchy_free_string(json);
-        matchy_free_result(&result);
+        if (json != NULL) {
+            printf("🔍 Pattern match: %s\n", json);
+            matchy_free_string(json);
+        }
     }
+    matchy_free_result(&result);
     
     // Cleanup
     matchy_close(db);
@@ -160,8 +164,7 @@ Check return values:
 ```c
 int err = matchy_builder_add(builder, key, data);
 if (err != MATCHY_SUCCESS) {
-    const char *msg = matchy_error_message(err);
-    fprintf(stderr, "Error: %s\n", msg);
+    fprintf(stderr, "Matchy error code: %d\n", err);
 }
 ```
 
@@ -170,8 +173,8 @@ Error codes:
 - `MATCHY_ERROR_INVALID_PARAM` - NULL pointer or invalid parameter
 - `MATCHY_ERROR_FILE_NOT_FOUND` - File doesn't exist
 - `MATCHY_ERROR_INVALID_FORMAT` - Corrupt or wrong format
-- `MATCHY_ERROR_PARSE_FAILED` - JSON parsing failed
-- `MATCHY_ERROR_UNKNOWN` - Other error
+- `MATCHY_ERROR_SCHEMA_VALIDATION` - Entry failed configured schema
+- `MATCHY_ERROR_INTERNAL` - Panic caught at the FFI boundary
 
 ## Memory management
 
@@ -180,8 +183,10 @@ The C API follows these rules:
 1. **Strings returned by Matchy must be freed**:
    ```c
    char *json = matchy_result_to_json(&result);
-   // Use json...
-   matchy_free_string(json);
+   if (json != NULL) {
+       // Use json...
+       matchy_free_string(json);
+   }
    ```
 
 2. **Results must be freed**:
