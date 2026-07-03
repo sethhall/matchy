@@ -8,6 +8,7 @@ use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 
 use crate::cli_utils::json_to_data_map;
+use crate::input_format::{looks_like_csv_entry_header, resolve_input_format, InputFormat};
 
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_build(
@@ -89,8 +90,8 @@ pub fn cmd_build(
         }
     }
 
-    match format.as_str() {
-        "text" => {
+    match format {
+        InputFormat::Text => {
             // Read entries from text file(s) (one per line)
             // Auto-detects IP addresses/CIDRs vs patterns
             let mut total_count = 0;
@@ -172,7 +173,7 @@ pub fn cmd_build(
                 println!("  Total: {total_count} entries");
             }
         }
-        "csv" => {
+        InputFormat::Csv => {
             // Read entries with data from CSV file(s)
             // First column must be named "entry" (or "key") containing IP/CIDR/pattern
             // Remaining columns become metadata fields
@@ -265,7 +266,7 @@ pub fn cmd_build(
                 println!("  Total: {total_entries} entries");
             }
         }
-        "json" => {
+        InputFormat::Json => {
             // Read entries with data from JSON file(s)
             // Format: [{"key": "192.168.0.0/16" or "*.example.com", "data": {...}}]
             let mut total_entries = 0;
@@ -312,7 +313,7 @@ pub fn cmd_build(
                 println!("  Total: {total_entries} entries");
             }
         }
-        "misp" => {
+        InputFormat::Misp => {
             // Read MISP JSON threat intelligence file(s) with streaming (low memory)
             use matchy::misp_importer::MispImporter;
 
@@ -336,9 +337,6 @@ pub fn cmd_build(
                 let stats = builder.stats();
                 println!("  Total indicators: {}", stats.total_entries);
             }
-        }
-        _ => {
-            anyhow::bail!("Unknown format: {format}. Use 'text', 'csv', 'json', or 'misp'");
         }
     }
 
@@ -386,92 +384,4 @@ pub fn cmd_build(
     }
 
     Ok(())
-}
-
-fn looks_like_csv_entry_header(first_line: &str) -> bool {
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .from_reader(first_line.as_bytes());
-
-    let Some(Ok(record)) = reader.records().next() else {
-        return false;
-    };
-
-    if record.len() < 2 {
-        return false;
-    }
-
-    matches!(record.get(0).map(str::trim), Some("entry" | "key"))
-}
-
-fn resolve_input_format(inputs: &[PathBuf], explicit_format: Option<&str>) -> Result<String> {
-    if let Some(format) = explicit_format {
-        return Ok(format.to_string());
-    }
-
-    let mut detected_format: Option<(&Path, &'static str)> = None;
-    for input in inputs {
-        let input_format = detect_input_format(input)?;
-        if let Some((first_input, first_format)) = detected_format {
-            if first_format != input_format {
-                anyhow::bail!(
-                    "Could not auto-detect a single input format: {} looks like {}, but {} looks like {}. \
-                    Use --input-format to parse all inputs as one format.",
-                    first_input.display(),
-                    first_format,
-                    input.display(),
-                    input_format
-                );
-            }
-        } else {
-            detected_format = Some((input.as_path(), input_format));
-        }
-    }
-
-    Ok(detected_format
-        .map(|(_, input_format)| input_format)
-        .unwrap_or("text")
-        .to_string())
-}
-
-fn detect_input_format(input: &Path) -> Result<&'static str> {
-    if let Some(extension) = input.extension().and_then(|extension| extension.to_str()) {
-        match extension.to_ascii_lowercase().as_str() {
-            "txt" => return Ok("text"),
-            "csv" => return Ok("csv"),
-            "json" => return Ok("json"),
-            "misp" => return Ok("misp"),
-            _ => {}
-        }
-    }
-
-    let content = fs::read_to_string(input).with_context(|| {
-        format!(
-            "Failed to read input file for format auto-detection: {}",
-            input.display()
-        )
-    })?;
-    let trimmed = content.trim_start_matches('\u{feff}').trim_start();
-
-    if trimmed.starts_with('{') {
-        if trimmed.contains("\"Event\"") {
-            Ok("misp")
-        } else {
-            Ok("json")
-        }
-    } else if trimmed.starts_with('[') {
-        Ok("json")
-    } else {
-        let first_line = content
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("");
-        if looks_like_csv_entry_header(first_line)
-            || (first_line.contains(',') && first_line.split(',').count() > 1)
-        {
-            Ok("csv")
-        } else {
-            Ok("text")
-        }
-    }
 }

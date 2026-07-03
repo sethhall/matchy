@@ -10,6 +10,7 @@ use std::sync::{
 use std::time::Instant;
 
 use crate::cli_utils::{format_number, format_qps, json_to_data_map};
+use crate::input_format::InputFormat;
 use crate::match_processor::{
     analyze_performance, follow_files, follow_files_parallel, process_file_with_aggregate,
     process_parallel, ProcessingStats,
@@ -17,25 +18,23 @@ use crate::match_processor::{
 use matchy::{DataValue, DatabaseBuilder, MatchMode};
 
 /// Check if the given path is a source file (JSON or CSV) that needs to be built
-fn is_source_file(path: &Path) -> Option<&'static str> {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .and_then(|ext| {
-            let ext_lower = ext.to_lowercase();
-            match ext_lower.as_str() {
-                "json" => Some("json"),
-                "csv" => Some("csv"),
-                _ => None,
-            }
-        })
+fn is_source_file(path: &Path) -> Option<InputFormat> {
+    match InputFormat::from_extension(path) {
+        Some(format @ (InputFormat::Json | InputFormat::Csv)) => Some(format),
+        _ => None,
+    }
 }
 
 /// Build a database in-memory from a source file (JSON or CSV)
-fn build_database_from_source(path: &Path, format: &str, show_stats: bool) -> Result<Vec<u8>> {
+fn build_database_from_source(
+    path: &Path,
+    format: InputFormat,
+    show_stats: bool,
+) -> Result<Vec<u8>> {
     let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
 
     match format {
-        "csv" => {
+        InputFormat::Csv => {
             // Read entries with data from CSV file
             let file = fs::File::open(path)
                 .with_context(|| format!("Failed to open CSV file: {}", path.display()))?;
@@ -108,7 +107,7 @@ fn build_database_from_source(path: &Path, format: &str, show_stats: bool) -> Re
                 eprintln!("[INFO] Loaded {total_entries} entries from CSV");
             }
         }
-        "json" => {
+        InputFormat::Json => {
             // Read entries with data from JSON file
             let content = fs::read_to_string(path)
                 .with_context(|| format!("Failed to read JSON file: {}", path.display()))?;
@@ -137,7 +136,7 @@ fn build_database_from_source(path: &Path, format: &str, show_stats: bool) -> Re
                 eprintln!("[INFO] Loaded {total_entries} entries from JSON");
             }
         }
-        "text" => {
+        InputFormat::Text => {
             // Read entries from text file (one per line)
             let file = fs::File::open(path)
                 .with_context(|| format!("Failed to open input file: {}", path.display()))?;
@@ -157,8 +156,8 @@ fn build_database_from_source(path: &Path, format: &str, show_stats: bool) -> Re
                 eprintln!("[INFO] Loaded {total_entries} entries from text file");
             }
         }
-        _ => {
-            anyhow::bail!("Unknown format: {format}. Use 'json', 'csv', or 'text'");
+        InputFormat::Misp => {
+            anyhow::bail!("MISP source auto-build is not supported by match command");
         }
     }
 
@@ -229,7 +228,7 @@ pub fn cmd_match(
         if show_stats {
             eprintln!(
                 "[INFO] Building database from {} file...",
-                source_format.to_uppercase()
+                source_format.to_string().to_uppercase()
             );
         }
         let db_bytes = build_database_from_source(database, source_format, show_stats)?;
@@ -709,19 +708,34 @@ mod tests {
 
     #[test]
     fn test_is_source_file_json() {
-        assert_eq!(is_source_file(Path::new("test.json")), Some("json"));
-        assert_eq!(is_source_file(Path::new("test.JSON")), Some("json"));
+        assert_eq!(
+            is_source_file(Path::new("test.json")),
+            Some(InputFormat::Json)
+        );
+        assert_eq!(
+            is_source_file(Path::new("test.JSON")),
+            Some(InputFormat::Json)
+        );
         assert_eq!(
             is_source_file(Path::new("/path/to/file.Json")),
-            Some("json")
+            Some(InputFormat::Json)
         );
     }
 
     #[test]
     fn test_is_source_file_csv() {
-        assert_eq!(is_source_file(Path::new("test.csv")), Some("csv"));
-        assert_eq!(is_source_file(Path::new("test.CSV")), Some("csv"));
-        assert_eq!(is_source_file(Path::new("/path/to/file.Csv")), Some("csv"));
+        assert_eq!(
+            is_source_file(Path::new("test.csv")),
+            Some(InputFormat::Csv)
+        );
+        assert_eq!(
+            is_source_file(Path::new("test.CSV")),
+            Some(InputFormat::Csv)
+        );
+        assert_eq!(
+            is_source_file(Path::new("/path/to/file.Csv")),
+            Some(InputFormat::Csv)
+        );
     }
 
     #[test]
@@ -744,7 +758,7 @@ mod tests {
         ]"#;
         fs::write(&json_path, json_content).unwrap();
 
-        let result = build_database_from_source(&json_path, "json", false);
+        let result = build_database_from_source(&json_path, InputFormat::Json, false);
         assert!(result.is_ok(), "Should build database from JSON");
         let db_bytes = result.unwrap();
         assert!(!db_bytes.is_empty(), "Database should not be empty");
@@ -759,7 +773,7 @@ mod tests {
         fs::write(&json_path, json_content).unwrap();
 
         // Should not panic with stats enabled
-        let result = build_database_from_source(&json_path, "json", true);
+        let result = build_database_from_source(&json_path, InputFormat::Json, true);
         assert!(result.is_ok());
     }
 
@@ -771,7 +785,7 @@ mod tests {
         let json_content = r#"[{"data": {"type": "internal"}}]"#;
         fs::write(&json_path, json_content).unwrap();
 
-        let result = build_database_from_source(&json_path, "json", false);
+        let result = build_database_from_source(&json_path, InputFormat::Json, false);
         assert!(result.is_err(), "Should fail without 'key' field");
         assert!(result.unwrap_err().to_string().contains("key"));
     }
@@ -783,7 +797,7 @@ mod tests {
 
         fs::write(&json_path, "{ not valid json }").unwrap();
 
-        let result = build_database_from_source(&json_path, "json", false);
+        let result = build_database_from_source(&json_path, InputFormat::Json, false);
         assert!(result.is_err(), "Should fail on invalid JSON");
     }
 
@@ -796,7 +810,7 @@ mod tests {
             "key,type,severity\n192.168.1.0/24,internal,low\n*.malware.com,malware,high\n";
         fs::write(&csv_path, csv_content).unwrap();
 
-        let result = build_database_from_source(&csv_path, "csv", false);
+        let result = build_database_from_source(&csv_path, InputFormat::Csv, false);
         assert!(result.is_ok(), "Should build database from CSV");
         let db_bytes = result.unwrap();
         assert!(!db_bytes.is_empty(), "Database should not be empty");
@@ -811,7 +825,7 @@ mod tests {
         let csv_content = "entry,type\ntest.com,phishing\n";
         fs::write(&csv_path, csv_content).unwrap();
 
-        let result = build_database_from_source(&csv_path, "csv", false);
+        let result = build_database_from_source(&csv_path, InputFormat::Csv, false);
         assert!(result.is_ok(), "Should accept 'entry' column");
     }
 
@@ -823,7 +837,7 @@ mod tests {
         let csv_content = "type,severity\nmalware,high\n";
         fs::write(&csv_path, csv_content).unwrap();
 
-        let result = build_database_from_source(&csv_path, "csv", false);
+        let result = build_database_from_source(&csv_path, InputFormat::Csv, false);
         assert!(
             result.is_err(),
             "Should fail without 'key' or 'entry' column"
@@ -841,7 +855,7 @@ mod tests {
         let csv_content = "key,count,score,active\ntest.com,42,3.14,true\n";
         fs::write(&csv_path, csv_content).unwrap();
 
-        let result = build_database_from_source(&csv_path, "csv", false);
+        let result = build_database_from_source(&csv_path, InputFormat::Csv, false);
         assert!(result.is_ok(), "Should handle numeric and boolean values");
     }
 
@@ -853,24 +867,28 @@ mod tests {
         let txt_content = "192.168.1.0/24\n*.malware.com\n# comment\n\nevil.com\n";
         fs::write(&txt_path, txt_content).unwrap();
 
-        let result = build_database_from_source(&txt_path, "text", false);
+        let result = build_database_from_source(&txt_path, InputFormat::Text, false);
         assert!(result.is_ok(), "Should build database from text file");
     }
 
     #[test]
-    fn test_build_database_unknown_format() {
+    fn test_build_database_misp_not_supported() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.xyz");
-        fs::write(&path, "test").unwrap();
+        let path = temp_dir.path().join("test.misp");
+        fs::write(&path, r#"{"Event":{"Attribute":[]}}"#).unwrap();
 
-        let result = build_database_from_source(&path, "xyz", false);
-        assert!(result.is_err(), "Should fail on unknown format");
-        assert!(result.unwrap_err().to_string().contains("Unknown format"));
+        let result = build_database_from_source(&path, InputFormat::Misp, false);
+        assert!(result.is_err(), "Should fail on unsupported MISP format");
+        assert!(result.unwrap_err().to_string().contains("MISP"));
     }
 
     #[test]
     fn test_build_database_file_not_found() {
-        let result = build_database_from_source(Path::new("/nonexistent/file.json"), "json", false);
+        let result = build_database_from_source(
+            Path::new("/nonexistent/file.json"),
+            InputFormat::Json,
+            false,
+        );
         assert!(result.is_err(), "Should fail on missing file");
     }
 }
