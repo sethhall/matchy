@@ -951,6 +951,8 @@ pub struct LookupDiagnostics {
     pub query_bytes_scanned: usize,
     /// Number of unique AC literal IDs found in the query.
     pub ac_literal_hits: usize,
+    /// Number of candidate pattern IDs emitted before deduplication.
+    pub raw_candidate_pattern_ids: usize,
     /// Number of unique pattern IDs selected for candidate checking.
     pub candidate_pattern_ids: usize,
     /// Number of pure wildcard patterns checked for the query.
@@ -971,6 +973,7 @@ impl LookupDiagnostics {
         Self {
             query_bytes_scanned: 0,
             ac_literal_hits: 0,
+            raw_candidate_pattern_ids: 0,
             candidate_pattern_ids: 0,
             pure_wildcard_checks: 0,
             glob_verification_attempts: 0,
@@ -984,7 +987,7 @@ impl LookupDiagnostics {
 // Thread-local scratch buffers for zero-allocation queries
 // These are reused across queries within each thread
 thread_local! {
-    static CANDIDATE_BUFFER: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
+    static CANDIDATE_BUFFER: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     static AC_LITERAL_BUFFER: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
     static RESULT_BUFFER: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     static NORMALIZED_TEXT_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -1202,12 +1205,23 @@ impl Paraglob {
                             let mut candidates = cand_buf.borrow_mut();
                             for &literal_id in ac_buf.borrow().iter() {
                                 ac_hash.visit_pattern_ids(literal_id, |pattern_id| {
-                                    candidates.insert(pattern_id);
+                                    candidates.push(pattern_id);
                                 });
                             }
                         });
                     }
                 }
+            });
+            CANDIDATE_BUFFER.with(|buf| {
+                let mut candidates = buf.borrow_mut();
+                #[cfg(feature = "bench-diagnostics")]
+                let raw_candidate_pattern_ids = candidates.len();
+                candidates.sort_unstable();
+                candidates.dedup();
+                #[cfg(feature = "bench-diagnostics")]
+                Self::record_lookup_diagnostic(|diagnostics| {
+                    diagnostics.raw_candidate_pattern_ids = raw_candidate_pattern_ids;
+                });
             });
             #[cfg(feature = "bench-diagnostics")]
             CANDIDATE_BUFFER.with(|buf| {

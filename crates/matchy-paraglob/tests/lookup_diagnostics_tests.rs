@@ -74,3 +74,19 @@ fn diagnostics_skip_verification_when_literal_segments_are_absent() {
         "literal-order precheck should skip full verification for impossible candidates"
     );
 }
+
+#[test]
+fn diagnostics_dedup_candidate_ids_before_verification() {
+    let patterns = vec!["*alpha*beta"];
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+
+    let (matches, diagnostics) = pg.find_all_with_diagnostics("alpha beta");
+
+    assert_eq!(matches, vec![0]);
+    assert_eq!(
+        diagnostics.raw_candidate_pattern_ids, 2,
+        "both literal anchors should produce the same candidate before deduplication"
+    );
+    assert_eq!(diagnostics.candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.glob_verification_attempts, 1);
+}
