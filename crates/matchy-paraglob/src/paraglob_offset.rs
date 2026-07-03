@@ -956,6 +956,12 @@ struct PatternDataMetadata {
     count: u32,
 }
 
+enum GlobCandidateCheck {
+    Simple(bool),
+    FullVerification,
+    NoMatch,
+}
+
 /// Lookup counters used by the `bench-diagnostics` feature.
 #[cfg(feature = "bench-diagnostics")]
 #[doc(hidden)]
@@ -975,6 +981,8 @@ pub struct LookupDiagnostics {
     pub glob_verification_attempts: usize,
     /// Number of serialized glob verification attempts that matched.
     pub successful_glob_verifications: usize,
+    /// Number of literal-order prechecks run before glob verification.
+    pub literal_order_precheck_attempts: usize,
     /// Number of serialized glob segment matcher steps.
     pub serialized_glob_segment_steps: usize,
     /// Number of star wildcard backtracking attempts.
@@ -992,6 +1000,7 @@ impl LookupDiagnostics {
             pure_wildcard_checks: 0,
             glob_verification_attempts: 0,
             successful_glob_verifications: 0,
+            literal_order_precheck_attempts: 0,
             serialized_glob_segment_steps: 0,
             star_backtracking_attempts: 0,
         }
@@ -1327,15 +1336,29 @@ impl Paraglob {
                     // No need to read string or verify, just add to results.
                     visit(entry.pattern_id);
                 } else {
-                    // Glob pattern - do glob matching
-                    if !Self::glob_literal_segments_match_in_order(
+                    match Self::check_glob_candidate_before_verification(
                         buffer,
                         entry.pattern_id,
                         text,
                         self.mode,
                         header.glob_segments_offset as usize,
                     ) {
-                        continue;
+                        GlobCandidateCheck::Simple(matches) => {
+                            #[cfg(feature = "bench-diagnostics")]
+                            Self::record_lookup_diagnostic(|diagnostics| {
+                                diagnostics.glob_verification_attempts += 1;
+                            });
+                            if matches {
+                                #[cfg(feature = "bench-diagnostics")]
+                                Self::record_lookup_diagnostic(|diagnostics| {
+                                    diagnostics.successful_glob_verifications += 1;
+                                });
+                                visit(entry.pattern_id);
+                            }
+                            continue;
+                        }
+                        GlobCandidateCheck::FullVerification => {}
+                        GlobCandidateCheck::NoMatch => continue,
                     }
 
                     // Check glob pattern using zero-copy matcher
@@ -1627,6 +1650,16 @@ impl Paraglob {
             })?;
         let index = *index_ref;
 
+        if let Some(matches) = Self::match_simple_glob_from_buffer(
+            buffer,
+            text.as_bytes(),
+            index.first_segment_offset as usize,
+            index.segment_count as usize,
+            mode,
+        ) {
+            return Ok(matches);
+        }
+
         // Match using segments directly from buffer
         let mut steps_remaining = 100_000; // Backtracking limit like GlobPattern::matches
         Self::match_segments_impl(
@@ -1639,6 +1672,112 @@ impl Paraglob {
             mode,
             &mut steps_remaining,
         )
+    }
+
+    fn check_glob_candidate_before_verification(
+        buffer: &[u8],
+        pattern_id: u32,
+        text: &str,
+        mode: MatchMode,
+        glob_segments_offset: usize,
+    ) -> GlobCandidateCheck {
+        let index_offset =
+            glob_segments_offset + (pattern_id as usize) * mem::size_of::<GlobSegmentIndex>();
+
+        if index_offset + mem::size_of::<GlobSegmentIndex>() > buffer.len() {
+            return GlobCandidateCheck::FullVerification;
+        }
+
+        let index_slice = &buffer[index_offset..];
+        let Ok((index_ref, _)) = Ref::<_, GlobSegmentIndex>::from_prefix(index_slice) else {
+            return GlobCandidateCheck::FullVerification;
+        };
+        let index = *index_ref;
+
+        if let Some(matches) = Self::match_simple_glob_from_buffer(
+            buffer,
+            text.as_bytes(),
+            index.first_segment_offset as usize,
+            index.segment_count as usize,
+            mode,
+        ) {
+            return GlobCandidateCheck::Simple(matches);
+        }
+
+        if Self::glob_literal_segments_match_in_order_from_index(buffer, index, text, mode) {
+            GlobCandidateCheck::FullVerification
+        } else {
+            GlobCandidateCheck::NoMatch
+        }
+    }
+
+    fn match_simple_glob_from_buffer(
+        buffer: &[u8],
+        text: &[u8],
+        first_segment_offset: usize,
+        segment_count: usize,
+        mode: MatchMode,
+    ) -> Option<bool> {
+        if !(2..=3).contains(&segment_count) {
+            return None;
+        }
+
+        let (literal, has_leading_star, has_trailing_star) =
+            Self::single_literal_star_shape(buffer, first_segment_offset, segment_count)?;
+
+        Some(match (has_leading_star, has_trailing_star) {
+            (true, true) => Self::find_literal_bytes(text, literal, mode).is_some(),
+            (true, false) => Self::bytes_end_with(text, literal, mode),
+            (false, true) => Self::bytes_start_with(text, literal, mode),
+            (false, false) => return None,
+        })
+    }
+
+    fn single_literal_star_shape(
+        buffer: &[u8],
+        first_segment_offset: usize,
+        segment_count: usize,
+    ) -> Option<(&[u8], bool, bool)> {
+        use crate::offset_format::GlobSegmentHeader;
+
+        let mut literal = None;
+        let mut has_leading_star = false;
+        let mut has_trailing_star = false;
+
+        for seg_idx in 0..segment_count {
+            let seg_offset = first_segment_offset + seg_idx * mem::size_of::<GlobSegmentHeader>();
+            if seg_offset + mem::size_of::<GlobSegmentHeader>() > buffer.len() {
+                return None;
+            }
+
+            let seg_slice = &buffer[seg_offset..];
+            let (seg_header_ref, _) = Ref::<_, GlobSegmentHeader>::from_prefix(seg_slice).ok()?;
+            let seg_header = *seg_header_ref;
+
+            match seg_header.segment_type {
+                0 => {
+                    if literal.is_some() {
+                        return None;
+                    }
+                    literal = Self::literal_segment_at(buffer, first_segment_offset, seg_idx);
+                }
+                1 => {
+                    if literal.is_some() {
+                        has_trailing_star = true;
+                    } else {
+                        has_leading_star = true;
+                    }
+                }
+                _ => return None,
+            }
+        }
+
+        let literal = literal?;
+        if !has_leading_star && !has_trailing_star {
+            return None;
+        }
+
+        Some((literal, has_leading_star, has_trailing_star))
     }
 
     /// Recursive matching implementation that works directly on serialized segments
@@ -1906,24 +2045,17 @@ impl Paraglob {
         }
     }
 
-    fn glob_literal_segments_match_in_order(
+    fn glob_literal_segments_match_in_order_from_index(
         buffer: &[u8],
-        pattern_id: u32,
+        index: GlobSegmentIndex,
         text: &str,
         mode: MatchMode,
-        glob_segments_offset: usize,
     ) -> bool {
-        let index_offset =
-            glob_segments_offset + (pattern_id as usize) * mem::size_of::<GlobSegmentIndex>();
-        if index_offset + mem::size_of::<GlobSegmentIndex>() > buffer.len() {
-            return true;
-        }
+        #[cfg(feature = "bench-diagnostics")]
+        Self::record_lookup_diagnostic(|diagnostics| {
+            diagnostics.literal_order_precheck_attempts += 1;
+        });
 
-        let Ok((index_ref, _)) = Ref::<_, GlobSegmentIndex>::from_prefix(&buffer[index_offset..])
-        else {
-            return true;
-        };
-        let index = *index_ref;
         let mut search_offset = 0usize;
 
         for seg_idx in 0..index.segment_count as usize {
@@ -2090,6 +2222,33 @@ impl Paraglob {
                 .iter()
                 .zip(right)
                 .all(|(left_byte, right_byte)| left_byte.eq_ignore_ascii_case(right_byte))
+    }
+
+    fn bytes_start_with(left: &[u8], prefix: &[u8], mode: MatchMode) -> bool {
+        if left.len() < prefix.len() {
+            return false;
+        }
+
+        match mode {
+            MatchMode::CaseSensitive => left.starts_with(prefix),
+            MatchMode::CaseInsensitive => {
+                Self::bytes_eq_ignore_ascii_case(&left[..prefix.len()], prefix)
+            }
+        }
+    }
+
+    fn bytes_end_with(left: &[u8], suffix: &[u8], mode: MatchMode) -> bool {
+        if left.len() < suffix.len() {
+            return false;
+        }
+
+        match mode {
+            MatchMode::CaseSensitive => left.ends_with(suffix),
+            MatchMode::CaseInsensitive => {
+                let suffix_start = left.len() - suffix.len();
+                Self::bytes_eq_ignore_ascii_case(&left[suffix_start..], suffix)
+            }
+        }
     }
 
     /// Load from buffer (for deserialization)

@@ -71,6 +71,12 @@ fn lookup_cases() -> Vec<LookupCase> {
             mode: MatchMode::CaseSensitive,
         },
         LookupCase {
+            name: "star_contains",
+            patterns: numbered_patterns(LARGE_COUNT, |i| format!("*middle_{i:04}*")),
+            query: "payload_middle_0500_tail".to_string(),
+            mode: MatchMode::CaseSensitive,
+        },
+        LookupCase {
             name: "ordered_literals",
             patterns: numbered_patterns(LARGE_COUNT, |i| {
                 format!("*alpha_{i:04}*beta_{i:04}*gamma_{i:04}")

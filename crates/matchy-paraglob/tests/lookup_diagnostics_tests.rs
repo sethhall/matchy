@@ -43,9 +43,9 @@ fn lookup_diagnostics_default_is_empty() {
 
 #[test]
 fn diagnostics_show_star_jumps_to_following_literal() {
-    let patterns = vec!["*needle"];
+    let patterns = vec!["*needle?"];
     let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
-    let query = format!("{}needle", "a".repeat(128));
+    let query = format!("{}needleX", "a".repeat(128));
 
     let (matches, diagnostics) = pg.find_all_with_diagnostics(&query);
 
@@ -55,6 +55,74 @@ fn diagnostics_show_star_jumps_to_following_literal() {
         "star before a literal should jump to literal occurrences, got {} attempts",
         diagnostics.star_backtracking_attempts
     );
+}
+
+fn assert_simple_glob_uses_fast_path(pattern: &str, query: &str, expected_matches: &[u32]) {
+    assert_simple_glob_uses_fast_path_with_mode(
+        pattern,
+        query,
+        MatchMode::CaseSensitive,
+        expected_matches,
+    );
+}
+
+fn assert_simple_glob_uses_fast_path_with_mode(
+    pattern: &str,
+    query: &str,
+    mode: MatchMode,
+    expected_matches: &[u32],
+) {
+    let patterns = vec![pattern];
+    let pg = Paraglob::build_from_patterns(&patterns, mode).unwrap();
+
+    let (matches, diagnostics) = pg.find_all_with_diagnostics(query);
+
+    assert_eq!(matches, expected_matches);
+    assert_eq!(diagnostics.raw_candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.glob_verification_attempts, 1);
+    assert_eq!(
+        diagnostics.literal_order_precheck_attempts, 0,
+        "simple glob {pattern:?} should not run the literal-order precheck"
+    );
+    assert_eq!(
+        diagnostics.serialized_glob_segment_steps, 0,
+        "simple glob {pattern:?} should not use the general segment walker"
+    );
+    assert_eq!(
+        diagnostics.star_backtracking_attempts, 0,
+        "simple glob {pattern:?} should not backtrack through star matching"
+    );
+}
+
+#[test]
+fn diagnostics_fast_path_simple_suffix_glob() {
+    assert_simple_glob_uses_fast_path("*.evil.com", "cdn.evil.com", &[0]);
+}
+
+#[test]
+fn diagnostics_fast_path_simple_prefix_glob() {
+    assert_simple_glob_uses_fast_path("evil.*", "evil.example", &[0]);
+}
+
+#[test]
+fn diagnostics_fast_path_simple_contains_glob() {
+    assert_simple_glob_uses_fast_path("*.evil.*", "cdn.evil.example", &[0]);
+}
+
+#[test]
+fn diagnostics_fast_path_simple_suffix_glob_case_insensitive() {
+    assert_simple_glob_uses_fast_path_with_mode(
+        "*.Evil.COM",
+        "cdn.evil.com",
+        MatchMode::CaseInsensitive,
+        &[0],
+    );
+}
+
+#[test]
+fn diagnostics_fast_path_simple_suffix_rejects_non_suffix_match() {
+    assert_simple_glob_uses_fast_path("*.evil.com", "cdn.evil.com.example", &[]);
 }
 
 #[test]
@@ -86,6 +154,7 @@ fn diagnostics_skip_verification_when_literal_segments_are_absent() {
     assert!(matches.is_empty());
     assert_eq!(diagnostics.raw_candidate_pattern_ids, 1);
     assert_eq!(diagnostics.candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.literal_order_precheck_attempts, 1);
     assert_eq!(
         diagnostics.glob_verification_attempts, 0,
         "literal-order precheck should skip full verification for impossible candidates"
