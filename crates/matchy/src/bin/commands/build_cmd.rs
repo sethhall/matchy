@@ -13,7 +13,7 @@ use crate::cli_utils::json_to_data_map;
 pub fn cmd_build(
     inputs: &[PathBuf],
     output: &Path,
-    format: &str,
+    format: Option<&str>,
     database_type: Option<&str>,
     description: Option<&str>,
     desc_lang: &str,
@@ -22,6 +22,9 @@ pub fn cmd_build(
     case_insensitive: bool,
     update_url: Option<&str>,
 ) -> Result<()> {
+    let format_was_explicit = format.is_some();
+    let format = resolve_input_format(inputs, format)?;
+
     let match_mode = if case_insensitive {
         MatchMode::CaseInsensitive
     } else {
@@ -35,7 +38,11 @@ pub fn cmd_build(
             println!("    - {}", input.display());
         }
         println!("  Output: {}", output.display());
-        println!("  Format: {format}");
+        if format_was_explicit {
+            println!("  Format: {format}");
+        } else {
+            println!("  Format: {format} (auto-detected)");
+        }
         println!(
             "  Match mode: {}",
             if case_insensitive {
@@ -82,7 +89,7 @@ pub fn cmd_build(
         }
     }
 
-    match format {
+    match format.as_str() {
         "text" => {
             // Read entries from text file(s) (one per line)
             // Auto-detects IP addresses/CIDRs vs patterns
@@ -95,39 +102,41 @@ pub fn cmd_build(
 
                 // Validate that the file doesn't look like JSON or CSV
                 // (common user error: using wrong format flag)
-                if let Ok(content) = fs::read_to_string(input) {
-                    let trimmed = content.trim_start();
-                    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-                        if trimmed.contains("\"Event\"") {
+                if format_was_explicit {
+                    if let Ok(content) = fs::read_to_string(input) {
+                        let trimmed = content.trim_start();
+                        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                            if trimmed.contains("\"Event\"") {
+                                anyhow::bail!(
+                                    "File {} appears to be MISP JSON format.\n\n\
+                                    You specified --input-format text, but this looks like MISP JSON.\n\
+                                    Try: --input-format misp",
+                                    input.display()
+                                );
+                            } else {
+                                eprintln!(
+                                    "Warning: {} looks like JSON but you specified --input-format text.\n\
+                                    If this is a JSON file, use --input-format json instead.",
+                                    input.display()
+                                );
+                            }
+                        }
+                        // Check for CSV-like content
+                        let first_line = content.lines().next().unwrap_or("");
+                        if looks_like_csv_entry_header(first_line) {
                             anyhow::bail!(
-                                "File {} appears to be MISP JSON format.\n\n\
-                                You specified --input-format text, but this looks like MISP JSON.\n\
-                                Try: --input-format misp",
+                                "File {} appears to be CSV with an 'entry' or 'key' header.\n\n\
+                                You specified --input-format text, but this looks like CSV.\n\
+                                Try: --input-format csv",
                                 input.display()
                             );
-                        } else {
+                        } else if first_line.contains(',') && first_line.split(',').count() > 1 {
                             eprintln!(
-                                "Warning: {} looks like JSON but you specified --input-format text.\n\
-                                If this is a JSON file, use --input-format json instead.",
+                                "Warning: {} looks like CSV but you specified --input-format text.\n\
+                                If this is a CSV file, use --input-format csv instead.",
                                 input.display()
                             );
                         }
-                    }
-                    // Check for CSV-like content
-                    let first_line = content.lines().next().unwrap_or("");
-                    if looks_like_csv_entry_header(first_line) {
-                        anyhow::bail!(
-                            "File {} appears to be CSV with an 'entry' or 'key' header.\n\n\
-                            You specified --input-format text, but this looks like CSV.\n\
-                            Try: --input-format csv",
-                            input.display()
-                        );
-                    } else if first_line.contains(',') && first_line.split(',').count() > 1 {
-                        eprintln!(
-                            "Warning: {} looks like CSV but you specified --input-format text.\n\
-                            If this is a CSV file, use --input-format csv instead.",
-                            input.display()
-                        );
                     }
                 }
 
@@ -393,4 +402,76 @@ fn looks_like_csv_entry_header(first_line: &str) -> bool {
     }
 
     matches!(record.get(0).map(str::trim), Some("entry" | "key"))
+}
+
+fn resolve_input_format(inputs: &[PathBuf], explicit_format: Option<&str>) -> Result<String> {
+    if let Some(format) = explicit_format {
+        return Ok(format.to_string());
+    }
+
+    let mut detected_format: Option<(&Path, &'static str)> = None;
+    for input in inputs {
+        let input_format = detect_input_format(input)?;
+        if let Some((first_input, first_format)) = detected_format {
+            if first_format != input_format {
+                anyhow::bail!(
+                    "Could not auto-detect a single input format: {} looks like {}, but {} looks like {}. \
+                    Use --input-format to parse all inputs as one format.",
+                    first_input.display(),
+                    first_format,
+                    input.display(),
+                    input_format
+                );
+            }
+        } else {
+            detected_format = Some((input.as_path(), input_format));
+        }
+    }
+
+    Ok(detected_format
+        .map(|(_, input_format)| input_format)
+        .unwrap_or("text")
+        .to_string())
+}
+
+fn detect_input_format(input: &Path) -> Result<&'static str> {
+    if let Some(extension) = input.extension().and_then(|extension| extension.to_str()) {
+        match extension.to_ascii_lowercase().as_str() {
+            "txt" => return Ok("text"),
+            "csv" => return Ok("csv"),
+            "json" => return Ok("json"),
+            "misp" => return Ok("misp"),
+            _ => {}
+        }
+    }
+
+    let content = fs::read_to_string(input).with_context(|| {
+        format!(
+            "Failed to read input file for format auto-detection: {}",
+            input.display()
+        )
+    })?;
+    let trimmed = content.trim_start_matches('\u{feff}').trim_start();
+
+    if trimmed.starts_with('{') {
+        if trimmed.contains("\"Event\"") {
+            Ok("misp")
+        } else {
+            Ok("json")
+        }
+    } else if trimmed.starts_with('[') {
+        Ok("json")
+    } else {
+        let first_line = content
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("");
+        if looks_like_csv_entry_header(first_line)
+            || (first_line.contains(',') && first_line.split(',').count() > 1)
+        {
+            Ok("csv")
+        } else {
+            Ok("text")
+        }
+    }
 }

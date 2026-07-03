@@ -200,7 +200,8 @@ enum Commands {
         output: PathBuf,
 
         /// Input file format (how to parse input files)
-        /// - text: One pattern per line (default)
+        /// If omitted, the format is auto-detected from file extension or content.
+        /// - text: One pattern per line
         /// - csv: Comma-separated values with 'entry' or 'key' column
         /// - json: JSON array of {"key": "pattern", "data": {...}}
         /// - misp: MISP threat intelligence JSON format
@@ -208,10 +209,9 @@ enum Commands {
             short = 'f',
             long = "input-format",
             alias = "format",
-            default_value = "text",
             value_name = "FORMAT"
         )]
-        format: String,
+        format: Option<String>,
 
         /// Custom database type name for metadata (e.g., "MyCompany-ThreatIntel")
         /// This is NOT the input format - use --input-format for that
@@ -402,7 +402,7 @@ fn main() -> Result<()> {
         } => cmd_build(
             &inputs,
             &output,
-            &format,
+            format.as_deref(),
             database_type.as_deref(),
             description.as_deref(),
             &desc_lang,

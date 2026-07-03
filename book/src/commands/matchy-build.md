@@ -34,7 +34,7 @@ $ matchy build domains.csv --input-format csv --output domains.mxy --ignore-case
 ### `--input-format <FORMAT>`
 
 Explicitly specify input format: `text`, `csv`, `json`, or `misp`. If not specified,
-input is parsed as plain text with one entry per line.
+matchy auto-detects the format from the file extension or file contents.
 
 ```console
 $ matchy build data.txt --input-format csv --output output.mxy

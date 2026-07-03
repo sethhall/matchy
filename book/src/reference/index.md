@@ -31,7 +31,7 @@ Technical specifications:
 
 * [Binary Format Specification](binary-format.md) - Database file format
 * [MMDB Integration Design](mmdb-integration.md) - MaxMind compatibility
-* [Input File Formats](input-formats.md) - CSV, JSON, TSV formats
+* [Input File Formats](input-formats.md) - Text, CSV, JSON, and MISP formats
 * [Architecture Overview](architecture.md) - Internal design
 
 ## Performance

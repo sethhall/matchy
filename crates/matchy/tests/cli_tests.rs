@@ -37,6 +37,7 @@ fn test_build_help() {
         .success()
         .stdout(predicate::str::contains("Build a unified database"))
         .stdout(predicate::str::contains("--input-format"))
+        .stdout(predicate::str::contains("auto-detected"))
         .stdout(predicate::str::contains("--ignore-case"))
         .stdout(predicate::str::contains("--case-insensitive").not());
 }
@@ -723,6 +724,35 @@ exact.com,suspicious,low\n";
 }
 
 #[test]
+fn test_build_csv_auto_detects_input_format_by_extension() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("simple.csv");
+    let output_file = temp_dir.path().join("simple.mxy");
+
+    let csv_content = "entry,category,threat_level\n\
+192.0.2.1,malware,high\n\
+*.phishing.com,phishing,medium\n";
+    fs::write(&input_file, csv_content).unwrap();
+
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("--output")
+        .arg(&output_file)
+        .assert()
+        .success();
+
+    matchy_cmd()
+        .arg("query")
+        .arg(&output_file)
+        .arg("192.0.2.1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"category\": \"malware\""))
+        .stdout(predicate::str::contains("\"cidr\": \"192.0.2.1/32\""));
+}
+
+#[test]
 fn test_build_text_rejects_csv_entry_header() {
     let temp_dir = TempDir::new().unwrap();
     let input_file = temp_dir.path().join("simple.csv");
@@ -739,6 +769,8 @@ fn test_build_text_rejects_csv_entry_header() {
         .arg(&input_file)
         .arg("--output")
         .arg(&output_file)
+        .arg("--input-format")
+        .arg("text")
         .assert()
         .failure()
         .stderr(predicate::str::contains("appears to be CSV"))
@@ -769,6 +801,91 @@ fn test_build_json_format() {
         .success();
 
     assert!(output_file.exists());
+}
+
+#[test]
+fn test_build_json_auto_detects_input_format_by_extension() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("data.json");
+    let output_file = temp_dir.path().join("test.mxy");
+
+    let json_content = r#"[
+        {"key": "*.malware.com", "data": {"severity": "high"}}
+    ]"#;
+    fs::write(&input_file, json_content).unwrap();
+
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&output_file)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("looks like JSON").not());
+
+    matchy_cmd()
+        .arg("query")
+        .arg(&output_file)
+        .arg("payload.malware.com")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"severity\": \"high\""));
+}
+
+#[test]
+fn test_build_json_auto_detects_input_format_by_content() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("data.feed");
+    let output_file = temp_dir.path().join("test.mxy");
+
+    let json_content = r#"[
+        {"key": "*.malware.com", "data": {"severity": "high"}}
+    ]"#;
+    fs::write(&input_file, json_content).unwrap();
+
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&output_file)
+        .assert()
+        .success();
+
+    matchy_cmd()
+        .arg("query")
+        .arg(&output_file)
+        .arg("payload.malware.com")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"severity\": \"high\""));
+}
+
+#[test]
+fn test_build_auto_detect_rejects_mixed_input_formats() {
+    let temp_dir = TempDir::new().unwrap();
+    let json_file = temp_dir.path().join("data.json");
+    let csv_file = temp_dir.path().join("data.csv");
+    let output_file = temp_dir.path().join("test.mxy");
+
+    fs::write(
+        &json_file,
+        r#"[{"key": "*.malware.com", "data": {"severity": "high"}}]"#,
+    )
+    .unwrap();
+    fs::write(&csv_file, "entry,category\n192.0.2.1,malware\n").unwrap();
+
+    matchy_cmd()
+        .arg("build")
+        .arg(&json_file)
+        .arg(&csv_file)
+        .arg("-o")
+        .arg(&output_file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Could not auto-detect a single input format",
+        ))
+        .stderr(predicate::str::contains("--input-format"));
 }
 
 #[test]

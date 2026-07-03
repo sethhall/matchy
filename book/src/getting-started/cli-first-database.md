@@ -117,10 +117,10 @@ String lookups:  8,932,441 queries/sec (112ns avg)
 
 The CLI supports multiple input formats:
 
+- **Text** - One indicator per line
 - **CSV** - Comma-separated values (shown above)
-- **JSON** - One JSON object per line
-- **JSONL** - JSON Lines format
-- **TSV** - Tab-separated values
+- **JSON** - JSON array of entries with metadata
+- **MISP** - MISP threat intelligence JSON
 
 See [Input File Formats](../reference/input-formats.md) for details.
 

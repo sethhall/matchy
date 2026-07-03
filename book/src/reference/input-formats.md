@@ -179,61 +179,39 @@ matchy build --input-format csv --output output.mxy input.csv
 ### Specification
 
 ```typescript
-// Object format (recommended)
-{
-  "entry1": { /* metadata */ },
-  "entry2": { /* metadata */ },
-  ...
-}
-
-// Array format
 [
-  { "entry": "entry1", /* metadata */ },
-  { "entry": "entry2", /* metadata */ },
-  ...
-]
-```
-
-### Object Format (Recommended)
-
-**Keys** are entries (IPs, patterns, strings)  
-**Values** are metadata objects
-
-```json
-{
-  "192.0.2.1": {
-    "category": "malware",
-    "threat_level": "high",
-    "first_seen": "2024-01-15",
-    "tags": ["botnet", "c2"]
+  {
+    "key": "entry1",
+    "data": { /* metadata */ }
   },
-  "*.phishing.com": {
-    "category": "phishing",
-    "threat_level": "medium",
-    "verified": true
-  },
-  "10.0.0.0/8": {
-    "category": "internal",
-    "allow": true
+  {
+    "key": "entry2",
+    "data": { /* metadata */ }
   }
-}
+]
 ```
 
 ### Array Format
 
-Each object must have `entry` or `key` field:
+JSON input must be a single array. Each object must have a `key` field containing
+the IP, CIDR, glob pattern, or exact string. Optional metadata belongs under the
+`data` field.
 
 ```json
 [
   {
-    "entry": "192.0.2.1",
-    "category": "malware",
-    "score": 95
+    "key": "192.0.2.1",
+    "data": {
+      "category": "malware",
+      "score": 95
+    }
   },
   {
-    "entry": "*.evil.com",
-    "category": "phishing",
-    "score": 87
+    "key": "*.evil.com",
+    "data": {
+      "category": "phishing",
+      "score": 87
+    }
   }
 ]
 ```
@@ -243,19 +221,25 @@ Each object must have `entry` or `key` field:
 ```json
 [
   {
-    "entry": "literal:file*.backup",
-    "category": "filesystem",
-    "note": "Match literal asterisk"
+    "key": "literal:file*.backup",
+    "data": {
+      "category": "filesystem",
+      "note": "Match literal asterisk"
+    }
   },
   {
-    "entry": "glob:example.com",
-    "category": "domain",
-    "note": "Force pattern matching"
+    "key": "glob:example.com",
+    "data": {
+      "category": "domain",
+      "note": "Force pattern matching"
+    }
   },
   {
-    "entry": "ip:10.0.0.0/8",
-    "category": "network",
-    "note": "Explicit IP range"
+    "key": "ip:10.0.0.0/8",
+    "data": {
+      "category": "network",
+      "note": "Explicit IP range"
+    }
   }
 ]
 ```
@@ -274,24 +258,27 @@ Each object must have `entry` or `key` field:
 ### Nested Structures
 
 ```json
-{
-  "192.0.2.1": {
-    "threat": {
-      "category": "malware",
-      "subcategory": "trojan",
-      "details": {
-        "variant": "emotet",
-        "version": "3.2"
+[
+  {
+    "key": "192.0.2.1",
+    "data": {
+      "threat": {
+        "category": "malware",
+        "subcategory": "trojan",
+        "details": {
+          "variant": "emotet",
+          "version": "3.2"
+        }
+      },
+      "tags": ["c2", "botnet", "high-confidence"],
+      "scores": {
+        "static": 95,
+        "dynamic": 87,
+        "reputation": 92
       }
-    },
-    "tags": ["c2", "botnet", "high-confidence"],
-    "scores": {
-      "static": 95,
-      "dynamic": 87,
-      "reputation": 92
     }
   }
-}
+]
 ```
 
 ### CLI Usage
@@ -426,7 +413,7 @@ matchy build --input-format misp --output output.mxy threat-feed.json
 |-----------|--------|
 | `.txt` | Text |
 | `.csv` | CSV |
-| `.json` | JSON (auto-detect object vs. array) |
+| `.json` | JSON array |
 | `.misp` | MISP |
 
 ### By Content

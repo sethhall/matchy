@@ -49,7 +49,7 @@ matchy query threats.mxy 1.2.3.4
 - **Rich metadata**: Attach threat level, category, source to each indicator
 - **MaxMind compatible**: Query GeoIP databases directly - no need for separate libmaxminddb
 - **Build MMDB databases**: Create MaxMind-compatible databases from CSVs (libmaxminddb has no builder)
-- **Multiple formats**: Import from CSV, JSONL, or read existing MaxMind MMDB files
+- **Multiple formats**: Import from text, CSV, JSON, MISP, or read existing MaxMind MMDB files
 
 ## Quick Start
 
