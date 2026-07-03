@@ -33,7 +33,9 @@
 use matchy_match_mode::MatchMode;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use std::cell::RefCell;
 use std::mem;
+use std::thread_local;
 use xxhash_rust::xxh3::xxh3_128;
 
 pub mod validation;
@@ -61,6 +63,10 @@ pub const MATCHY_LITERAL_HASH_VERSION: u32 = 3;
 const HEADER_SIZE: usize = 32;
 const EMPTY_HASH_LO: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 const EMPTY_HASH_HI: u32 = 0xFFFF_FFFF;
+
+thread_local! {
+    static NORMALIZED_QUERY_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -365,10 +371,7 @@ impl<'a> LiteralHash<'a> {
 
     #[must_use]
     pub fn lookup(&self, query: &str) -> Option<u32> {
-        let (query_lo, query_hi) = match self.mode {
-            MatchMode::CaseSensitive => compute_hash(query),
-            MatchMode::CaseInsensitive => compute_hash(&query.to_lowercase()),
-        };
+        let (query_lo, query_hi) = compute_query_hash(query, self.mode);
 
         let num_shards = self.header.num_shards as usize;
         let shard_id = hash_to_shard(query_lo, num_shards);
@@ -519,8 +522,8 @@ fn build_shard(shard_id: usize, entries: &[(u64, u32, u32)]) -> Shard {
 /// Compute 96-bit hash as (u64, u32) from XXH3_128.
 /// Never returns the empty marker to avoid collisions.
 #[inline]
-fn compute_hash(s: &str) -> (u64, u32) {
-    let full = xxh3_128(s.as_bytes());
+fn compute_hash_bytes(bytes: &[u8]) -> (u64, u32) {
+    let full = xxh3_128(bytes);
     let lo = (full & 0xFFFF_FFFF_FFFF_FFFF) as u64;
     let hi = ((full >> 64) & 0xFFFF_FFFF) as u32;
 
@@ -529,6 +532,25 @@ fn compute_hash(s: &str) -> (u64, u32) {
         (lo ^ 1, hi ^ 1)
     } else {
         (lo, hi)
+    }
+}
+
+#[inline]
+fn compute_hash(s: &str) -> (u64, u32) {
+    compute_hash_bytes(s.as_bytes())
+}
+
+fn compute_query_hash(query: &str, mode: MatchMode) -> (u64, u32) {
+    match mode {
+        MatchMode::CaseSensitive => compute_hash(query),
+        MatchMode::CaseInsensitive if query.is_ascii() => NORMALIZED_QUERY_BUFFER.with(|buf| {
+            let mut normalized = buf.borrow_mut();
+            normalized.clear();
+            normalized.extend_from_slice(query.as_bytes());
+            normalized.make_ascii_lowercase();
+            compute_hash_bytes(&normalized)
+        }),
+        MatchMode::CaseInsensitive => compute_hash(&query.to_lowercase()),
     }
 }
 

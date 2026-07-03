@@ -75,6 +75,17 @@ fn test_multiple_patterns_matching_same_text() {
 }
 
 #[test]
+fn test_find_first_matches_find_all_ordering() {
+    let patterns = vec!["*.txt", "*file*", "test*"];
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+
+    let all = pg.find_all("testfile.txt");
+
+    assert_eq!(all.first().copied(), pg.find_first("testfile.txt"));
+    assert_eq!(None, pg.find_first("nomatch"));
+}
+
+#[test]
 fn test_case_sensitivity() {
     let patterns = vec!["Test*", "HELLO"];
     let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();

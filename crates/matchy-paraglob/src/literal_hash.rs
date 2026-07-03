@@ -260,79 +260,71 @@ impl<'a> ACLiteralHash<'a> {
         })
     }
 
-    /// Lookup pattern IDs for an AC literal ID
+    /// Visit pattern IDs for an AC literal ID without allocating.
     ///
-    /// Returns the list of pattern IDs if found, None otherwise.
-    /// This is O(1) average case with linear probing.
-    pub fn lookup(&self, literal_id: u32) -> Option<Vec<u32>> {
+    /// Returns `true` if the literal ID was found in the hash table, `false`
+    /// otherwise.
+    pub fn visit_pattern_ids(&self, literal_id: u32, visit: impl FnMut(u32)) -> bool {
         let hash = compute_hash(literal_id);
-        let table_size = usize::try_from(self.header.table_size).ok()?;
+        let Ok(table_size) = usize::try_from(self.header.table_size) else {
+            return false;
+        };
         let mut slot = usize::try_from(hash).unwrap_or(0) % table_size;
 
         let entry_size = mem::size_of::<ACHashEntry>();
 
-        // Linear probing search
         for _ in 0..table_size {
             let entry_offset = self.table_start + slot * entry_size;
             if entry_offset + entry_size > self.buffer.len() {
-                return None;
+                return false;
             }
 
-            // Use zerocopy for entry parsing (HOT PATH optimization)
             let entry_slice = &self.buffer[entry_offset..];
-            let (entry_ref, _) = Ref::<_, ACHashEntry>::from_prefix(entry_slice).ok()?;
+            let Ok((entry_ref, _)) = Ref::<_, ACHashEntry>::from_prefix(entry_slice) else {
+                return false;
+            };
             let entry = *entry_ref;
 
-            // Empty slot - not found
             if entry.literal_id == EMPTY_SLOT {
-                return None;
+                return false;
             }
 
-            // Found it!
             if entry.literal_id == literal_id {
-                return self.read_pattern_list(
+                return self.visit_pattern_list(
                     entry.patterns_offset as usize,
                     entry.pattern_count as usize,
+                    visit,
                 );
             }
 
             slot = (slot + 1) % table_size;
         }
 
-        None
+        false
     }
 
-    /// Lookup and return pattern IDs as a slice (zero allocation)
-    ///
-    /// Returns a slice view into the buffer, or empty slice if not found.
-    /// This is O(1) average case with linear probing.
-    ///
-    /// Note: Due to alignment requirements, this method now allocates a Vec.
-    /// The zero-copy optimization was removed to ensure memory safety.
-    pub fn lookup_slice(&self, literal_id: u32) -> Vec<u32> {
-        self.lookup(literal_id).unwrap_or_default()
-    }
-
-    /// Read a pattern list from the patterns section
-    fn read_pattern_list(&self, offset: usize, count: usize) -> Option<Vec<u32>> {
+    /// Visit a pattern list from the patterns section without allocating.
+    fn visit_pattern_list(&self, offset: usize, count: usize, mut visit: impl FnMut(u32)) -> bool {
         let abs_offset = self.patterns_start + offset;
-        let bytes_needed = count * 4; // u32 = 4 bytes
+        let bytes_needed = count * 4;
 
         if abs_offset + bytes_needed > self.buffer.len() {
-            return None;
+            return false;
         }
 
-        let mut patterns = Vec::with_capacity(count);
         for i in 0..count {
             let pattern_offset = abs_offset + i * 4;
+            let Some(pattern_bytes) = self.buffer.get(pattern_offset..pattern_offset + 4) else {
+                return false;
+            };
             let pattern_id = u32::from_le_bytes(
-                self.buffer[pattern_offset..pattern_offset + 4]
+                pattern_bytes
                     .try_into()
-                    .ok()?,
+                    .expect("slice length checked to be 4 bytes"),
             );
-            patterns.push(pattern_id);
+            visit(pattern_id);
         }
 
-        Some(patterns)
+        true
     }
 }

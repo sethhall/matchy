@@ -213,6 +213,21 @@ impl LookupRef {
     }
 }
 
+#[inline]
+fn lookup_ref_from_query_result(result: &QueryResult) -> LookupRef {
+    match result {
+        QueryResult::Ip {
+            prefix_len,
+            data_offset,
+            ..
+        } => LookupRef::ip(*data_offset, *prefix_len),
+        QueryResult::Pattern { data_offsets, .. } => {
+            LookupRef::pattern(data_offsets.first().copied().unwrap_or(0))
+        }
+        QueryResult::NotFound => LookupRef::not_found(),
+    }
+}
+
 /// Database format type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DatabaseFormat {
@@ -1320,24 +1335,16 @@ impl Database {
             return Self::resolve_live_db(live).lookup_ref(query);
         }
 
-        // Check cache first - if hit, derive LookupRef from cached QueryResult
-        if let Some(Some(result)) = self.with_cache(|cache| cache.get(query).cloned()) {
-            let lookup = match result {
-                QueryResult::Ip {
-                    prefix_len,
-                    data_offset,
-                    ..
-                } => LookupRef::ip(data_offset, prefix_len),
-                QueryResult::Pattern { data_offsets, .. } => {
-                    LookupRef::pattern(*data_offsets.first().unwrap_or(&0))
-                }
-                QueryResult::NotFound => LookupRef::not_found(),
-            };
+        // Check cache without cloning decoded data. Cloning a cached QueryResult
+        // can allocate, but deriving a LookupRef from a borrowed result keeps the
+        // offset-only fast path cheap while preserving cache hit behavior.
+        if let Some(Some(lookup)) =
+            self.with_cache(|cache| cache.get(query).map(lookup_ref_from_query_result))
+        {
             self.record_lookup_ref_stats(query, lookup, true);
             return Ok(lookup);
         }
 
-        // Cache miss - do uncached lookup
         let lookup = if let Ok(addr) = query.parse::<IpAddr>() {
             self.lookup_ip_ref(addr)
         } else {
@@ -1411,10 +1418,7 @@ impl Database {
 
         // 2. Check glob patterns (for wildcard matches)
         if let Some(ref pg) = self.pattern_matcher {
-            let glob_pattern_ids = pg.find_all(pattern);
-
-            // Return the first match's offset
-            if let Some(&pattern_id) = glob_pattern_ids.first() {
+            if let Some(pattern_id) = pg.find_first(pattern) {
                 // For combined databases, use mappings to get offset
                 if let Some(mappings) = &self.pattern_data_mappings {
                     if let Some(data_offset) = mappings.get_offset(pattern_id, self.data.as_slice())

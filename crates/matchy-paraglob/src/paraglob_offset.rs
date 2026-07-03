@@ -1058,18 +1058,21 @@ impl Paraglob {
         builder.build()
     }
 
-    /// Find all matching pattern IDs
-    #[must_use]
-    pub fn find_all(&self, text: &str) -> Vec<u32> {
+    /// Visit matching pattern IDs without allocating an owned result vector.
+    ///
+    /// Matches are visited before sorting or deduplication. Callers that need the
+    /// same ordering as [`find_all`](Self::find_all) should collect, sort, and
+    /// deduplicate the visited IDs.
+    fn visit_matches_unsorted(&self, text: &str, mut visit: impl FnMut(u32)) {
         let buffer = self.buffer.as_slice();
         if buffer.is_empty() {
-            return Vec::new();
+            return;
         }
 
         // SAFETY: Fast path - header is at offset 0, always aligned
         let header = unsafe {
             if buffer.len() < mem::size_of::<ParaglobHeader>() {
-                return Vec::new();
+                return;
             }
             let ptr = buffer.as_ptr().cast::<ParaglobHeader>();
             ptr.read()
@@ -1104,19 +1107,17 @@ impl Paraglob {
                 if !ac_buf.borrow().is_empty() {
                     if let Some(ref ac_hash) = self.ac_literal_hash {
                         CANDIDATE_BUFFER.with(|cand_buf| {
+                            let mut candidates = cand_buf.borrow_mut();
                             for &literal_id in ac_buf.borrow().iter() {
-                                let pattern_ids = ac_hash.lookup_slice(literal_id);
-                                cand_buf.borrow_mut().extend(pattern_ids);
+                                ac_hash.visit_pattern_ids(literal_id, |pattern_id| {
+                                    candidates.insert(pattern_id);
+                                });
                             }
                         });
                     }
                 }
             });
         }
-
-        // Phase 2: Verify candidates (or all patterns if no AC)
-        // Reuse result buffer to avoid allocation
-        RESULT_BUFFER.with(|buf| buf.borrow_mut().clear());
 
         // CRITICAL: Always check pure wildcards first (patterns with no literals)
         // These must be checked on every query regardless of AC results
@@ -1163,7 +1164,7 @@ impl Paraglob {
                     self.mode,
                     header.glob_segments_offset as usize,
                 ) {
-                    RESULT_BUFFER.with(|buf| buf.borrow_mut().push(wildcard.pattern_id));
+                    visit(wildcard.pattern_id);
                 }
             }
         }
@@ -1188,7 +1189,7 @@ impl Paraglob {
                 if entry.pattern_type == 0 {
                     // Literal pattern - AC automaton already confirmed this matches!
                     // No need to read string or verify, just add to results.
-                    RESULT_BUFFER.with(|buf| buf.borrow_mut().push(entry.pattern_id));
+                    visit(entry.pattern_id);
                 } else {
                     // Glob pattern - do glob matching
                     // Check glob pattern using zero-copy matcher
@@ -1199,14 +1200,37 @@ impl Paraglob {
                         self.mode,
                         header.glob_segments_offset as usize,
                     ) {
-                        RESULT_BUFFER.with(|buf| buf.borrow_mut().push(entry.pattern_id));
+                        visit(entry.pattern_id);
                     }
                 }
             }
         });
+    }
 
+    /// Find the first matching pattern ID in the same sorted order used by `find_all`.
+    ///
+    /// This avoids allocating an owned result vector, making it suitable for
+    /// offset-only lookup paths that only need one match.
+    #[must_use]
+    pub fn find_first(&self, text: &str) -> Option<u32> {
+        let mut first = None;
+        self.visit_matches_unsorted(text, |pattern_id| {
+            first = Some(first.map_or(pattern_id, |current: u32| current.min(pattern_id)));
+        });
+        first
+    }
+
+    /// Find all matching pattern IDs
+    #[must_use]
+    pub fn find_all(&self, text: &str) -> Vec<u32> {
         RESULT_BUFFER.with(|buf| {
             let mut result = buf.borrow_mut();
+            result.clear();
+
+            self.visit_matches_unsorted(text, |pattern_id| {
+                result.push(pattern_id);
+            });
+
             result.sort_unstable();
             result.dedup();
             // Clone the result (caller owns it)
@@ -1224,21 +1248,31 @@ impl Paraglob {
         mode: MatchMode,
         matches: &mut HashSet<u32>,
     ) {
-        use crate::offset_format::ACNodeHot;
-
         if ac_buffer.is_empty() || text.is_empty() {
             return;
         }
 
-        // Pre-lowercase text once for case-insensitive mode using SIMD (4-8x faster)
-        let mut normalized_text_buf: Vec<u8> = Vec::new();
-        let search_text = match mode {
-            MatchMode::CaseInsensitive => {
-                crate::simd_utils::ascii_lowercase(text, &mut normalized_text_buf);
-                normalized_text_buf.as_slice()
+        match mode {
+            MatchMode::CaseSensitive => {
+                Self::run_ac_matching_normalized(ac_buffer, text, matches);
             }
-            MatchMode::CaseSensitive => text,
-        };
+            MatchMode::CaseInsensitive => {
+                NORMALIZED_TEXT_BUFFER.with(|buf| {
+                    let mut normalized = buf.borrow_mut();
+                    crate::simd_utils::ascii_lowercase(text, &mut normalized);
+                    Self::run_ac_matching_normalized(ac_buffer, &normalized, matches);
+                });
+            }
+        }
+    }
+
+    /// Run AC automaton matching on already-normalized bytes.
+    fn run_ac_matching_normalized(
+        ac_buffer: &[u8],
+        search_text: &[u8],
+        matches: &mut HashSet<u32>,
+    ) {
+        use crate::offset_format::ACNodeHot;
 
         // Pre-load root dense table offset (root is always Dense after optimization)
         // SAFETY: We verified ac_buffer is non-empty above. Root node is at offset 0,

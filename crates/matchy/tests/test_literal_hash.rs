@@ -135,6 +135,32 @@ fn test_literal_and_glob_both_match() {
 }
 
 #[test]
+fn test_lookup_ref_pattern_offset_matches_first_full_lookup_offset() {
+    let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+
+    builder
+        .add_literal("evil.com", make_type_map("literal"))
+        .unwrap();
+    builder.add_glob("*.com", make_type_map("glob")).unwrap();
+    builder
+        .add_glob("*.evil.com", make_type_map("specific_glob"))
+        .unwrap();
+
+    let db = Database::from_bytes(builder.build().unwrap()).unwrap();
+
+    let full = lookup_expect_result(&db, "evil.com");
+    let lookup_ref = db.lookup_ref("evil.com").unwrap();
+
+    let QueryResult::Pattern { data_offsets, .. } = full else {
+        panic!("Expected Pattern result");
+    };
+
+    assert!(lookup_ref.found);
+    assert_eq!(lookup_ref.result_type, 2);
+    assert_eq!(lookup_ref.data_offset, data_offsets[0]);
+}
+
+#[test]
 fn test_glob_only_match() {
     // Build database with only globs
     let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
