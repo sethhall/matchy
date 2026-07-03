@@ -204,7 +204,7 @@ enum Commands {
         /// If omitted, the format is auto-detected from file extension or content.
         /// - text: One pattern per line
         /// - csv: Comma-separated values with 'entry' or 'key' column
-        /// - json: JSON array of {"key": "pattern", "data": {...}}
+        /// - json: JSON array of {"key" or "entry": "pattern", "data": {...}}
         /// - misp: MISP threat intelligence JSON format
         #[arg(
             short = 'f',

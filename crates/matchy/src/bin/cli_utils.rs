@@ -215,6 +215,13 @@ pub fn json_to_data_map(json: &serde_json::Value) -> Result<HashMap<String, Data
     }
 }
 
+pub fn json_entry_key(item: &serde_json::Value, index: usize) -> Result<&str> {
+    item.get("key")
+        .or_else(|| item.get("entry"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing 'key' or 'entry' field at index {index}"))
+}
+
 pub fn json_to_data_value(json: &serde_json::Value) -> Result<DataValue> {
     match json {
         serde_json::Value::Null => Ok(DataValue::Bytes(vec![])),

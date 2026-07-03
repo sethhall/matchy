@@ -804,6 +804,37 @@ fn test_build_json_format() {
 }
 
 #[test]
+fn test_build_json_accepts_entry_field() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("data.json");
+    let output_file = temp_dir.path().join("test.mxy");
+
+    let json_content = r#"[
+        {"entry": "*.malware.com", "data": {"severity": "high"}},
+        {"entry": "192.168.1.0/24", "data": {"type": "suspicious"}}
+    ]"#;
+    fs::write(&input_file, json_content).unwrap();
+
+    matchy_cmd()
+        .arg("build")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&output_file)
+        .arg("--input-format")
+        .arg("json")
+        .assert()
+        .success();
+
+    matchy_cmd()
+        .arg("query")
+        .arg(&output_file)
+        .arg("payload.malware.com")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"severity\": \"high\""));
+}
+
+#[test]
 fn test_build_json_auto_detects_input_format_by_extension() {
     let temp_dir = TempDir::new().unwrap();
     let input_file = temp_dir.path().join("data.json");
@@ -1202,6 +1233,46 @@ fn test_match_auto_build_json() {
     assert!(
         stdout.contains("internal") || stdout.contains("malicious"),
         "Metadata should be preserved in output"
+    );
+}
+
+#[test]
+fn test_match_auto_build_json_accepts_entry_field() {
+    let temp_dir = TempDir::new().unwrap();
+    let json_file = temp_dir.path().join("patterns.json");
+    let log_file = temp_dir.path().join("test.log");
+
+    let json_content = r#"[
+        {"entry": "192.168.1.0/24", "data": {"type": "internal"}},
+        {"entry": "*.malware.com", "data": {"type": "malicious"}}
+    ]"#;
+    fs::write(&json_file, json_content).unwrap();
+    fs::write(
+        &log_file,
+        "Connection from 192.168.1.50\nRequest to bad.malware.com\n",
+    )
+    .unwrap();
+
+    let output = matchy_cmd()
+        .arg("match")
+        .arg(&json_file)
+        .arg(&log_file)
+        .arg("--threads")
+        .arg("1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(
+        stdout.contains("192.168.1.50") || stdout.contains("192.168.1.0/24"),
+        "Should match IP from JSON source using entry field"
+    );
+    assert!(
+        stdout.contains("malware.com"),
+        "Should match domain pattern from JSON source using entry field"
     );
 }
 

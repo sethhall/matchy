@@ -7,7 +7,7 @@ use std::fs;
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 
-use crate::cli_utils::json_to_data_map;
+use crate::cli_utils::{json_entry_key, json_to_data_map};
 use crate::input_format::{looks_like_csv_entry_header, resolve_input_format, InputFormat};
 
 #[allow(clippy::too_many_arguments)]
@@ -269,6 +269,7 @@ pub fn cmd_build(
         InputFormat::Json => {
             // Read entries with data from JSON file(s)
             // Format: [{"key": "192.168.0.0/16" or "*.example.com", "data": {...}}]
+            // The entry field is also accepted for consistency with CSV.
             let mut total_entries = 0;
 
             for input in inputs {
@@ -282,10 +283,7 @@ pub fn cmd_build(
                     serde_json::from_str(&content).context("Failed to parse JSON")?;
 
                 for (i, item) in entries.iter().enumerate() {
-                    let key = item
-                        .get("key")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| anyhow::anyhow!("Missing 'key' field at index {i}"))?;
+                    let key = json_entry_key(item, i)?;
 
                     let data = if let Some(data_json) = item.get("data") {
                         json_to_data_map(data_json)?

@@ -78,7 +78,7 @@ Successfully wrote threats.mxy
 $ cat data.json
 [
   {"key": "192.0.2.1", "data": {"threat": "high"}},
-  {"key": "*.malware.com", "data": {"category": "malware"}}
+  {"entry": "*.malware.com", "data": {"category": "malware"}}
 ]
 
 $ matchy build data.json --input-format json --output database.mxy

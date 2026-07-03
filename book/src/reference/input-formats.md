@@ -185,7 +185,7 @@ matchy build --input-format csv --output output.mxy input.csv
     "data": { /* metadata */ }
   },
   {
-    "key": "entry2",
+    "entry": "entry2",
     "data": { /* metadata */ }
   }
 ]
@@ -193,9 +193,9 @@ matchy build --input-format csv --output output.mxy input.csv
 
 ### Array Format
 
-JSON input must be a single array. Each object must have a `key` field containing
-the IP, CIDR, glob pattern, or exact string. Optional metadata belongs under the
-`data` field.
+JSON input must be a single array. Each object must have a `key` or `entry` field
+containing the IP, CIDR, glob pattern, or exact string. Optional metadata belongs
+under the `data` field.
 
 ```json
 [

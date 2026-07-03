@@ -9,7 +9,7 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use crate::cli_utils::{format_number, format_qps, json_to_data_map};
+use crate::cli_utils::{format_number, format_qps, json_entry_key, json_to_data_map};
 use crate::input_format::InputFormat;
 use crate::match_processor::{
     analyze_performance, follow_files, follow_files_parallel, process_file_with_aggregate,
@@ -117,10 +117,7 @@ fn build_database_from_source(
             let mut total_entries = 0;
 
             for (i, item) in entries.iter().enumerate() {
-                let key = item
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'key' field at index {i}"))?;
+                let key = json_entry_key(item, i)?;
 
                 let data = if let Some(data_json) = item.get("data") {
                     json_to_data_map(data_json)?
