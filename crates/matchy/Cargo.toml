@@ -116,7 +116,7 @@ winapi = { version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef"] }
 criterion.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
-rand = "0.9"
+rand = "0.9.3"
 dhat = "0.3"
 assert_cmd = "2.1"
 predicates = "3.0"

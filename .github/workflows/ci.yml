@@ -195,6 +195,9 @@ jobs:
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'release/'))
     runs-on: namespace-profile-linux-amd64
     needs: [preflight]
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: namespacelabs/nscloud-checkout-action@v8
       
