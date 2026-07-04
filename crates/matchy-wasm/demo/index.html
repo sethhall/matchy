@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Matchy Demo - IP & Pattern Matching</title>
+    <title>Matchy Analyst Workbench - Local IoC Matching</title>
     <style>
         :root {
             --bg: #1a1a2e;
@@ -394,12 +394,137 @@
         .import-panel.active {
             display: block;
         }
+
+        .privacy-banner {
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            align-items: center;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+            background: rgba(74, 222, 128, 0.08);
+            border: 1px solid rgba(74, 222, 128, 0.35);
+            border-radius: 8px;
+        }
+
+        .feed-status {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0.75rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .status-card,
+        .summary-card {
+            background: var(--bg);
+            border: 1px solid var(--primary);
+            border-radius: 8px;
+            padding: 0.85rem;
+        }
+
+        .status-card strong,
+        .summary-card strong {
+            display: block;
+            color: var(--text);
+            font-size: 1.15rem;
+        }
+
+        .status-card span,
+        .summary-card span {
+            color: var(--text-dim);
+            font-size: 0.82rem;
+        }
+
+        .evidence-drop-zone {
+            border: 2px dashed var(--primary);
+            border-radius: 8px;
+            padding: 2rem;
+            text-align: center;
+            background: var(--surface);
+            cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .evidence-drop-zone.dragover {
+            border-color: var(--success);
+            background: rgba(74, 222, 128, 0.08);
+        }
+
+        .summary-strip {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(0, 1fr));
+            gap: 0.75rem;
+            margin: 1.5rem 0;
+        }
+
+        .hits-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+            gap: 1rem;
+        }
+
+        .hits-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+
+        .hits-table th,
+        .hits-table td {
+            border-bottom: 1px solid var(--primary);
+            padding: 0.6rem;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        .hits-table th {
+            color: var(--text-dim);
+            font-weight: 600;
+        }
+
+        .hit-row {
+            cursor: pointer;
+        }
+
+        .hit-row:hover {
+            background: rgba(15, 52, 96, 0.45);
+        }
+
+        .evidence-lines {
+            max-height: 320px;
+            overflow: auto;
+            white-space: pre-wrap;
+        }
+
+        .evidence-line {
+            padding: 0.45rem 0;
+            border-bottom: 1px solid rgba(15, 52, 96, 0.7);
+        }
+
+        .matched-indicator {
+            color: #000;
+            background: var(--warning);
+            border-radius: 3px;
+            padding: 0 0.15rem;
+        }
+
+        .advanced-tools {
+            margin-top: 2rem;
+        }
+
+        @media (max-width: 900px) {
+            .feed-status,
+            .summary-strip,
+            .hits-layout {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 <body>
     <header>
-        <h1>🎯 <span>Matchy</span> Demo</h1>
-        <p>Fast IP address and pattern matching - running entirely in your browser via WebAssembly</p>
+        <h1><span>Matchy</span> Analyst Workbench</h1>
+        <p>Drop logs, extract indicators, and match threat intel locally in your browser.</p>
     </header>
     
     <div class="container">
@@ -408,6 +533,90 @@
         </div>
         
         <div id="app" style="display: none;">
+            <section id="workbench" class="section">
+                <div class="privacy-banner">
+                    <div>
+                        <strong>Local browser matching</strong>
+                        <div>Feed assets download to this page. Dropped files stay in this browser.</div>
+                    </div>
+                    <div id="workbench-status">Loading Matchy WASM and bundled feed...</div>
+                </div>
+
+                <div class="feed-status">
+                    <div class="status-card">
+                        <strong id="feed-name">Loading feed</strong>
+                        <span>Feed</span>
+                    </div>
+                    <div class="status-card">
+                        <strong id="feed-entry-count">0</strong>
+                        <span>Entries</span>
+                    </div>
+                    <div class="status-card">
+                        <strong id="feed-generated">unknown</strong>
+                        <span>Generated</span>
+                    </div>
+                    <div class="status-card">
+                        <strong id="matchy-version">unknown</strong>
+                        <span>Matchy version</span>
+                    </div>
+                </div>
+
+                <div id="evidence-drop-zone" class="evidence-drop-zone">
+                    <p><strong>Drop log files here to scan immediately</strong></p>
+                    <p>Text logs, JSONL, CSV, and copied evidence exports work best.</p>
+                    <input type="file" id="evidence-file-input" multiple style="display: none;">
+                </div>
+
+                <div class="summary-strip" id="scan-summary">
+                    <div class="summary-card"><strong id="summary-files">0</strong><span>Files</span></div>
+                    <div class="summary-card"><strong id="summary-bytes">0 B</strong><span>Scanned</span></div>
+                    <div class="summary-card"><strong id="summary-lines">0</strong><span>Lines</span></div>
+                    <div class="summary-card"><strong id="summary-indicators">0</strong><span>Indicators</span></div>
+                    <div class="summary-card"><strong id="summary-unique">0</strong><span>Unique queried</span></div>
+                    <div class="summary-card"><strong id="summary-matches">0</strong><span>Matches</span></div>
+                </div>
+
+                <div class="hits-layout">
+                    <div class="section">
+                        <h3>Hits</h3>
+                        <table class="hits-table">
+                            <thead>
+                                <tr>
+                                    <th>Indicator</th>
+                                    <th>Type</th>
+                                    <th>Severity</th>
+                                    <th>Source</th>
+                                    <th>Malware / Threat</th>
+                                    <th>Count</th>
+                                </tr>
+                            </thead>
+                            <tbody id="hits-table-body">
+                                <tr><td colspan="6" style="color: var(--text-dim);">Drop a file to begin scanning.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="section">
+                        <h3>Hit Detail</h3>
+                        <div id="hit-detail" class="results">Select a hit to inspect metadata and matching lines.</div>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <h3>Evidence Lines</h3>
+                    <div id="evidence-lines" class="results evidence-lines">
+                        <span style="color: var(--text-dim);">Matching source lines appear here.</span>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <h3>Run Locally</h3>
+                    <div id="cli-handoff" class="results">After a scan, equivalent CLI commands appear here.</div>
+                </div>
+            </section>
+
+            <details class="advanced-tools">
+                <summary>Advanced database builder, import, query, and extractor tools</summary>
             <div class="tabs">
                 <button class="tab active" data-tab="builder">Database Builder</button>
                 <button class="tab" data-tab="import">Import CSV/JSON</button>
@@ -652,9 +861,11 @@ Bitcoin address: 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa</textarea>
                     </div>
                 </div>
             </div>
+            </details>
         </div>
     </div>
-    
+
+    <script type="module" src="./js/workbench-app.mjs"></script>
     <script type="module">
         // Import from locally built wasm-pack output
         // For production, this would be: import init, { ... } from 'matchy-wasm';
