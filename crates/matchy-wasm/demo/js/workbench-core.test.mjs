@@ -127,6 +127,7 @@ test("summarizeScan and formatBytes provide stable display values", () => {
   state.indicatorsExtracted = 4;
   state.uniqueIndicatorsQueried = 3;
   state.matchesFound = 1;
+  state.errors.push({ indicator: "bad.example", message: "lookup failed" });
 
   assert.equal(formatBytes(1536), "1.5 KB");
   assert.deepEqual(summarizeScan(state, 42.125), {
@@ -137,6 +138,7 @@ test("summarizeScan and formatBytes provide stable display values", () => {
     indicatorsExtracted: 4,
     uniqueIndicatorsQueried: 3,
     matchesFound: 1,
+    errorCount: 1,
     elapsedMs: 42.125,
   });
 });

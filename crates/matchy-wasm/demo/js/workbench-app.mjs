@@ -24,6 +24,7 @@ const app = {
   feedMetadata: normalizeFeedMetadata(),
   scanState: createScanState(),
   scanStartedAt: 0,
+  isScanning: false,
 };
 
 function text(id, value) {
@@ -114,10 +115,12 @@ function highlightIndicator(lineText, indicator) {
 }
 
 function renderEvidenceLines() {
+  const errorsHtml = renderScanErrors();
+
   if (app.scanState.evidenceLines.length === 0) {
     html(
       "evidence-lines",
-      '<span style="color: var(--text-dim);">Matching source lines appear here.</span>',
+      `${errorsHtml}<span style="color: var(--text-dim);">Matching source lines appear here.</span>`,
     );
     return;
   }
@@ -134,7 +137,34 @@ function renderEvidenceLines() {
     )
     .join("");
 
-  html("evidence-lines", lines);
+  html("evidence-lines", `${errorsHtml}${lines}`);
+}
+
+function renderScanErrors() {
+  if (app.scanState.errors.length === 0) return "";
+
+  const warningLabel =
+    app.scanState.errors.length === 1
+      ? "1 scan warning"
+      : `${app.scanState.errors.length.toLocaleString()} scan warnings`;
+  const items = app.scanState.errors
+    .slice(-20)
+    .map((error) => {
+      const indicator = error.indicator ? `${error.indicator}: ` : "";
+      return `<li>${escapeHtml(indicator)}${escapeHtml(error.message)}</li>`;
+    })
+    .join("");
+  const overflow =
+    app.scanState.errors.length > 20
+      ? `<li>${(app.scanState.errors.length - 20).toLocaleString()} earlier warnings omitted.</li>`
+      : "";
+
+  return `
+    <div class="scan-errors" role="status">
+      <strong>${warningLabel}</strong>
+      <ul>${overflow}${items}</ul>
+    </div>
+  `;
 }
 
 function renderHitDetail(hit) {
@@ -184,6 +214,35 @@ function renderAll(elapsedMs = 0) {
   renderSummary(elapsedMs);
   renderHits();
   renderEvidenceLines();
+}
+
+function setScanning(scanning) {
+  app.isScanning = scanning;
+
+  const dropZone = document.getElementById("evidence-drop-zone");
+  const fileInput = document.getElementById("evidence-file-input");
+
+  if (dropZone) {
+    dropZone.classList.toggle("is-scanning", scanning);
+    dropZone.setAttribute("aria-disabled", scanning ? "true" : "false");
+  }
+  if (fileInput) {
+    fileInput.disabled = scanning;
+  }
+}
+
+function renderCompletionStatus(elapsedMs) {
+  const summary = summarizeScan(app.scanState, elapsedMs);
+  const warningPart =
+    summary.errorCount === 0
+      ? ""
+      : ` with ${summary.errorCount.toLocaleString()} ${
+          summary.errorCount === 1 ? "warning" : "warnings"
+        }`;
+
+  renderWorkbenchStatus(
+    `Scan complete${warningPart}. ${summary.matchesFound.toLocaleString()} matches found locally.`,
+  );
 }
 
 async function yieldToBrowser() {
@@ -297,11 +356,17 @@ async function scanFiles(files) {
   const selectedFiles = Array.from(files || []);
   if (selectedFiles.length === 0) return;
 
+  if (app.isScanning) {
+    renderWorkbenchStatus("Scan already in progress. Drop another file after this scan finishes.");
+    return;
+  }
+
   if (!app.db || !app.extractor) {
     renderWorkbenchStatus("Workbench feed is not ready. Advanced tools remain available below.");
     return;
   }
 
+  setScanning(true);
   app.scanState = createScanState();
   app.scanStartedAt = performance.now();
   renderWorkbenchStatus("Scanning locally...");
@@ -309,21 +374,24 @@ async function scanFiles(files) {
   renderCliHandoff(selectedFiles);
   renderAll(0);
 
-  for (const file of selectedFiles) {
-    try {
-      await scanFile(file);
-    } catch (error) {
-      app.scanState.errors.push({
-        indicator: "",
-        message: `${file.name}: ${error instanceof Error ? error.message : String(error)}`,
-      });
+  try {
+    for (const file of selectedFiles) {
+      try {
+        await scanFile(file);
+      } catch (error) {
+        app.scanState.errors.push({
+          indicator: "",
+          message: `${file.name}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
     }
-  }
 
-  renderAll(performance.now() - app.scanStartedAt);
-  renderWorkbenchStatus(
-    `Scan complete. ${app.scanState.matchesFound.toLocaleString()} matches found locally.`,
-  );
+    const elapsedMs = performance.now() - app.scanStartedAt;
+    renderAll(elapsedMs);
+    renderCompletionStatus(elapsedMs);
+  } finally {
+    setScanning(false);
+  }
 }
 
 function openFilePicker(fileInput) {
@@ -336,8 +404,15 @@ function setupDropZone() {
   const fileInput = document.getElementById("evidence-file-input");
   if (!dropZone || !fileInput) return;
 
-  dropZone.addEventListener("click", () => openFilePicker(fileInput));
+  dropZone.addEventListener("click", () => {
+    if (app.isScanning) return;
+    openFilePicker(fileInput);
+  });
   dropZone.addEventListener("keydown", (event) => {
+    if (app.isScanning) {
+      event.preventDefault();
+      return;
+    }
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       openFilePicker(fileInput);
@@ -350,6 +425,10 @@ function setupDropZone() {
 
   dropZone.addEventListener("dragover", (event) => {
     event.preventDefault();
+    if (app.isScanning) {
+      event.dataTransfer.dropEffect = "none";
+      return;
+    }
     dropZone.classList.add("dragover");
   });
   dropZone.addEventListener("dragleave", () => {
@@ -358,6 +437,10 @@ function setupDropZone() {
   dropZone.addEventListener("drop", (event) => {
     event.preventDefault();
     dropZone.classList.remove("dragover");
+    if (app.isScanning) {
+      renderWorkbenchStatus("Scan already in progress. Drop another file after this scan finishes.");
+      return;
+    }
     if (event.dataTransfer.files.length > 0) scanFiles(event.dataTransfer.files);
   });
 }

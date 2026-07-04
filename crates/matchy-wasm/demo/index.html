@@ -451,6 +451,15 @@
             background: rgba(74, 222, 128, 0.08);
         }
 
+        .evidence-drop-zone.is-scanning {
+            cursor: wait;
+            opacity: 0.7;
+        }
+
+        .evidence-drop-zone[aria-disabled="true"] {
+            border-color: var(--warning);
+        }
+
         .evidence-drop-zone:focus-visible {
             outline: 3px solid var(--success);
             outline-offset: 3px;
@@ -533,6 +542,22 @@
             padding: 0 0.15rem;
         }
 
+        .scan-errors {
+            border: 1px solid rgba(251, 191, 36, 0.45);
+            border-radius: 6px;
+            margin-bottom: 0.8rem;
+            padding: 0.8rem;
+            background: rgba(251, 191, 36, 0.08);
+        }
+
+        .scan-errors strong {
+            color: var(--warning);
+        }
+
+        .scan-errors ul {
+            margin: 0.45rem 0 0 1.2rem;
+        }
+
         .advanced-tools {
             margin-top: 2rem;
         }
@@ -586,7 +611,7 @@
                     </div>
                 </div>
 
-                <div id="evidence-drop-zone" class="evidence-drop-zone" role="button" tabindex="0" aria-label="Drop log files here or press Enter to choose files for local scanning">
+                <div id="evidence-drop-zone" class="evidence-drop-zone" role="button" tabindex="0" aria-disabled="false" aria-label="Drop log files here or press Enter to choose files for local scanning">
                     <p><strong>Drop log files here to scan immediately</strong></p>
                     <p>Text logs, JSONL, CSV, and copied evidence exports work best.</p>
                     <input type="file" id="evidence-file-input" class="visually-hidden" tabindex="-1" aria-hidden="true" aria-label="Choose log files for local scanning" multiple>

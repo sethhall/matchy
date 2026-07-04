@@ -150,6 +150,7 @@ export function summarizeScan(state, elapsedMs) {
     indicatorsExtracted: state.indicatorsExtracted,
     uniqueIndicatorsQueried: state.uniqueIndicatorsQueried,
     matchesFound: state.matchesFound,
+    errorCount: state.errors.length,
     elapsedMs,
   };
 }
