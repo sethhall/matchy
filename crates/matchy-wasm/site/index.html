@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Matchy - Local IoC Matching for Analysts</title>
+    <meta name="description" content="Matchy scans logs locally for IPs, domains, hashes, literals, and patterns using fast browser and CLI IoC matching.">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header class="site-header">
+        <a class="brand" href="./" aria-label="Matchy home">
+            <span class="brand-mark">M</span>
+            <span>Matchy</span>
+        </a>
+        <nav class="nav-links" aria-label="Primary navigation">
+            <a href="console/">Console</a>
+            <a href="docs/">Docs</a>
+            <a href="https://github.com/matchylabs/matchy">GitHub</a>
+        </nav>
+    </header>
+
+    <main>
+        <section class="hero">
+            <div class="hero-copy">
+                <p class="eyebrow">Local IoC matching</p>
+                <h1>Open the console. Drop logs. Match intrusions. Keep evidence local.</h1>
+                <p class="lede">
+                    Matchy gives analysts and detection engineers a browser console for trying local IoC matching,
+                    plus a fast CLI and Rust library for real workflows.
+                </p>
+                <div class="actions" aria-label="Primary actions">
+                    <a class="button primary" href="console/">Open Analyst Console</a>
+                    <a class="button secondary" href="docs/getting-started/installation.html">Install CLI</a>
+                </div>
+                <p class="privacy-note">The console downloads static demo assets. Dropped files stay in your browser.</p>
+            </div>
+
+            <aside class="console-preview" aria-label="Analyst console preview">
+                <div class="preview-toolbar">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                    <strong>matchy console</strong>
+                </div>
+                <div class="preview-drop">Drop evidence in the console</div>
+                <div class="preview-stats">
+                    <div><strong>1</strong><span>file</span></div>
+                    <div><strong>2.1 MB</strong><span>scanned</span></div>
+                    <div><strong>18</strong><span>hits</span></div>
+                    <div><strong>0</strong><span>uploads</span></div>
+                </div>
+                <div class="preview-table">
+                    <div><span>198.51.100.23</span><b>high</b><em>demo-malware</em></div>
+                    <div><span>malware.example.com</span><b>high</b><em>demo-loader</em></div>
+                    <div><span>*.bad-demo.example.com</span><b>medium</b><em>demo-phish</em></div>
+                </div>
+            </aside>
+        </section>
+
+        <section class="proof-grid" aria-label="Why Matchy">
+            <article>
+                <h2>Local by design</h2>
+                <p>The browser console matches evidence locally. It does not upload dropped files.</p>
+            </article>
+            <article>
+                <h2>Built for messy evidence</h2>
+                <p>Extract and match IPs, domains, hashes, exact strings, CIDRs, and glob patterns.</p>
+            </article>
+            <article>
+                <h2>Path to real workflows</h2>
+                <p>Try the console first, then move to the CLI, Rust API, or C API when you need automation.</p>
+            </article>
+        </section>
+
+        <section class="terminal-band">
+            <div>
+                <p class="eyebrow">CLI handoff</p>
+                <h2>Use the same matching engine outside the browser.</h2>
+            </div>
+            <pre><code>matchy build threats.csv --output threats.mxy --input-format csv
+matchy match threats.mxy auth.log --stats</code></pre>
+        </section>
+    </main>
+</body>
+</html>
