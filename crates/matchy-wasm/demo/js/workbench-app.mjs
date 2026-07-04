@@ -1,9 +1,15 @@
-import init, { Database, ExtractorBuilder, version } from "../pkg/matchy_wasm.js";
+import {
+  Database,
+  ExtractorBuilder,
+  initMatchyWasm,
+  version,
+} from "./wasm-loader.mjs";
 
 import {
   applyLineScan,
   createScanState,
   normalizeFeedMetadata,
+  shellQuote,
   splitCompleteLines,
   summarizeScan,
 } from "./workbench-core.mjs";
@@ -166,7 +172,7 @@ function renderCliHandoff(files) {
   }
 
   const fileNames = Array.from(files)
-    .map((file) => file.name)
+    .map((file) => shellQuote(file.name))
     .join(" ");
   html(
     "cli-handoff",
@@ -359,7 +365,7 @@ function setupDropZone() {
 async function main() {
   try {
     renderWorkbenchStatus("Loading Matchy WASM...");
-    await init();
+    await initMatchyWasm();
     app.extractor = new ExtractorBuilder().build();
 
     renderWorkbenchStatus("Loading bundled feed...");

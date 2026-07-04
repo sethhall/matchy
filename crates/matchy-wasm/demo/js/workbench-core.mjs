@@ -134,6 +134,13 @@ export function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+export function shellQuote(value) {
+  const text = String(value);
+  if (text === "") return "''";
+  if (/^[A-Za-z0-9_./:-]+$/.test(text)) return text;
+  return `'${text.replaceAll("'", "'\\''")}'`;
+}
+
 export function summarizeScan(state, elapsedMs) {
   return {
     filesScanned: state.filesScanned,

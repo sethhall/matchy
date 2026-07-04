@@ -893,9 +893,8 @@ Bitcoin address: 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa</textarea>
 
     <script type="module" src="./js/workbench-app.mjs"></script>
     <script type="module">
-        // Import from locally built wasm-pack output
-        // For production, this would be: import init, { ... } from 'matchy-wasm';
-        import init, { Database, DatabaseBuilder, ExtractorBuilder, version } from './pkg/matchy_wasm.js';
+        // Import from the shared loader so the workbench and advanced tools use one WASM instance.
+        import { Database, DatabaseBuilder, ExtractorBuilder, initMatchyWasm, version } from './js/wasm-loader.mjs';
         
         let db = null;
         let extractor = null;
@@ -906,7 +905,7 @@ Bitcoin address: 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa</textarea>
         
         async function main() {
             try {
-                await init();
+                await initMatchyWasm();
                 console.log('Matchy WASM loaded, version:', version());
                 
                 extractor = new ExtractorBuilder().build();

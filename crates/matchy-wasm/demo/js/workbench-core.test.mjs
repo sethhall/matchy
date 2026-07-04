@@ -6,6 +6,7 @@ import {
   createScanState,
   formatBytes,
   normalizeFeedMetadata,
+  shellQuote,
   splitCompleteLines,
   summarizeScan,
 } from "./workbench-core.mjs";
@@ -138,4 +139,11 @@ test("summarizeScan and formatBytes provide stable display values", () => {
     matchesFound: 1,
     elapsedMs: 42.125,
   });
+});
+
+test("shellQuote renders copyable POSIX shell arguments", () => {
+  assert.equal(shellQuote("plain.log"), "plain.log");
+  assert.equal(shellQuote("auth log.csv"), "'auth log.csv'");
+  assert.equal(shellQuote("bob's evidence.log"), "'bob'\\''s evidence.log'");
+  assert.equal(shellQuote(""), "''");
 });
