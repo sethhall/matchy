@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Matchy - Local IoC Matching for Analysts</title>
-    <meta name="description" content="Matchy scans logs locally for IPs, domains, hashes, literals, and patterns using fast browser and CLI IoC matching.">
+    <title>Matchy - IoC Matching for Analyst Workflows</title>
+    <meta name="description" content="Matchy brings fast local IoC matching into analyst workflows, from Zeek and Wireshark to log pipelines, search, CLI, Rust, and C integrations.">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -14,7 +14,8 @@
             <span>Matchy</span>
         </a>
         <nav class="nav-links" aria-label="Primary navigation">
-            <a href="console/">Console</a>
+            <a href="#workflows">Workflows</a>
+            <a href="console/">Workbench</a>
             <a href="docs/">Docs</a>
             <a href="https://github.com/matchylabs/matchy">GitHub</a>
         </nav>
@@ -23,63 +24,122 @@
     <main>
         <section class="hero">
             <div class="hero-copy">
-                <p class="eyebrow">Local IoC matching</p>
-                <h1>Open the console. Drop logs. Match intrusions. Keep evidence local.</h1>
+                <h1>Fast local IoC matching for analyst workflows.</h1>
                 <p class="lede">
-                    Matchy gives analysts and detection engineers a browser console for trying local IoC matching,
-                    plus a fast CLI and Rust library for real workflows.
+                    Matchy brings threat intelligence matching into the places analysts already work:
+                    sensors, packet tools, log pipelines, search, scripts, and local investigations.
                 </p>
                 <nav class="actions" aria-label="Primary actions">
-                    <a class="button primary" href="console/">Open Analyst Console</a>
+                    <a class="button primary" href="console/">Try Browser Workbench</a>
                     <a class="button secondary" href="docs/getting-started/cli-installation.html">Install CLI</a>
                 </nav>
-                <p class="privacy-note">The console downloads static demo assets. Dropped files stay in your browser.</p>
+                <p class="note">The browser workbench matches locally with a generated public ThreatFox feed. Dropped files are not uploaded.</p>
             </div>
 
-            <aside class="console-preview" aria-label="Analyst console preview">
-                <div class="preview-toolbar">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                    <strong>matchy console</strong>
+            <aside class="workflow-visual" aria-label="Matchy workflow integrations">
+                <div class="visual-header">
+                    <span>analyst workflow</span>
+                    <strong>local matching engine</strong>
                 </div>
-                <div class="preview-drop">Drop evidence in the console</div>
-                <div class="preview-stats">
-                    <div><strong>1</strong><span>file</span></div>
-                    <div><strong>2.1 MB</strong><span>scanned</span></div>
-                    <div><strong>18</strong><span>hits</span></div>
-                    <div><strong>0</strong><span>uploads</span></div>
+                <div class="workflow-map">
+                    <div class="source-list">
+                        <span>Zeek</span>
+                        <span>Wireshark</span>
+                        <span>Fluent Bit</span>
+                        <span>Elasticsearch</span>
+                    </div>
+                    <div class="engine-node">
+                        <strong>matchy</strong>
+                        <span>.mxy</span>
+                    </div>
+                    <div class="output-list">
+                        <span>hits</span>
+                        <span>metadata</span>
+                        <span>enrichment</span>
+                        <span>handoff</span>
+                    </div>
                 </div>
-                <div class="preview-table">
-                    <div><span>198.51.100.23</span><b>high</b><em>demo-malware</em></div>
-                    <div><span>malware.example.com</span><b>high</b><em>demo-loader</em></div>
-                    <div><span>*.bad-demo.example.com</span><b>medium</b><em>demo-phish</em></div>
+                <div class="visual-footer">
+                    <span>IP / CIDR</span>
+                    <span>domains</span>
+                    <span>hashes</span>
+                    <span>globs</span>
+                    <span>literals</span>
                 </div>
             </aside>
         </section>
 
-        <section class="proof-grid" aria-label="Why Matchy">
-            <article>
-                <h2>Local by design</h2>
-                <p>The browser console matches evidence locally. It does not upload dropped files.</p>
-            </article>
-            <article>
-                <h2>Built for messy evidence</h2>
-                <p>Extract and match IPs, domains, hashes, exact strings, CIDRs, and glob patterns.</p>
-            </article>
-            <article>
-                <h2>Path to real workflows</h2>
-                <p>Try the console first, then move to the CLI, Rust API, or C API when you need automation.</p>
-            </article>
+        <section id="workflows" class="integrations" aria-labelledby="workflows-title">
+            <div class="section-heading">
+                <h2 id="workflows-title">Integrated where investigations happen.</h2>
+                <p>
+                    Matchy is an engine first. The same database format and matching behavior can sit
+                    behind packet analysis, network telemetry, ingest pipelines, and command-line hunts.
+                </p>
+            </div>
+
+            <div class="integration-list">
+                <a class="integration-row" href="https://github.com/matchylabs/zeek-matchy-plugin">
+                    <span class="integration-name">Zeek</span>
+                    <span>High-performance IP and pattern matching inside Zeek workers with memory-mapped databases.</span>
+                    <strong>Plugin</strong>
+                </a>
+                <a class="integration-row" href="https://github.com/matchylabs/matchy-wireshark-plugin">
+                    <span class="integration-name">Wireshark</span>
+                    <span>Real-time threat intelligence matching while analysts inspect packet captures.</span>
+                    <strong>Plugin</strong>
+                </a>
+                <a class="integration-row" href="https://github.com/matchylabs/fluent-bit-matchy">
+                    <span class="integration-name">Fluent Bit</span>
+                    <span>WASM filter plugin for matching indicators as events move through log pipelines.</span>
+                    <strong>Filter</strong>
+                </a>
+                <a class="integration-row" href="https://github.com/matchylabs/elasticsearch-matchy-ingest-plugin">
+                    <span class="integration-name">Elasticsearch</span>
+                    <span>Ingest-time enrichment for search and detection workflows.</span>
+                    <strong>Ingest</strong>
+                </a>
+            </div>
         </section>
 
-        <section class="terminal-band">
-            <div>
-                <p class="eyebrow">CLI handoff</p>
-                <h2>Use the same matching engine outside the browser.</h2>
+        <section class="split-band">
+            <div class="console-card">
+                <h2>Try the engine before installing anything.</h2>
+                <p>
+                    Open the browser workbench, drop evidence, and match extracted indicators locally
+                    against a generated public ThreatFox recent feed.
+                </p>
+                <a class="text-link" href="console/">Open the browser workbench</a>
             </div>
-            <pre><code>matchy build threats.csv --output threats.mxy --input-format csv
+
+            <div class="terminal-panel" aria-label="Matchy CLI example">
+                <div class="terminal-title">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                    <strong>cli handoff</strong>
+                </div>
+                <pre><code>matchy build threatfox.csv \
+  --output threats.mxy \
+  --input-format csv
+
 matchy match threats.mxy auth.log --stats</code></pre>
+            </div>
+        </section>
+
+        <section class="engine-grid" aria-label="Build on Matchy">
+            <article>
+                <h2>One database, many surfaces.</h2>
+                <p>Build compact `.mxy` databases for IPs, CIDRs, exact strings, domains, hashes, and glob patterns.</p>
+            </article>
+            <article>
+                <h2>Local by default.</h2>
+                <p>Match evidence where it already lives: in the browser, on the command line, inside sensors, or in ingest paths.</p>
+            </article>
+            <article>
+                <h2>Ready for builders.</h2>
+                <p>Use the Rust library, C API, Java wrapper, CLI, and plugin examples to embed matching into your own tools.</p>
+            </article>
         </section>
     </main>
 </body>

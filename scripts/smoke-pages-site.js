@@ -71,14 +71,18 @@ function main() {
   assert(exists("docs/index.html"), "docs copy missing at docs/index.html");
 
   const homepage = read("index.html");
-  assert(homepage.includes("Open Analyst Console"), "homepage CTA missing");
+  assert(homepage.includes("Try Browser Workbench"), "homepage CTA missing");
   assert(homepage.includes('href="console/"'), "homepage console link must be relative");
   assert(homepage.includes('href="docs/"'), "homepage docs link must be relative");
+  assert(
+    homepage.includes("https://github.com/matchylabs/zeek-matchy-plugin"),
+    "homepage must link to Zeek integration",
+  );
   assertNoHomepageConsoleAssets(homepage);
   assertHomepageLocalLinks(homepage);
 
   const stylesheet = read("styles.css");
-  assert(stylesheet.includes(".console-preview"), "homepage console preview styles missing");
+  assert(stylesheet.includes(".workflow-visual"), "homepage workflow visual styles missing");
 
   const demoRedirect = read("demo/index.html");
   assert(demoRedirect.includes("url=../console/"), "demo route must redirect to console");
