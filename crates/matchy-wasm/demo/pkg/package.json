@@ -1,0 +1,31 @@
+{
+  "name": "matchy-wasm",
+  "type": "module",
+  "collaborators": [
+    "Seth Hall <seth@matchylabs.com>"
+  ],
+  "description": "WebAssembly bindings for matchy - fast IP and pattern matching database",
+  "version": "2.0.1",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matchylabs/matchy"
+  },
+  "files": [
+    "matchy_wasm_bg.wasm",
+    "matchy_wasm.js",
+    "matchy_wasm.d.ts"
+  ],
+  "main": "matchy_wasm.js",
+  "types": "matchy_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ],
+  "keywords": [
+    "wasm",
+    "ip",
+    "pattern-matching",
+    "threat-intelligence",
+    "webassembly"
+  ]
+}
