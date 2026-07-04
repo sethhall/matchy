@@ -81,6 +81,43 @@ test("applyLineScan de-duplicates lookups and aggregates repeated matches", () =
   assert.equal(state.hits[0].lines.length, 2);
 });
 
+test("applyLineScan preserves indicator casing for case-sensitive lookups", () => {
+  const state = createScanState();
+  let lookupCalls = 0;
+  const lookup = (indicator) => {
+    lookupCalls += 1;
+    if (indicator === "CaseSensitive.example") {
+      return {
+        severity: "medium",
+        source: "case-sensitive feed",
+      };
+    }
+    return null;
+  };
+
+  applyLineScan(state, {
+    fileName: "dns.log",
+    lineNumber: 20,
+    lineText: "query casesensitive.example",
+    entities: [{ type: "Domain", value: "casesensitive.example" }],
+    lookup,
+  });
+
+  applyLineScan(state, {
+    fileName: "dns.log",
+    lineNumber: 21,
+    lineText: "query CaseSensitive.example",
+    entities: [{ type: "Domain", value: "CaseSensitive.example" }],
+    lookup,
+  });
+
+  assert.equal(lookupCalls, 2);
+  assert.equal(state.uniqueIndicatorsQueried, 2);
+  assert.equal(state.matchesFound, 1);
+  assert.equal(state.hits.length, 1);
+  assert.equal(state.hits[0].indicator, "CaseSensitive.example");
+});
+
 test("summarizeScan and formatBytes provide stable display values", () => {
   const state = createScanState();
   state.filesScanned = 2;

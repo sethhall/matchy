@@ -42,7 +42,7 @@ export function normalizeIndicatorType(type) {
 }
 
 export function indicatorCacheKey(entity) {
-  return `${normalizeIndicatorType(entity.type)}:${String(entity.value).toLowerCase()}`;
+  return `${normalizeIndicatorType(entity.type)}:${String(entity.value)}`;
 }
 
 export function readSeverity(metadata) {
