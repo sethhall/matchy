@@ -66,6 +66,7 @@ function main() {
   assert(exists("console/js/workbench-app.mjs"), "console workbench module missing");
   assert(exists("console/pkg/matchy_wasm.js"), "console wasm JS package missing");
   assert(exists("console/assets/demo-threats.mxy"), "console bundled .mxy feed missing");
+  assert(!exists("console/assets/demo-threats.csv"), "console must not publish raw feed CSV");
   assert(exists("demo/index.html"), "demo compatibility route missing");
   assert(exists("docs/index.html"), "docs copy missing at docs/index.html");
 

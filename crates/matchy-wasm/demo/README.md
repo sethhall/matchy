@@ -68,8 +68,8 @@ cargo run -p matchy -- build crates/matchy-wasm/demo/assets/demo-threats.csv --o
 
 GitHub Pages does not publish that fallback feed as the primary website feed. During deployment,
 the workflow fetches the public ThreatFox recent CSV, normalizes it into Matchy CSV, builds a
-fresh `.mxy` file, and stores those generated files only in the Pages artifact at
-`/console/assets/`.
+fresh `.mxy` file, and stores only the generated database plus metadata in the Pages artifact at
+`/console/assets/`. The normalized CSV is temporary build input and is not published.
 
 To reproduce the deployed feed locally from a downloaded ThreatFox CSV:
 

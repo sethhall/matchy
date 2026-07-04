@@ -83,13 +83,16 @@ jobs:
           rm -rf book/book/console
           mkdir -p book/book/console
           cp -R crates/matchy-wasm/demo/. book/book/console/
+          feed_tmp="$(mktemp -d)"
           node scripts/build-threatfox-recent-feed.mjs \
             --url https://threatfox.abuse.ch/export/csv/recent/ \
-            --output-csv book/book/console/assets/demo-threats.csv \
+            --output-csv "$feed_tmp/demo-threats.csv" \
             --output-json book/book/console/assets/demo-threats.json
-          cargo run -p matchy -- build book/book/console/assets/demo-threats.csv \
+          cargo run -p matchy -- build "$feed_tmp/demo-threats.csv" \
             --output book/book/console/assets/demo-threats.mxy \
             --input-format csv
+          rm -rf "$feed_tmp"
+          rm -f book/book/console/assets/demo-threats.csv
 
           rm -rf book/book/demo
           mkdir -p book/book/demo
