@@ -6,6 +6,10 @@ on:
       - main
     paths:
       - 'book/**'
+      - 'crates/matchy-wasm/**'
+      - 'crates/matchy/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/deploy-docs.yml'
   workflow_dispatch:  # Allow manual trigger
 
@@ -38,6 +42,9 @@ jobs:
       - name: Install Rust (for preprocessors)
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+
       - name: Install mdBook preprocessors
         run: |
           cargo install mdbook-mermaid
@@ -51,6 +58,13 @@ jobs:
         run: |
           cd book
           mdbook build
+
+      - name: Build and copy browser demo
+        run: |
+          wasm-pack build crates/matchy-wasm --target web --out-dir demo/pkg
+          rm -rf book/book/demo
+          mkdir -p book/book/demo
+          cp -R crates/matchy-wasm/demo/. book/book/demo/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
