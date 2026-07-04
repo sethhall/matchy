@@ -34,6 +34,27 @@ function assertNoHomepageConsoleAssets(homepage) {
   }
 }
 
+function assertHomepageLocalLinks(homepage) {
+  const hrefPattern = /href="([^"#][^"]*)"/g;
+  const missing = [];
+
+  for (const [, href] of homepage.matchAll(hrefPattern)) {
+    if (/^[a-z][a-z0-9+.-]*:/.test(href) || href.startsWith("//")) {
+      continue;
+    }
+
+    const target = href.endsWith("/") ? `${href}index.html` : href;
+    if (!exists(target)) {
+      missing.push(href);
+    }
+  }
+
+  assert(
+    missing.length === 0,
+    `homepage local links must exist in artifact: ${missing.join(", ")}`,
+  );
+}
+
 function main() {
   assert(exists("index.html"), "product homepage missing at artifact root");
   assert(exists("styles.css"), "homepage stylesheet missing at artifact root");
@@ -49,6 +70,7 @@ function main() {
   assert(homepage.includes('href="console/"'), "homepage console link must be relative");
   assert(homepage.includes('href="docs/"'), "homepage docs link must be relative");
   assertNoHomepageConsoleAssets(homepage);
+  assertHomepageLocalLinks(homepage);
 
   const stylesheet = read("styles.css");
   assert(stylesheet.includes(".console-preview"), "homepage console preview styles missing");
