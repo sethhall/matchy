@@ -1,0 +1,7 @@
+entry,severity,confidence,source,feed,threat_type,malware,first_seen,reference
+198.51.100.23,high,87,Bundled demo feed,Matchy demo feed,botnet_cc,demo-malware,2026-07-04,https://threatfox.abuse.ch/
+203.0.113.77,medium,72,Bundled demo feed,Matchy demo feed,scanner,demo-scanner,2026-07-04,https://threatfox.abuse.ch/
+192.0.2.44,critical,95,Bundled demo feed,Matchy demo feed,c2,demo-c2,2026-07-04,https://threatfox.abuse.ch/
+malware.example.com,high,83,Bundled demo feed,Matchy demo feed,payload_host,demo-loader,2026-07-04,https://threatfox.abuse.ch/
+*.bad-demo.example.com,medium,70,Bundled demo feed,Matchy demo feed,phishing,demo-phish,2026-07-04,https://threatfox.abuse.ch/
+44d88612fea8a8f36de82e1278abb02f,high,80,Bundled demo feed,Matchy demo feed,malware_hash,eicar-demo,2026-07-04,https://threatfox.abuse.ch/

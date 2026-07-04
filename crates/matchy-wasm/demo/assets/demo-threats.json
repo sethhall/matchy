@@ -1,0 +1,8 @@
+{
+  "name": "Matchy bundled threat feed sample",
+  "generated_at": "2026-07-04T00:00:00Z",
+  "entry_count": 6,
+  "source": "ThreatFox-shaped public feed sample",
+  "source_url": "https://threatfox.abuse.ch/",
+  "disclaimer": "Static demo feed bundled with the browser workbench"
+}
