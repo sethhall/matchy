@@ -450,6 +450,23 @@
             background: rgba(74, 222, 128, 0.08);
         }
 
+        .evidence-drop-zone:focus-visible {
+            outline: 3px solid var(--success);
+            outline-offset: 3px;
+        }
+
+        .visually-hidden {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
         .summary-strip {
             display: grid;
             grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -463,8 +480,15 @@
             gap: 1rem;
         }
 
+        .hits-table-wrap {
+            width: 100%;
+            max-width: 100%;
+            overflow-x: auto;
+        }
+
         .hits-table {
             width: 100%;
+            min-width: 720px;
             border-collapse: collapse;
             font-size: 0.9rem;
         }
@@ -561,10 +585,10 @@
                     </div>
                 </div>
 
-                <div id="evidence-drop-zone" class="evidence-drop-zone">
+                <div id="evidence-drop-zone" class="evidence-drop-zone" role="button" tabindex="0" aria-label="Drop log files here or press Enter to choose files for local scanning">
                     <p><strong>Drop log files here to scan immediately</strong></p>
                     <p>Text logs, JSONL, CSV, and copied evidence exports work best.</p>
-                    <input type="file" id="evidence-file-input" multiple style="display: none;">
+                    <input type="file" id="evidence-file-input" class="visually-hidden" multiple>
                 </div>
 
                 <div class="summary-strip" id="scan-summary">
@@ -579,21 +603,23 @@
                 <div class="hits-layout">
                     <div class="section">
                         <h3>Hits</h3>
-                        <table class="hits-table">
-                            <thead>
-                                <tr>
-                                    <th>Indicator</th>
-                                    <th>Type</th>
-                                    <th>Severity</th>
-                                    <th>Source</th>
-                                    <th>Malware / Threat</th>
-                                    <th>Count</th>
-                                </tr>
-                            </thead>
-                            <tbody id="hits-table-body">
-                                <tr><td colspan="6" style="color: var(--text-dim);">Drop a file to begin scanning.</td></tr>
-                            </tbody>
-                        </table>
+                        <div class="hits-table-wrap">
+                            <table class="hits-table">
+                                <thead>
+                                    <tr>
+                                        <th>Indicator</th>
+                                        <th>Type</th>
+                                        <th>Severity</th>
+                                        <th>Source</th>
+                                        <th>Malware / Threat</th>
+                                        <th>Count</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="hits-table-body">
+                                    <tr><td colspan="6" style="color: var(--text-dim);">Drop a file to begin scanning.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
 
                     <div class="section">
