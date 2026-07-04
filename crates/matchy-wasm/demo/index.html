@@ -588,7 +588,7 @@
                 <div id="evidence-drop-zone" class="evidence-drop-zone" role="button" tabindex="0" aria-label="Drop log files here or press Enter to choose files for local scanning">
                     <p><strong>Drop log files here to scan immediately</strong></p>
                     <p>Text logs, JSONL, CSV, and copied evidence exports work best.</p>
-                    <input type="file" id="evidence-file-input" class="visually-hidden" multiple>
+                    <input type="file" id="evidence-file-input" class="visually-hidden" tabindex="-1" aria-hidden="true" multiple>
                 </div>
 
                 <div class="summary-strip" id="scan-summary">
