@@ -12,6 +12,7 @@ crates/matchy/tests/test_cpp_api
 crates/matchy/tests/test_mmdb_compat
 
 /.dev/
+/.worktrees/
 
 # Object files and other C/C++ build artifacts
 *.o
