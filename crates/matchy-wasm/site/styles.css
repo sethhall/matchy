@@ -80,9 +80,9 @@ main {
 
 .hero {
     display: grid;
-    grid-template-columns: minmax(0, 0.95fr) minmax(360px, 1.05fr);
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 0.95fr);
     align-items: center;
-    gap: 44px;
+    gap: 36px;
     min-height: calc(100vh - 86px);
     padding: 24px 0 48px;
 }
@@ -102,10 +102,10 @@ p {
 }
 
 h1 {
-    max-width: 780px;
+    max-width: 700px;
     margin-bottom: 18px;
-    font-size: clamp(2.4rem, 8vw, 5.4rem);
-    line-height: 0.98;
+    font-size: clamp(2.35rem, 5vw, 3.9rem);
+    line-height: 1.04;
 }
 
 .lede {
@@ -149,6 +149,7 @@ h1 {
 }
 
 .console-preview {
+    min-width: 0;
     border: 1px solid var(--line);
     border-radius: 8px;
     overflow: hidden;
@@ -248,6 +249,13 @@ h1 {
     color: var(--amber);
 }
 
+.preview-table span,
+.preview-table b,
+.preview-table em {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
 .preview-table em {
     color: var(--muted);
     font-style: normal;
@@ -331,5 +339,25 @@ code {
 
     .terminal-band pre {
         margin-top: 16px;
+    }
+}
+
+@media (max-width: 520px) {
+    .preview-stats {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .preview-stats div {
+        min-width: 0;
+    }
+
+    .preview-stats strong,
+    .preview-stats span {
+        overflow-wrap: anywhere;
+    }
+
+    .preview-table div {
+        grid-template-columns: 1fr;
+        gap: 4px;
     }
 }
