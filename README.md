@@ -28,6 +28,10 @@ matchy match threats.mxy access.log
 matchy query threats.mxy 1.2.3.4
 ```
 
+## Try It in Your Browser
+
+The [Matchy Analyst Workbench](https://matchylabs.github.io/matchy/demo/) loads a bundled `.mxy` threat database and scans dropped log files locally in your browser. It is the fastest way to feel the workflow before installing the CLI.
+
 ## What It's For
 
 **Threat Intelligence Matching**: You have threat feeds (IPs, domains, file hashes) and need to search for them in your data.

@@ -12,6 +12,8 @@ matching IP addresses, CIDR ranges, exact strings, and glob patterns like `*.evi
 microsecond-level query performance. You can build databases with structured data, query them
 efficiently, and deploy them in multi-process applications with minimal memory overhead.
 
+Want to try Matchy before installing anything? Open the [Matchy Analyst Workbench](https://matchylabs.github.io/matchy/demo/) to scan log files locally in your browser against a bundled demo threat database.
+
 ## Sections
 
 **[Getting Started](getting-started/index.md)**

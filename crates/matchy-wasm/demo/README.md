@@ -1,6 +1,6 @@
-# Matchy WASM Demo
+# Matchy Analyst Workbench
 
-Interactive demo for matchy-wasm running entirely in the browser.
+Interactive local-first browser workbench for Matchy WASM. The page loads a bundled `.mxy` threat database, lets users drop log files into the browser, extracts indicators, and matches them locally without uploading evidence.
 
 ## Features
 
@@ -49,6 +49,18 @@ malware.org
 ### Extractor Tab
 - Extract IPs, domains, emails, hashes, crypto addresses from text
 - Highlighted visualization of extracted entities
+
+## Bundled Feed Assets
+
+- `demo-threats.mxy` - Bundled Matchy threat database loaded by the workbench
+- `demo-threats.json` - JSON source data for the bundled demo threat feed
+- `demo-threats.csv` - CSV source data used to regenerate the bundled database
+
+Regenerate the bundled database with:
+
+```bash
+cargo run -p matchy -- build crates/matchy-wasm/demo/assets/demo-threats.csv --output crates/matchy-wasm/demo/assets/demo-threats.mxy --input-format csv
+```
 
 ## Running Locally
 
