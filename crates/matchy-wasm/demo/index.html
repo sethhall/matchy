@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Matchy Analyst Workbench - Local IoC Matching</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2316213e'/%3E%3Cpath d='M8 22V10h4l4 5 4-5h4v12h-4v-6l-4 5-4-5v6z' fill='%23e94560'/%3E%3C/svg%3E">
     <style>
         :root {
             --bg: #1a1a2e;
@@ -588,7 +589,7 @@
                 <div id="evidence-drop-zone" class="evidence-drop-zone" role="button" tabindex="0" aria-label="Drop log files here or press Enter to choose files for local scanning">
                     <p><strong>Drop log files here to scan immediately</strong></p>
                     <p>Text logs, JSONL, CSV, and copied evidence exports work best.</p>
-                    <input type="file" id="evidence-file-input" class="visually-hidden" tabindex="-1" aria-hidden="true" multiple>
+                    <input type="file" id="evidence-file-input" class="visually-hidden" tabindex="-1" aria-hidden="true" aria-label="Choose log files for local scanning" multiple>
                 </div>
 
                 <div class="summary-strip" id="scan-summary">
@@ -657,11 +658,11 @@
                         <div class="section">
                             <h3>Add Entry</h3>
                             <div class="mb-1">
-                                <label>Key (IP, CIDR, pattern, or literal)</label>
+                                <label for="entry-key">Key (IP, CIDR, pattern, or literal)</label>
                                 <input type="text" id="entry-key" placeholder="e.g., 192.168.0.0/16, *.evil.com, malware.org">
                             </div>
                             <div class="mb-1">
-                                <label>Data (JSON)</label>
+                                <label for="entry-data">Data (JSON)</label>
                                 <input type="text" id="entry-data" placeholder='{"category": "threat", "severity": "high"}' value='{"category": "example"}'>
                             </div>
                             <div class="flex-row mt-1">
@@ -711,7 +712,7 @@
                             <div class="drop-zone" id="drop-zone">
                                 <p>Drop a feed file here</p>
                                 <p style="font-size: 0.85rem; margin-top: 0.5rem;">CSV, JSON, or text indicators</p>
-                                <input type="file" id="file-input" accept=".csv,.json,.txt">
+                                <input type="file" id="file-input" aria-label="Choose a feed file to import" accept=".csv,.json,.txt">
                             </div>
                             <div id="file-info" style="margin-top: 0.5rem; font-size: 0.85rem; color: var(--text-dim);"></div>
                         </div>
@@ -725,7 +726,7 @@
                             </div>
                             
                             <div id="import-csv" class="import-panel active">
-                                <textarea id="csv-input" placeholder="entry,category,severity
+                                <textarea id="csv-input" aria-label="CSV feed data" placeholder="entry,category,severity
 192.168.0.0/16,private,low
 *.evil.com,malware,high
 8.8.8.8,dns,info"></textarea>
@@ -735,7 +736,7 @@
                             </div>
                             
                             <div id="import-json" class="import-panel">
-                                <textarea id="json-input" placeholder='[
+                                <textarea id="json-input" aria-label="JSON feed data" placeholder='[
   {"key": "192.168.0.0/16", "data": {"category": "private"}},
   {"key": "*.evil.com", "data": {"category": "malware", "severity": "high"}},
   {"key": "8.8.8.8", "data": {"category": "dns"}}
@@ -746,7 +747,7 @@
                             </div>
                             
                             <div id="import-text" class="import-panel">
-                                <textarea id="text-input" placeholder="192.168.0.0/16
+                                <textarea id="text-input" aria-label="Text feed indicators" placeholder="192.168.0.0/16
 10.0.0.0/8
 *.evil.com
 *.phishing-*.net
@@ -794,7 +795,7 @@ malware.org
                         <div class="section">
                             <h3>Query Database</h3>
                             <div class="mb-1">
-                                <label>Enter IP address or string to query</label>
+                                <label for="query-input">Enter IP address or string to query</label>
                                 <input type="text" id="query-input" placeholder="e.g., 192.168.1.100 or test.evil.com">
                             </div>
                             <button id="run-query">Look Up</button>
@@ -803,7 +804,7 @@ malware.org
                         
                         <div class="section">
                             <h3>Batch Input</h3>
-                            <label>One query per line</label>
+                            <label for="batch-input">One query per line</label>
                             <textarea id="batch-input" placeholder="192.168.1.1&#10;test.evil.com&#10;8.8.8.8&#10;safe.example.org"></textarea>
                         </div>
                     </div>
@@ -831,7 +832,7 @@ malware.org
                     <div>
                         <div class="section">
                             <h3>Input Text</h3>
-                            <textarea id="extract-input" placeholder="Paste text containing IPs, domains, emails, hashes...">The server at 192.168.1.100 received connections from 8.8.8.8 and 2001:db8::1.
+                            <textarea id="extract-input" aria-label="Text to extract indicators from" placeholder="Paste text containing IPs, domains, emails, hashes...">The server at 192.168.1.100 received connections from 8.8.8.8 and 2001:db8::1.
 
 Suspicious domains detected: malware.evil.com, phishing-site.net
 Contact: admin@example.com, security@corp.org
