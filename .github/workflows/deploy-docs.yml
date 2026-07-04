@@ -58,12 +58,30 @@ jobs:
           cd book
           mdbook build
 
-      - name: Build and copy browser demo
+      - name: Build and assemble Pages site
         run: |
           wasm-pack build crates/matchy-wasm --target web --out-dir demo/pkg
+
+          docs_tmp="$(mktemp -d)"
+          cp -R book/book/. "$docs_tmp/"
+
+          rm -rf book/book/docs
+          mkdir -p book/book/docs
+          cp -R "$docs_tmp"/. book/book/docs/
+          rm -rf "$docs_tmp"
+
+          cp crates/matchy-wasm/site/index.html book/book/index.html
+          cp crates/matchy-wasm/site/styles.css book/book/styles.css
+
+          rm -rf book/book/console
+          mkdir -p book/book/console
+          cp -R crates/matchy-wasm/demo/. book/book/console/
+
           rm -rf book/book/demo
           mkdir -p book/book/demo
-          cp -R crates/matchy-wasm/demo/. book/book/demo/
+          cp crates/matchy-wasm/site/demo-redirect.html book/book/demo/index.html
+
+          node scripts/smoke-pages-site.js book/book
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
