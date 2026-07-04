@@ -52,7 +52,7 @@ malware.org
 
 ## Bundled Feed Assets
 
-- `demo-threats.mxy` - Bundled Matchy threat database loaded by the workbench
+- `demo-threats.mxy` - Bundled Matchy threat database loaded by the console
 - `demo-threats.json` - JSON source data for the bundled demo threat feed
 - `demo-threats.csv` - CSV source data used to regenerate the bundled database
 
@@ -77,7 +77,7 @@ This will:
 
 ## Integrating with the Book
 
-The Pages workflow publishes this source in two places:
+The Pages workflow publishes this source at `/console/` and keeps `/demo/` as a compatibility redirect.
 
 - `/console/` - primary analyst console route
 - `/demo/` - compatibility redirect for existing links
