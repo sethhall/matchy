@@ -30,7 +30,7 @@ matchy query threats.mxy 1.2.3.4
 
 ## Try It in Your Browser
 
-The [Matchy Analyst Workbench](https://matchylabs.github.io/matchy/demo/) loads a bundled `.mxy` threat database and scans dropped log files locally in your browser. It is the fastest way to feel the workflow before installing the CLI.
+The [Matchy Analyst Workbench](https://matchylabs.github.io/matchy/demo/) loads a bundled demo `.mxy` threat database and scans dropped log files locally in your browser. It is the fastest way to feel the workflow before installing the CLI.
 
 ## What It's For
 
