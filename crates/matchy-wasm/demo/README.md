@@ -1,6 +1,6 @@
-# Matchy Analyst Workbench
+# Matchy Analyst Console
 
-Interactive local-first browser workbench for Matchy WASM. The page loads a bundled demo `.mxy` threat database, lets users drop log files into the browser, extracts indicators, and matches them locally without uploading the dropped files.
+Interactive local-first browser console for Matchy WASM. The page loads a bundled demo `.mxy` threat database, lets users drop log files into the browser, extracts indicators, and matches them locally without uploading the dropped files.
 
 ## Features
 
@@ -77,17 +77,16 @@ This will:
 
 ## Integrating with the Book
 
-The demo can be served as part of the matchy documentation book:
+The Pages workflow publishes this source in two places:
+
+- `/console/` - primary analyst console route
+- `/demo/` - compatibility redirect for existing links
+
+From the repository root, the workflow builds the WASM package with:
 
 ```bash
-# Build WASM into book output
-wasm-pack build crates/matchy-wasm --target web --out-dir ../../book/book/demo/pkg
-
-# Copy demo files
-cp crates/matchy-wasm/demo/index.html book/book/demo/
+wasm-pack build crates/matchy-wasm --target web --out-dir demo/pkg
 ```
-
-Then access at: `https://your-site.github.io/matchy/demo/`
 
 ## Files
 
