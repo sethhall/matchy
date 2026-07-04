@@ -50,18 +50,37 @@ malware.org
 - Extract IPs, domains, emails, hashes, crypto addresses from text
 - Highlighted visualization of extracted entities
 
-## Bundled Feed Assets
+## Feed Assets
 
-- `demo-threats.mxy` - Bundled Matchy threat database loaded by the console
-- `demo-threats.json` - JSON source data for the bundled demo threat feed
-- `demo-threats.csv` - CSV source data used to regenerate the bundled database
+The repository keeps a tiny bundled fallback feed for local and offline development:
 
-Regenerate the bundled database with:
+- `demo-threats.mxy` - Fallback Matchy threat database loaded by the console
+- `demo-threats.json` - Metadata for the fallback feed
+- `demo-threats.csv` - CSV source data used to regenerate the fallback database
+
+Regenerate the fallback database with:
 
 From the repository root:
 
 ```bash
 cargo run -p matchy -- build crates/matchy-wasm/demo/assets/demo-threats.csv --output crates/matchy-wasm/demo/assets/demo-threats.mxy --input-format csv
+```
+
+GitHub Pages does not publish that fallback feed as the primary website feed. During deployment,
+the workflow fetches the public ThreatFox recent CSV, normalizes it into Matchy CSV, builds a
+fresh `.mxy` file, and stores those generated files only in the Pages artifact at
+`/console/assets/`.
+
+To reproduce the deployed feed locally from a downloaded ThreatFox CSV:
+
+```bash
+node scripts/build-threatfox-recent-feed.mjs \
+  --input /tmp/threatfox-recent.csv \
+  --output-csv book/book/console/assets/demo-threats.csv \
+  --output-json book/book/console/assets/demo-threats.json
+cargo run -p matchy -- build book/book/console/assets/demo-threats.csv \
+  --output book/book/console/assets/demo-threats.mxy \
+  --input-format csv
 ```
 
 ## Running Locally

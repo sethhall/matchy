@@ -9,6 +9,10 @@ function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), "utf8");
 }
 
+function readJson(relativePath) {
+  return JSON.parse(read(relativePath));
+}
+
 function exists(relativePath) {
   return fs.existsSync(path.join(root, relativePath));
 }
@@ -82,6 +86,20 @@ function main() {
   const consoleHtml = read("console/index.html");
   assert(consoleHtml.includes("Analyst Console"), "console title/header should use Analyst Console");
   assert(consoleHtml.includes("./js/workbench-app.mjs"), "console must load workbench app module");
+
+  const feedMetadata = readJson("console/assets/demo-threats.json");
+  assert(
+    feedMetadata.source_url === "https://threatfox.abuse.ch/export/csv/recent/",
+    "deployed console feed must be generated from ThreatFox recent CSV",
+  );
+  assert(
+    Number(feedMetadata.entry_count) > 0,
+    "deployed console feed metadata must report a positive entry_count",
+  );
+  assert(
+    String(feedMetadata.disclaimer || "").includes("locally in your browser"),
+    "deployed console feed disclaimer must describe local browser matching",
+  );
 
   console.log(`Pages artifact smoke passed for ${root}`);
 }
