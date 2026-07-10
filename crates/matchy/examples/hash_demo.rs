@@ -166,7 +166,7 @@ Line 6: Uppercase SHA1 2FD4E1C67A2D28FCED849EE1BB76E7391B93EB12
     println!("✨ Zero false positives");
     println!("   → Rejects UUIDs (dashes), timestamps (non-hex), wrong lengths");
     println!("✨ Blazing fast performance");
-    println!("   → ~1-2 GB/s throughput on typical hardware");
+    println!("   → Measure throughput on representative input and target hardware");
 
     Ok(())
 }

@@ -57,6 +57,32 @@ impl RecordSize {
             Self::Bits32 => 8,
         }
     }
+
+    /// Return the largest record value representable by this width.
+    #[must_use]
+    const fn max_record_value(self) -> u32 {
+        match self {
+            Self::Bits24 => 0x00ff_ffff,
+            Self::Bits28 => 0x0fff_ffff,
+            Self::Bits32 => u32::MAX,
+        }
+    }
+
+    /// Select this width or the next wider width that can represent `value`.
+    #[must_use]
+    const fn widen_for(self, value: u32) -> Self {
+        match self {
+            Self::Bits24 if value > Self::Bits24.max_record_value() => {
+                if value <= Self::Bits28.max_record_value() {
+                    Self::Bits28
+                } else {
+                    Self::Bits32
+                }
+            }
+            Self::Bits28 if value > Self::Bits28.max_record_value() => Self::Bits32,
+            _ => self,
+        }
+    }
 }
 
 /// IP tree builder using arena allocation
@@ -384,19 +410,84 @@ impl IpTreeBuilder {
     ///
     /// Returns: (tree_bytes, node_count)
     pub fn build(&self) -> Result<(Vec<u8>, u32), IpTreeError> {
-        let node_count = u32::try_from(self.nodes.len())
-            .map_err(|_| IpTreeError::Other("IP tree node count exceeds u32::MAX".into()))?;
-        let node_size = self.record_size.node_bytes();
-        let tree_size = node_count as usize * node_size;
+        let (node_count, max_record_value) = self.record_bounds()?;
+        self.ensure_width_fits(self.record_size, max_record_value)?;
+        let tree_bytes = self.serialize(node_count, self.record_size)?;
 
-        let mut tree_bytes = vec![0u8; tree_size];
+        Ok((tree_bytes, node_count))
+    }
+
+    /// Build the tree, widening the configured record size when necessary.
+    ///
+    /// The width supplied to [`Self::new_v4`] or [`Self::new_v6`] remains the
+    /// minimum. This means callers that deliberately selected 28- or 32-bit
+    /// records keep that representation, while a 24-bit tree whose final node
+    /// or data pointer exceeds 24 bits is safely promoted to 28 or 32 bits.
+    ///
+    /// Returns `(tree_bytes, node_count, selected_record_size)`.
+    pub fn build_auto(&self) -> Result<(Vec<u8>, u32, RecordSize), IpTreeError> {
+        let (node_count, max_record_value) = self.record_bounds()?;
+        let record_size = self.record_size.widen_for(max_record_value);
+        self.ensure_width_fits(record_size, max_record_value)?;
+        let tree_bytes = self.serialize(node_count, record_size)?;
+
+        Ok((tree_bytes, node_count, record_size))
+    }
+
+    /// Compute the maximum serialized record without allocating the output tree.
+    fn record_bounds(&self) -> Result<(u32, u32), IpTreeError> {
+        let node_count = u32::try_from(self.nodes.len()).map_err(|_| {
+            IpTreeError::ResourceLimitExceeded("IP tree node count exceeds u32::MAX".into())
+        })?;
+        let mut max_record_value = node_count;
+
+        for node in &self.nodes {
+            let left = Self::pointer_to_value(node.left, node_count)?;
+            let right = Self::pointer_to_value(node.right, node_count)?;
+            max_record_value = max_record_value.max(left).max(right);
+        }
+
+        Ok((node_count, max_record_value))
+    }
+
+    /// Verify the complete tree fits before allocating or writing its buffer.
+    fn ensure_width_fits(
+        &self,
+        record_size: RecordSize,
+        max_record_value: u32,
+    ) -> Result<(), IpTreeError> {
+        let limit = record_size.max_record_value();
+        if max_record_value > limit {
+            return Err(IpTreeError::ResourceLimitExceeded(format!(
+                "IP tree record value {max_record_value} exceeds the {}-bit limit {limit}",
+                record_size as u8
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Serialize with a width already proven to hold every record.
+    fn serialize(&self, node_count: u32, record_size: RecordSize) -> Result<Vec<u8>, IpTreeError> {
+        let node_size = record_size.node_bytes();
+        let tree_size = self.nodes.len().checked_mul(node_size).ok_or_else(|| {
+            IpTreeError::ResourceLimitExceeded("IP tree byte size exceeds usize::MAX".into())
+        })?;
+
+        let mut tree_bytes = Vec::new();
+        tree_bytes.try_reserve_exact(tree_size).map_err(|error| {
+            IpTreeError::ResourceLimitExceeded(format!(
+                "Unable to allocate {tree_size} bytes for IP tree: {error}"
+            ))
+        })?;
+        tree_bytes.resize(tree_size, 0);
 
         // Write each node from the arena
         for (node_id, node) in self.nodes.iter().enumerate() {
-            self.write_node(&mut tree_bytes, node_id, node, node_count)?;
+            self.write_node(&mut tree_bytes, node_id, node, node_count, record_size)?;
         }
 
-        Ok((tree_bytes, node_count))
+        Ok(tree_bytes)
     }
 
     /// Write a single node to the tree bytes
@@ -406,11 +497,12 @@ impl IpTreeBuilder {
         node_id: usize,
         node: &Node,
         node_count: u32,
+        record_size: RecordSize,
     ) -> Result<(), IpTreeError> {
-        let left_value = self.pointer_to_value(node.left, node_count);
-        let right_value = self.pointer_to_value(node.right, node_count);
+        let left_value = Self::pointer_to_value(node.left, node_count)?;
+        let right_value = Self::pointer_to_value(node.right, node_count)?;
 
-        match self.record_size {
+        match record_size {
             RecordSize::Bits24 => self.write_24bit_node(tree, node_id, left_value, right_value),
             RecordSize::Bits28 => self.write_28bit_node(tree, node_id, left_value, right_value),
             RecordSize::Bits32 => self.write_32bit_node(tree, node_id, left_value, right_value),
@@ -419,29 +511,25 @@ impl IpTreeBuilder {
 
     /// Convert node pointer to numeric value
     /// Note: prefix_len is discarded here - it's only used during building
-    fn pointer_to_value(&self, pointer: NodePointer, node_count: u32) -> u32 {
+    fn pointer_to_value(pointer: NodePointer, node_count: u32) -> Result<u32, IpTreeError> {
         match pointer {
-            NodePointer::Empty => node_count, // "not found" marker
+            NodePointer::Empty => Ok(node_count), // "not found" marker
             NodePointer::Node(id) => {
-                // Validate node ID is within bounds
-                assert!(
-                    id < node_count,
-                    "Invalid node ID {id} >= node_count {node_count}"
-                );
-                id
+                if id >= node_count {
+                    return Err(IpTreeError::Other(format!(
+                        "Invalid node ID {id} >= node_count {node_count}"
+                    )));
+                }
+                Ok(id)
             }
             NodePointer::Data(offset, _prefix_len) => {
-                // Validate this won't underflow when read back
-                // Reader does: record - node_count - 16
-                // So we need: (node_count + 16 + offset) >= (node_count + 16)
-                // Which is always true for valid offsets, but let's validate the addition won't overflow
                 node_count
                     .checked_add(16)
                     .and_then(|base| base.checked_add(offset))
-                    .unwrap_or_else(|| {
-                        panic!(
-                        "Data pointer overflow: node_count={node_count} + 16 + offset={offset} exceeds u32::MAX"
-                    )
+                    .ok_or_else(|| {
+                        IpTreeError::ResourceLimitExceeded(format!(
+                            "Data pointer node_count={node_count} + 16 + offset={offset} exceeds u32::MAX"
+                        ))
                     })
             }
         }
@@ -455,8 +543,14 @@ impl IpTreeBuilder {
         left: u32,
         right: u32,
     ) -> Result<(), IpTreeError> {
-        let offset = node_id * 6;
-        if offset + 6 > tree.len() {
+        Self::ensure_records_fit(RecordSize::Bits24, left, right)?;
+        let offset = node_id.checked_mul(6).ok_or_else(|| {
+            IpTreeError::ResourceLimitExceeded("24-bit node offset exceeds usize::MAX".into())
+        })?;
+        let end = offset.checked_add(6).ok_or_else(|| {
+            IpTreeError::ResourceLimitExceeded("24-bit node end exceeds usize::MAX".into())
+        })?;
+        if end > tree.len() {
             return Err(IpTreeError::Other(format!(
                 "Node offset {offset} exceeds tree size"
             )));
@@ -483,8 +577,14 @@ impl IpTreeBuilder {
         left: u32,
         right: u32,
     ) -> Result<(), IpTreeError> {
-        let offset = node_id * 7;
-        if offset + 7 > tree.len() {
+        Self::ensure_records_fit(RecordSize::Bits28, left, right)?;
+        let offset = node_id.checked_mul(7).ok_or_else(|| {
+            IpTreeError::ResourceLimitExceeded("28-bit node offset exceeds usize::MAX".into())
+        })?;
+        let end = offset.checked_add(7).ok_or_else(|| {
+            IpTreeError::ResourceLimitExceeded("28-bit node end exceeds usize::MAX".into())
+        })?;
+        if end > tree.len() {
             return Err(IpTreeError::Other(format!(
                 "Node offset {offset} exceeds tree size"
             )));
@@ -519,8 +619,13 @@ impl IpTreeBuilder {
         left: u32,
         right: u32,
     ) -> Result<(), IpTreeError> {
-        let offset = node_id * 8;
-        if offset + 8 > tree.len() {
+        let offset = node_id.checked_mul(8).ok_or_else(|| {
+            IpTreeError::ResourceLimitExceeded("32-bit node offset exceeds usize::MAX".into())
+        })?;
+        let end = offset.checked_add(8).ok_or_else(|| {
+            IpTreeError::ResourceLimitExceeded("32-bit node end exceeds usize::MAX".into())
+        })?;
+        if end > tree.len() {
             return Err(IpTreeError::Other(format!(
                 "Node offset {offset} exceeds tree size"
             )));
@@ -537,6 +642,24 @@ impl IpTreeBuilder {
         tree[offset + 5] = ((right >> 16) & 0xFF) as u8;
         tree[offset + 6] = ((right >> 8) & 0xFF) as u8;
         tree[offset + 7] = (right & 0xFF) as u8;
+
+        Ok(())
+    }
+
+    /// Defensively reject values that a compact writer would otherwise truncate.
+    fn ensure_records_fit(
+        record_size: RecordSize,
+        left: u32,
+        right: u32,
+    ) -> Result<(), IpTreeError> {
+        let limit = record_size.max_record_value();
+        let value = left.max(right);
+        if value > limit {
+            return Err(IpTreeError::ResourceLimitExceeded(format!(
+                "IP tree record value {value} exceeds the {}-bit limit {limit}",
+                record_size as u8
+            )));
+        }
 
         Ok(())
     }
@@ -605,6 +728,129 @@ mod tests {
         let (bytes, node_count) = result.unwrap();
         assert_eq!(node_count, 1); // Just root
         assert_eq!(bytes.len(), 6); // One node with 24-bit records
+    }
+
+    #[test]
+    fn build_rejects_record_that_exceeds_configured_width() {
+        let mut builder = IpTreeBuilder::new_v4(RecordSize::Bits24);
+        // One root node plus the 16-byte separator makes this record exactly
+        // one greater than the largest 24-bit value.
+        builder
+            .insert(
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                1,
+                RecordSize::Bits24.max_record_value() - 16,
+            )
+            .unwrap();
+
+        let error = builder.build().unwrap_err();
+        assert!(matches!(error, IpTreeError::ResourceLimitExceeded(_)));
+        assert!(error.to_string().contains("24-bit limit"));
+    }
+
+    #[test]
+    fn build_auto_widens_24_bit_record_without_truncating_it() {
+        let mut builder = IpTreeBuilder::new_v4(RecordSize::Bits24);
+        builder
+            .insert(
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                1,
+                RecordSize::Bits24.max_record_value() - 16,
+            )
+            .unwrap();
+
+        let (bytes, node_count, record_size) = builder.build_auto().unwrap();
+        assert_eq!(node_count, 1);
+        assert_eq!(record_size, RecordSize::Bits28);
+        assert_eq!(bytes.len(), 7);
+
+        let left = (u32::from(bytes[3] >> 4) << 24)
+            | (u32::from(bytes[0]) << 16)
+            | (u32::from(bytes[1]) << 8)
+            | u32::from(bytes[2]);
+        assert_eq!(left, RecordSize::Bits24.max_record_value() + 1);
+    }
+
+    #[test]
+    fn build_auto_keeps_record_at_exact_24_bit_limit() {
+        let mut builder = IpTreeBuilder::new_v4(RecordSize::Bits24);
+        builder
+            .insert(
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                1,
+                RecordSize::Bits24.max_record_value() - 17,
+            )
+            .unwrap();
+
+        let (bytes, node_count, record_size) = builder.build_auto().unwrap();
+        assert_eq!(node_count, 1);
+        assert_eq!(record_size, RecordSize::Bits24);
+        assert_eq!(
+            u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]),
+            RecordSize::Bits24.max_record_value()
+        );
+    }
+
+    #[test]
+    fn build_auto_widens_28_bit_record_to_32_bits() {
+        let mut builder = IpTreeBuilder::new_v4(RecordSize::Bits28);
+        builder
+            .insert(
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                1,
+                RecordSize::Bits28.max_record_value() - 16,
+            )
+            .unwrap();
+
+        let (bytes, node_count, record_size) = builder.build_auto().unwrap();
+        assert_eq!(node_count, 1);
+        assert_eq!(record_size, RecordSize::Bits32);
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(
+            u32::from_be_bytes(bytes[..4].try_into().unwrap()),
+            RecordSize::Bits28.max_record_value() + 1
+        );
+    }
+
+    #[test]
+    fn build_auto_preserves_an_explicitly_wider_minimum() {
+        let builder = IpTreeBuilder::new_v4(RecordSize::Bits28);
+        let (bytes, node_count, record_size) = builder.build_auto().unwrap();
+
+        assert_eq!(node_count, 1);
+        assert_eq!(record_size, RecordSize::Bits28);
+        assert_eq!(bytes.len(), 7);
+    }
+
+    #[test]
+    fn build_auto_preserves_small_tree_bytes() {
+        let mut builder = IpTreeBuilder::new_v4(RecordSize::Bits24);
+        builder
+            .insert(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 1, 100)
+            .unwrap();
+
+        let (expected_bytes, expected_node_count) = builder.build().unwrap();
+        let (actual_bytes, actual_node_count, record_size) = builder.build_auto().unwrap();
+
+        assert_eq!(record_size, RecordSize::Bits24);
+        assert_eq!(expected_node_count, 1);
+        // left = node_count + separator + data offset = 117; right = empty = 1
+        assert_eq!(expected_bytes, [0, 0, 117, 0, 0, 1]);
+        assert_eq!(actual_node_count, expected_node_count);
+        assert_eq!(actual_bytes, expected_bytes);
+    }
+
+    #[test]
+    fn data_pointer_overflow_is_an_error_instead_of_a_panic() {
+        let mut builder = IpTreeBuilder::new_v4(RecordSize::Bits32);
+        builder
+            .insert(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 1, u32::MAX)
+            .unwrap();
+
+        assert!(matches!(
+            builder.build_auto(),
+            Err(IpTreeError::ResourceLimitExceeded(_))
+        ));
     }
 
     #[test]

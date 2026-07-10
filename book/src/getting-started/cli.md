@@ -27,9 +27,10 @@ Found: IP address 192.0.2.1
 
 $ # Run a synthetic benchmark
 $ matchy bench ip
-IP queries/sec: 7,234,891
-Average query latency: 138ns
 ```
+
+The benchmark reports values measured on the current system; they are not
+fixed expected output.
 
 After completing this section, check out the [CLI Commands](../commands/index.md)
 reference for detailed documentation on all available commands.

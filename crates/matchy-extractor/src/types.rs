@@ -205,10 +205,14 @@ impl<'a> Match<'a> {
     }
 
     /// Get the matched text as a string slice.
-    /// Returns empty string if the matched bytes are not valid UTF-8.
+    /// Returns an empty string if the span is reversed or out of bounds, or if
+    /// the matched bytes are not valid UTF-8.
     #[must_use]
     pub fn as_str(&self, input: &'a [u8]) -> &'a str {
-        std::str::from_utf8(&input[self.span.0..self.span.1]).unwrap_or("")
+        input
+            .get(self.span.0..self.span.1)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .unwrap_or("")
     }
 }
 
@@ -225,6 +229,19 @@ mod tests {
         assert_eq!(HashType::from_len(128), Some(HashType::Sha512));
         assert_eq!(HashType::from_len(31), None);
         assert_eq!(HashType::from_len(0), None);
+    }
+
+    #[test]
+    fn match_as_str_rejects_invalid_spans_without_panicking() {
+        let item = ExtractedItem::Domain("example.test");
+        let input = b"example.test";
+
+        assert_eq!(Match::new(item.clone(), 8, 3).as_str(input), "");
+        assert_eq!(
+            Match::new(item.clone(), 0, input.len() + 1).as_str(input),
+            ""
+        );
+        assert_eq!(Match::new(item, usize::MAX, usize::MAX).as_str(input), "");
     }
 
     #[test]

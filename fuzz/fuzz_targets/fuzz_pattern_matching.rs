@@ -7,20 +7,20 @@ fuzz_target!(|data: &[u8]| {
     if data.len() < 2 {
         return;
     }
-    
-    let split_point = (data[0] as usize).min(data.len() - 1);
+
+    let split_point = 1 + usize::from(data[0]) % (data.len() - 1);
     let pattern_data = &data[1..split_point];
     let query_data = &data[split_point..];
-    
+
     // Try to extract patterns from first part
     if let Ok(pattern_str) = std::str::from_utf8(pattern_data) {
         let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
-        
+
         // Add patterns (ignore errors - malformed patterns are fine)
         for pattern in pattern_str.split('\0').filter(|s| !s.is_empty()) {
             let _ = builder.add_entry(pattern, std::collections::HashMap::new());
         }
-        
+
         // Try to build database
         if let Ok(db_bytes) = builder.build() {
             // Try to load it

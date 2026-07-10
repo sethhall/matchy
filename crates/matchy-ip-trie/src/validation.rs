@@ -5,12 +5,31 @@
 
 use std::collections::HashSet;
 
+const MAX_VALIDATION_ERRORS: usize = 256;
+const MAX_VALIDATION_WARNINGS: usize = 256;
+const ERRORS_SUPPRESSED: &str =
+    "Additional validation errors suppressed after reaching the limit of 256";
+const WARNINGS_SUPPRESSED: &str =
+    "Additional validation warnings suppressed after reaching the limit of 256";
+
+fn push_capped(messages: &mut Vec<String>, message: String, limit: usize, sentinel: &str) {
+    let already_has_sentinel = messages.iter().any(|existing| existing == sentinel);
+    if message == sentinel && already_has_sentinel {
+        return;
+    }
+    if messages.len() < limit {
+        messages.push(message);
+    } else if !already_has_sentinel {
+        messages[limit - 1] = sentinel.to_string();
+    }
+}
+
 /// Validation result for IP tree structures
 #[derive(Debug, Clone)]
 pub struct IpTreeValidationResult {
-    /// Critical errors that make the structure unusable
+    /// Critical errors, capped at 256 retained messages including a suppression sentinel.
     pub errors: Vec<String>,
-    /// Warnings about potential issues (non-fatal)
+    /// Non-fatal warnings, capped at 256 retained messages including a suppression sentinel.
     pub warnings: Vec<String>,
     /// Statistics gathered during validation
     pub stats: IpTreeStats,
@@ -47,6 +66,24 @@ impl IpTreeValidationResult {
     #[must_use]
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
+    }
+
+    fn error(&mut self, message: impl Into<String>) {
+        push_capped(
+            &mut self.errors,
+            message.into(),
+            MAX_VALIDATION_ERRORS,
+            ERRORS_SUPPRESSED,
+        );
+    }
+
+    fn warning(&mut self, message: impl Into<String>) {
+        push_capped(
+            &mut self.warnings,
+            message.into(),
+            MAX_VALIDATION_WARNINGS,
+            WARNINGS_SUPPRESSED,
+        );
     }
 }
 
@@ -89,9 +126,7 @@ pub fn validate_ip_tree(
         4 => 32,  // IPv4: 32 bits
         6 => 128, // IPv6: 128 bits
         _ => {
-            result
-                .errors
-                .push(format!("Invalid IP version: {ip_version}"));
+            result.error(format!("Invalid IP version: {ip_version}"));
             return result;
         }
     };
@@ -118,7 +153,7 @@ pub fn validate_ip_tree(
     );
 
     if let Err(e) = traverse_result {
-        result.errors.push(format!("Tree traversal error: {e}"));
+        result.error(format!("Tree traversal error: {e}"));
     }
 
     // Gather statistics (saturate at u32::MAX for display purposes)
@@ -130,7 +165,7 @@ pub fn validate_ip_tree(
 
     // Check for orphaned nodes
     if result.stats.orphaned_count > 0 {
-        result.warnings.push(format!(
+        result.warning(format!(
             "Found {} orphaned nodes (exist in tree but unreachable from root)",
             result.stats.orphaned_count
         ));
@@ -138,13 +173,11 @@ pub fn validate_ip_tree(
 
     // Report critical issues
     if cycle_detected {
-        result
-            .errors
-            .push("CRITICAL: Tree cycle detected - would cause infinite loops!".to_string());
+        result.error("CRITICAL: Tree cycle detected - would cause infinite loops!");
     }
 
     if invalid_pointers > 0 {
-        result.errors.push(format!(
+        result.error(format!(
             "CRITICAL: {invalid_pointers} invalid node pointers detected!"
         ));
     }
@@ -322,6 +355,37 @@ fn traverse_ip_tree_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_result_caps_retained_findings() {
+        let mut result = IpTreeValidationResult::new(0);
+        for i in 0..MAX_VALIDATION_ERRORS + 10 {
+            result.error(format!("error {i}"));
+        }
+        for i in 0..MAX_VALIDATION_WARNINGS + 10 {
+            result.warning(format!("warning {i}"));
+        }
+
+        assert_eq!(result.errors.len(), MAX_VALIDATION_ERRORS);
+        assert_eq!(result.warnings.len(), MAX_VALIDATION_WARNINGS);
+        assert_eq!(
+            result
+                .errors
+                .iter()
+                .filter(|message| message.as_str() == ERRORS_SUPPRESSED)
+                .count(),
+            1
+        );
+        assert_eq!(
+            result
+                .warnings
+                .iter()
+                .filter(|message| message.as_str() == WARNINGS_SUPPRESSED)
+                .count(),
+            1
+        );
+        assert!(!result.is_valid());
+    }
 
     #[test]
     fn test_validate_empty_tree() {

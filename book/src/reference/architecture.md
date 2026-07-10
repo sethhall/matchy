@@ -1,321 +1,158 @@
 # Architecture
 
-Technical overview of Matchy's design and implementation.
+This page is a concise map of Matchy's current runtime. The
+[binary format specification](binary-format.md) is the authoritative reference
+for serialized layouts, versions, sizes, and offset bases. The
+[architecture overview](../architecture/overview.md) explains the design at a
+higher level.
 
 ## Design Goals
 
-Matchy is built around these core principles:
+Matchy is designed around four constraints:
 
-1. **Zero-copy access** - Memory-mapped files for instant loading
-2. **Unified database** - Single file for IPs, strings, and patterns
-3. **Memory efficiency** - Shared read-only pages across processes
-4. **High performance** - Millions of queries per second
-5. **Safety first** - Memory-safe Rust core with careful FFI
+1. One query API for IP addresses, exact strings, and glob patterns.
+2. Memory-mapped, position-independent database files.
+3. Bounded work and checked offsets when reading untrusted bytes.
+4. Data structures specialized for each query type.
 
-## System Architecture
+## Current Components
 
-```
-┌─────────────────────────────────────┐
-│         Matchy Database             │
-│              (.mxy)                 │
-└─────────────────────────────────────┘
-           │
-           ├─ MMDB Section (IP lookups)
-           │  └─ Binary trie for CIDR matching
-           │
-           ├─ Literal Hash Section
-           │  └─ FxHash table for exact strings
-           │
-           └─ PARAGLOB Section
-              ├─ Aho-Corasick automaton
-              ├─ Pattern table
-              └─ Data section (JSON values)
-```
+### MMDB IP Search Tree
 
-## Core Components
+IP and CIDR lookups use the MaxMind DB search-tree encoding. A tree node is two
+packed 24-, 28-, or 32-bit records, so a serialized node occupies 6, 7, or 8
+bytes. A record can select another node, the not-found sentinel, or a value in
+the shared MMDB data section.
 
-### 1. Binary Trie (IP Lookups)
+Lookup depth is bounded by the address width: 32 bits for an IPv4 database and
+128 bits for an IPv6 database. IPv6 trees can also contain IPv4 entries beneath
+the conventional 96-bit IPv4 subtree.
 
-**Purpose**: Efficient CIDR prefix matching
+### Literal Hash Table
 
-**Algorithm**: Binary trie with longest-prefix-match
-- Each node represents one bit in the IP address
-- IPv4: Maximum 32 levels deep
-- IPv6: Maximum 128 levels deep
-- O(n) lookup where n = address bits
+Exact strings use the version 3 `LHSH` format from
+`matchy-literal-hash`. The table stores a 96-bit XXH3 hash as `u64 + u32` and a
+pattern ID in each 16-byte slot. It is divided into power-of-two shards and uses
+linear probing within a shard.
 
-**Memory layout**:
-```
-Node {
-    left_offset: u32,   // Offset to left child (0 bit)
-    right_offset: u32,  // Offset to right child (1 bit)
-    data_offset: u32,   // Offset to associated data
-}
-```
+Original literal strings are not stored in this section. A separate mapping
+associates pattern IDs with offsets relative to the shared MMDB data section.
 
-**Performance**:
-- 5.8M lookups/sec for IPv4
-- Cache-friendly sequential traversal
-- Zero allocations per query
+### PARAGLOB Matcher
 
-### 2. Literal Hash Table
+Glob patterns use the version 5 PARAGLOB format. Its main pieces are:
 
-**Purpose**: O(1) exact string matching
+- a serialized Aho-Corasick automaton with 20-byte `ACNodeHot` records;
+- pattern metadata and UTF-8 pattern strings;
+- pre-serialized glob segments for wildcard verification;
+- literal-to-pattern and meta-word mappings;
+- optional inline pattern data for standalone PARAGLOB databases.
 
-**Algorithm**: FxHash with open addressing
-- Non-cryptographic hash for speed
-- Collision resolution via linear probing
-- Load factor kept below 0.75
+In a combined `.mxy` database, PARAGLOB bytes are wrapped with a count and an
+array of offsets into the shared MMDB data section. Those outer mappings are
+separate from PARAGLOB's optional inline `PatternDataMapping` table.
 
-**Memory layout**:
-```
-HashEntry {
-    hash: u64,          // FxHash of the string
-    string_offset: u32, // Offset to string data
-    data_offset: u32,   // Offset to associated data
-}
-```
+## Query Routing
 
-**Performance**:
-- 4.58M lookups/sec
-- Single memory access for most queries
-- Zero string allocations
+`Database::lookup` first determines whether the input is an IP address.
 
-### 3. Aho-Corasick Automaton (Pattern Matching)
+- IP input traverses the MMDB tree and decodes the selected shared data value.
+- Text input checks the literal hash table, then runs PARAGLOB matching for
+  wildcard patterns.
 
-**Purpose**: Parallel multi-pattern glob matching
+The regular query API returns owned result values where appropriate. The
+offset-oriented `lookup_ref` API avoids decoding the value and is intended for
+callers such as the C boundary that can consume an MMDB data offset. Avoid
+describing every query path as allocation-free: result collection and data
+decoding can allocate.
 
-**Algorithm**: Offset-based Aho-Corasick
-- Finite state machine for pattern matching
-- Failure links for efficient backtracking
-- Glob wildcards: `*` (any), `?` (single), `[a-z]` (class)
+## Combined File Layout
 
-**Memory layout**:
-```
-AcNode {
-    edges_offset: u32,      // Offset to edge table
-    edges_count: u16,       // Number of outgoing edges
-    failure_offset: u32,    // Failure function link
-    pattern_ids_offset: u32,// Patterns ending here
-    pattern_count: u16,     // Number of patterns
-}
+A current combined `.mxy` file is organized as:
 
-AcEdge {
-    character: u8,          // Input character
-    target_offset: u32,     // Target node offset
-}
+```text
+MMDB packed search tree
+16-byte zero separator
+shared MMDB data section
+[optional padding]
+[MMDB_PATTERN marker + combined PARAGLOB wrapper]
+[MMDB_LITERAL marker + LHSH v3 bytes]
+MMDB metadata marker
+MMDB metadata map
 ```
 
-**Performance**:
-- 4.57M lookups/sec
-- O(n + m) where n = text length, m = pattern length
-- All patterns checked in single pass
+Metadata fields identify the bytes immediately after each optional extension
+marker. Current writers include those offsets; the reader retains a bounded
+marker scan for older files whose extension offsets are absent or stale.
 
-## Data Flow
+## Offset-Based Storage
 
-### Query Path
+Serialized structures contain integer offsets rather than process pointers, so
+the same bytes can be mapped at different virtual addresses. Offset bases are
+field-specific:
 
-```
-┌───────────────────────────┐
-│  Query (text or IP)  │
-└───────────┬──────────────┘
-     │
-     ├─ Parse as IP?
-     │  ├─ Yes → Binary Trie Lookup
-     │  └─ No ↓
-     │
-     ├─ Hash Lookup (Exact)
-     │  ├─ Found → Return result
-     │  └─ Not found ↓
-     │
-     └─ Pattern Match (Aho-Corasick)
-        ├─ Match → Return first
-        └─ No match → Return NULL
-```
+- metadata extension offsets are absolute file offsets;
+- PARAGLOB header offsets are relative to the PARAGLOB buffer;
+- AC-local references are relative to the serialized AC buffer;
+- literal-header offsets are relative to the `LHSH` bytes;
+- combined literal and glob data mappings are relative to the shared MMDB data
+  section;
+- inline PARAGLOB data mappings are relative to PARAGLOB's inline data section.
 
-### Build Path
+Zero is therefore not a universal null value. It is a valid first offset in the
+shared and inline data sections. See [Offset Encoding](binary-format.md#offset-encoding)
+for the full table.
 
-```
-┌──────────────────────────────┐
-│  Input (CSV, JSON, etc.)  │
-└─────────────┬────────────────┘
-     │
-     ├─ Parse entries
-     │
-     ├─ Categorize:
-     │  ├─ IP addresses → Binary trie builder
-     │  ├─ Exact strings → Hash table builder  
-     │  └─ Patterns → Aho-Corasick builder
-     │
-     ├─ Build data structures
-     │
-     ├─ Serialize to binary
-     │
-     └─ Write .mxy file
-```
+## Opening and Memory Ownership
 
-## Memory Management
+File-backed databases use memory mapping. This avoids reading and deserializing
+the entire file during open and lets the operating system share read-only pages
+across processes. Matchy still parses metadata, validates top-level section
+envelopes and component topology, and retains small runtime metadata. Observed
+open time depends on storage, page-cache state, platform, optional sections,
+and whether legacy marker scanning is needed.
 
-### Offset-Based Pointers
+The `Database` owns the mapping or byte buffer and the internal views that
+reference it. A small, contained unsafe lifetime bridge establishes that
+self-referential ownership invariant. Nested serialized records remain
+bounds-checked before access.
 
-All internal references use **file offsets** instead of pointers:
+## Concurrency
 
-```rust
-// NOT this:
-struct Node {
-    left: *const Node,  // Pointer (can't mmap)
-}
+An opened database is immutable and supports concurrent lookups. Query-cache
+and live-reload state use synchronization internally. Builders are mutable;
+use a separate builder per independent build operation.
 
-// But this:
-struct Node {
-    left_offset: u32,   // Offset (mmap-friendly)
-}
-```
+## Validation Model
 
-Benefits:
-- Memory-mappable
-- Cross-process safe
-- Platform-independent
+Runtime opening fails closed on malformed headers, unsupported versions,
+invalid extension markers, impossible section envelopes, and invalid literal
+hash topology. Query paths validate nested records before reading them.
 
-### Memory Layout
+The separate validator adds reporting and two coverage levels:
 
-```
-┌─────────────────────────────────────┐  ← File start (offset 0)
-│   MMDB Metadata (128 bytes)        │
-├─────────────────────────────────────┤
-│   IP Binary Trie                    │
-│   (variable size)                   │
-├─────────────────────────────────────┤
-│   Data Section                      │
-│   (JSON values, strings)            │
-├─────────────────────────────────────┤
-│   "PARAGLOB" Magic (8 bytes)       │
-├─────────────────────────────────────┤
-│   PARAGLOB Header                   │
-│   - Node count                      │
-│   - Pattern count                   │
-│   - Offsets to sections             │
-├─────────────────────────────────────┤
-│   AC Automaton Nodes                │
-├─────────────────────────────────────┤
-│   AC Edges                          │
-├─────────────────────────────────────┤
-│   Pattern Table                     │
-├─────────────────────────────────────┤
-│   Literal Hash Table                │
-└─────────────────────────────────────┘  ← File end
-```
+- **Standard** performs runtime-equivalent envelope checks and samples
+  tree-reachable MMDB data. If the database declares a known schema, it still
+  validates every referenced entry against that schema.
+- **Strict** exhaustively checks MMDB tree records and reachable data, then runs
+  deeper AC, PARAGLOB, literal, mapping, and schema consistency checks.
 
-## Thread Safety
+For attacker-controlled files, also impose an application-level file-size or
+resource limit. A validation report applies to the bytes that were read; if a
+path can be replaced between validation and opening, use a protected immutable
+snapshot or verify a digest.
 
-### Read-Only Operations
+## Format Compatibility
 
-**Thread-safe**:
-- Opening databases
-- Querying (concurrent reads)
-- Inspecting metadata
-
-Multiple threads can safely query the same database:
-```rust
-// Thread 1
-db.lookup("query1")?;
-
-// Thread 2 (safe!)
-db.lookup("query2")?;
-```
-
-### Write Operations
-
-**Not thread-safe**:
-- Building databases (use one builder per thread)
-- Modifying entries (immutable after build)
-
-## Performance Characteristics
-
-### Time Complexity
-
-| Operation | Complexity | Notes |
-|-----------|------------|-------|
-| IP lookup | O(n) | n = address bits (32 or 128) |
-| Literal lookup | O(1) | Average case with FxHash |
-| Pattern match | O(n+m) | n = text length, m = pattern length |
-| Database load | O(1) | Memory-map operation |
-| Database build | O(n log n) | n = number of entries |
-
-### Space Complexity
-
-| Component | Space | Notes |
-|-----------|-------|-------|
-| Binary trie | O(n) | n = unique IP prefixes |
-| Hash table | O(n) | n = literal strings |
-| AC automaton | O(m) | m = total pattern characters |
-| Data section | O(d) | d = JSON data size |
-
-## Optimizations
-
-### 1. Memory Mapping
-
-- Zero-copy file access
-- Shared pages between processes
-- OS-managed caching
-- Instant "load" time
-
-### 2. Offset Compression
-
-Where possible, use smaller integer types:
-- `u16` for small offsets (<65K)
-- `u32` for medium offsets (<4GB)
-- Reduces memory footprint
-
-### 3. Cache Locality
-
-Data structures optimized for sequential access:
-- Nodes stored contiguously
-- Edges grouped by source node
-- Hot paths use adjacent memory
-
-### 4. Zero Allocations
-
-Query path allocates zero heap memory:
-- Stack-allocated state
-- Borrowed references
-- No string copies
-
-## Safety
-
-### Rust Core
-
-Core algorithms in **100% safe Rust**:
-- No unsafe blocks in hot paths
-- Borrow checker prevents use-after-free
-- Bounds checking on all array access
-
-### FFI Boundary
-
-Unsafe code limited to C FFI:
-```rust
-// Validation at boundary
-if ptr.is_null() {
-    return MATCHY_ERROR_INVALID_PARAM;
-}
-
-// Panic catching
-let result = std::panic::catch_unwind(|| {
-    // ... safe Rust code ...
-});
-```
-
-### Validation
-
-Multi-level validation:
-1. **Format validation**: Check magic bytes, version
-2. **Bounds checking**: All offsets within file
-3. **UTF-8 validation**: All strings valid UTF-8
-4. **Graph validation**: No cycles in automaton
+The standard MMDB portion follows the MaxMind DB format. Matchy's current
+extension readers accept PARAGLOB v5 and literal-hash v3. Extension structs are
+currently supported on little-endian targets; the endianness marker reserves a
+future byte-swapping implementation.
 
 ## See Also
 
-- [Binary Format](binary-format.md) - Detailed format specification
-- [Performance Benchmarks](benchmarks.md) - Performance data
-- [C API Design](c-api.md) - FFI safety patterns
-- [Database Builder](database-builder.md) - Build process details
+- [Binary Format](binary-format.md) — exact layouts, sizes, versions, and offset bases
+- [Architecture Overview](../architecture/overview.md) — design concepts and diagrams
+- [Validation API](validation-api.md) — programmatic Standard and Strict validation
+- [Performance](../guide/performance.md) — measurement guidance and workload tradeoffs
+- [C API Design](c-api.md) — FFI ownership and error handling

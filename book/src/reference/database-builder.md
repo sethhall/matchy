@@ -45,6 +45,11 @@ See [Schemas Reference](schemas.md) for available schemas.
 - `MatchMode::CaseInsensitive` - "ABC" equals "abc" (recommended for domains)
 - `MatchMode::CaseSensitive` - "ABC" does not equal "abc"
 
+ASCII folding is consistent across exact literals and globs. Non-ASCII behavior
+is not currently uniform: exact literals use Unicode lowercase expansion, while
+glob matching folds ASCII bytes only. Use `CaseSensitive` when one consistent
+non-ASCII contract is required.
+
 ```rust
 // Case-insensitive (recommended)
 let builder = DatabaseBuilder::new(MatchMode::CaseInsensitive);

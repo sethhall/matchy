@@ -12,6 +12,7 @@ members = [
     "crates/matchy-wasm",
 ]
 default-members = ["crates/matchy"]
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]

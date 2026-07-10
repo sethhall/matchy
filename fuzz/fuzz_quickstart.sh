@@ -4,14 +4,17 @@
 
 set -e
 
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$PROJECT_ROOT"
+
 echo "🔧 Fuzzing Quick-Start for matchy"
 echo "================================="
 echo ""
 
-# Check if nightly is installed
-if ! rustup toolchain list | grep -q nightly; then
+# Check that the undated `+nightly` alias used below is installed.
+if ! rustup run nightly rustc --version &> /dev/null; then
     echo "📦 Installing Rust nightly..."
-    rustup install nightly
+    rustup toolchain install nightly --profile minimal
 else
     echo "✓ Rust nightly already installed"
 fi
@@ -19,45 +22,18 @@ fi
 # Check if cargo-fuzz is installed
 if ! command -v cargo-fuzz &> /dev/null; then
     echo "📦 Installing cargo-fuzz (this may take a few minutes)..."
-    cargo install cargo-fuzz
+    cargo install cargo-fuzz --locked
 else
     echo "✓ cargo-fuzz already installed"
 fi
 
-# Initialize fuzzing if not already done
-if [ ! -d "fuzz" ]; then
-    echo "🎯 Initializing fuzzing infrastructure..."
-    cargo fuzz init
-    
-    # Create a simple database loading fuzz target
-    cat > fuzz/fuzz_targets/fuzz_database_load.rs << 'EOF'
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-
-fuzz_target!(|data: &[u8]| {
-    // This should never crash or panic, even on garbage input
-    let _ = matchy::Database::from_bytes(data.to_vec());
-});
-EOF
-
-    echo "✓ Created fuzz target: fuzz_database_load"
-else
-    echo "✓ Fuzzing already initialized"
+if [ ! -f "fuzz/Cargo.toml" ]; then
+    echo "❌ Run this script from a Matchy checkout containing fuzz/Cargo.toml"
+    exit 1
 fi
 
-# Create seed corpus if we have test data
-if [ ! -d "fuzz/corpus/fuzz_database_load" ]; then
-    echo "🌱 Creating seed corpus..."
-    mkdir -p fuzz/corpus/fuzz_database_load
-    
-    # Add any existing test databases to corpus
-    if ls tests/data/*.mxy 2>/dev/null || ls examples/*.db 2>/dev/null; then
-        find tests/data examples -name "*.mxy" -o -name "*.db" 2>/dev/null | while read file; do
-            cp "$file" fuzz/corpus/fuzz_database_load/ 2>/dev/null || true
-        done
-        echo "✓ Added existing databases to corpus"
-    fi
-fi
+echo "✓ Found the checked-in fuzz workspace"
+echo "✓ fuzz_database_load includes a deterministic mixed database seed"
 
 echo ""
 echo "🚀 Setup complete! Ready to fuzz."
@@ -105,4 +81,4 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
 fi
 
 echo ""
-echo "📚 For more info, see FUZZING_GUIDE.md"
+echo "📚 For more info, see fuzz/README.md"

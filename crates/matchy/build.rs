@@ -2,10 +2,29 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=MATCHY_SKIP_CBINDGEN");
     generate_c_header();
 }
 
 fn generate_c_header() {
+    // Fuzzing builds compile Matchy as a dependency and must not rewrite a
+    // tracked source artifact with the fuzz workspace's cbindgen version.
+    let cargo_fuzz_build = env::var_os("CARGO_CFG_FUZZING").is_some()
+        || ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"]
+            .into_iter()
+            .filter_map(|name| env::var(name).ok())
+            .any(|flags| {
+                flags
+                    .split(|character: char| character == '\u{1f}' || character.is_whitespace())
+                    .any(|argument| argument == "fuzzing")
+            });
+    if env::var_os("MATCHY_SKIP_CBINDGEN").is_some() || cargo_fuzz_build {
+        println!(
+            "cargo:warning=Skipping cbindgen because MATCHY_SKIP_CBINDGEN or cfg(fuzzing) is set"
+        );
+        return;
+    }
+
     // Skip header generation on docs.rs - the source directory is read-only
     // The C API documentation doesn't need the generated header
     if env::var("DOCS_RS").is_ok() {

@@ -462,8 +462,8 @@ impl DatabaseBuilder {
             // Empty IP tree - create minimal valid tree
             let record_size = RecordSize::Bits24;
             let tree_builder = IpTreeBuilder::new_v4(record_size);
-            let (tree_bytes, node_cnt) = tree_builder.build()?;
-            (tree_bytes, node_cnt, record_size, 4)
+            let (tree_bytes, node_cnt, selected_record_size) = tree_builder.build_auto()?;
+            (tree_bytes, node_cnt, selected_record_size, 4)
         } else {
             // Determine IP version needed
             let needs_v6 = ip_entries.iter().any(|(addr, _, _)| addr.is_ipv6());
@@ -506,10 +506,13 @@ impl DatabaseBuilder {
             }
 
             // Build the tree
-            let (tree_bytes, node_cnt) = tree_builder.build()?;
+            // The estimate preserves the historical minimum width. The final
+            // tree and data offsets are authoritative, so widen if any encoded
+            // record would otherwise be truncated.
+            let (tree_bytes, node_cnt, selected_record_size) = tree_builder.build_auto()?;
 
             let ip_ver = if needs_v6 { 6 } else { 4 };
-            (tree_bytes, node_cnt, record_size, ip_ver)
+            (tree_bytes, node_cnt, selected_record_size, ip_ver)
         };
 
         // Build glob pattern section if we have glob entries (NOT literals)
@@ -1049,5 +1052,68 @@ mod tests {
             EntryType::Literal(p) => assert_eq!(p, ""),
             _ => panic!("Expected literal"),
         }
+    }
+
+    #[test]
+    fn small_ip_database_roundtrips_with_24_bit_records() {
+        use crate::mmdb::{MmdbHeader, SearchTree};
+        use matchy_data_format::DataDecoder;
+        use std::net::Ipv4Addr;
+
+        let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+        let mut data = HashMap::new();
+        data.insert(
+            "classification".to_string(),
+            DataValue::String("test-net".to_string()),
+        );
+        builder.add_ip("203.0.113.7", data).unwrap();
+
+        let database = builder.build().unwrap();
+        let header = MmdbHeader::from_file(&database).unwrap();
+        assert_eq!(header.record_size, RecordSize::Bits24);
+
+        let result = SearchTree::new(&database, &header)
+            .lookup_v4(Ipv4Addr::new(203, 0, 113, 7))
+            .unwrap()
+            .unwrap();
+        let data_section = &database[header.tree_size + 16..];
+        let decoded = DataDecoder::new(data_section, 0)
+            .decode(result.data_offset)
+            .unwrap();
+        let DataValue::Map(decoded) = decoded else {
+            panic!("expected decoded IP data to be a map");
+        };
+        assert_eq!(
+            decoded.get("classification"),
+            Some(&DataValue::String("test-net".to_string()))
+        );
+    }
+
+    #[test]
+    fn builder_selects_width_from_final_record_value() {
+        use crate::mmdb::{MmdbHeader, SearchTree};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // Inject a synthetic high data offset so the width boundary can be
+        // tested without allocating a 16 MiB data section. IpTreeBuilder's
+        // tests independently verify the serialized record is not truncated.
+        let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+        let data_offset = 0x00ff_ffff - 16;
+        builder.entries.push(EntryRef {
+            entry_type: EntryType::IpAddress {
+                addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                prefix_len: 1,
+            },
+            data_offset,
+        });
+
+        let database = builder.build().unwrap();
+        let header = MmdbHeader::from_file(&database).unwrap();
+        assert_eq!(header.record_size, RecordSize::Bits28);
+        let result = SearchTree::new(&database, &header)
+            .lookup_v4(Ipv4Addr::UNSPECIFIED)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.data_offset, data_offset);
     }
 }

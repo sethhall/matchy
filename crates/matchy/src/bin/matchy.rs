@@ -17,13 +17,13 @@ use commands::{
     about = "Unified database for IP addresses, string literals, and glob patterns",
     long_about = "matchy - High-performance unified database for IP lookups, exact string matching, and glob pattern matching\n\n\
     Build and query databases containing IP addresses (CIDR ranges), exact string literals, \n\
-    and glob patterns with wildcards. Uses memory-mapped files for fast, zero-copy queries.\n\n\
+    and glob patterns with wildcards. Uses memory-mapped files for direct, on-demand access.\n\n\
     Features:\n\
       • IP address lookups (IPv4/IPv6 with CIDR support)\n\
       • Exact string matching (hash-based)\n\
       • Multi-pattern glob matching (wildcards: *, ?, [abc], [!abc])\n\
       • Extended MMDB format with backward compatibility\n\
-      • Zero-copy memory-mapped access\n\
+      • Memory-mapped index access without whole-file deserialization\n\
       • Attach custom metadata to any entry\n\n\
     Examples:\n\
       matchy build patterns.txt --output threats.mxy\n\

@@ -123,7 +123,7 @@ predicates = "3.0"
 mockito = "1.6"
 
 [build-dependencies]
-cbindgen = "0.29"
+cbindgen = "=0.29.2"
 
 [[bench]]
 name = "cache_bench"

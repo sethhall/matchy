@@ -18,18 +18,36 @@ cargo +nightly fuzz run fuzz_database_load -- -runs=1000000
 cargo +nightly fuzz run fuzz_database_load fuzz/corpus/fuzz_database_load
 ```
 
+The database-load target contains a deterministic mixed IP/literal/glob seed,
+so a fresh checkout reaches successful nested query and decode paths before a
+corpus has accumulated.
+
+The fuzz workspace has its own committed lockfile. Matchy's build script also
+detects `cfg(fuzzing)` and skips C-header regeneration, so sanitizer builds do
+not rewrite the tracked generated header with a different cbindgen version.
+Set `MATCHY_SKIP_CBINDGEN=1` for custom fuzz build wrappers that omit that cfg.
+For a plain, non-instrumented type check, start Cargo in `fuzz/` so it loads
+that build environment config:
+
+```bash
+cd fuzz
+cargo +nightly check --locked --bins
+```
+
 ## Available Targets
 
 ### 1. `fuzz_database_load` - Raw Binary Format Validation
-**Purpose:** Tests database loading from arbitrary binary data.
+**Purpose:** Tests database loading and querying from arbitrary binary data.
 
 **What it fuzzes:**
 - MMDB header parsing
 - Binary format validation
 - Offset calculations and bounds checking
+- Query-time traversal of IP, literal, and Paraglob sections
+- Offset lookup and on-demand data decoding
 - Memory safety with malformed structures
 
-**Why it matters:** The most critical safety test. Ensures no crashes or panics when loading untrusted `.mxy` files, even if completely corrupted or maliciously crafted.
+**Why it matters:** The most critical safety test. Ensures no crashes or panics when loading or querying untrusted `.mxy` files, even if completely corrupted or maliciously crafted. A successful parse is always followed by queries so malformed nested structures cannot hide behind a shallow load-only check.
 
 **Run with:**
 ```bash
@@ -62,8 +80,8 @@ cargo +nightly fuzz run fuzz_pattern_matching
 **What it fuzzes:**
 - IP address string parsing
 - IPv4/IPv6 handling
-- CIDR notation edge cases
-- IP tree traversal with various inputs
+- Queries against fixed IPv4, IPv6, and CIDR database entries
+- IP tree traversal with fuzz-derived lookup strings
 
 **Why it matters:** IP parsing is complex and has many edge cases (leading zeros, IPv4-mapped IPv6, malformed octets, etc.). Ensures robust handling.
 
@@ -117,13 +135,13 @@ cargo +nightly fuzz run fuzz_data_values
 **Purpose:** Tests the exact string matching hash table implementation.
 
 **What it fuzzes:**
-- Hash collisions
+- Hash-table build and lookup across fuzz-derived literals
 - Empty strings
 - Very long strings
 - UTF-8 edge cases
 - Lookup of non-existent keys
 
-**Why it matters:** The literal hash table is a performance-critical O(1) lookup path. This ensures it handles edge cases correctly and doesn't have hash collision vulnerabilities.
+**Why it matters:** The literal hash table is a performance-critical O(1) lookup path. This exercises its build and lookup behavior across varied keys and payloads; targeted collision campaigns should use a purpose-built corpus.
 
 **Run with:**
 ```bash
@@ -132,7 +150,22 @@ cargo +nightly fuzz run fuzz_literal_exact_match
 
 ---
 
-### 7. `fuzz_target_1` - Template/Placeholder
+### 7. `fuzz_lookup` - Unified Query Surface
+**Purpose:** Exercises arbitrary UTF-8 and binary-derived queries against a mixed database.
+
+**What it fuzzes:**
+- Unified string query dispatch
+- Typed IP and literal lookup paths
+- Match-result decoding
+
+**Run with:**
+```bash
+cargo +nightly fuzz run fuzz_lookup
+```
+
+---
+
+### 8. `fuzz_target_1` - Template/Placeholder
 **Purpose:** Generic template for adding new fuzz targets.
 
 **Status:** Currently empty boilerplate. Can be customized for specific test scenarios.
@@ -149,6 +182,7 @@ cargo +nightly fuzz run fuzz_literal_exact_match
 | `fuzz_glob_patterns` | ✅ | ❌ | ✅✅✅ | ❌ | ❌ |
 | `fuzz_data_values` | ✅ | ❌ | ❌ | ✅✅✅ | ❌ |
 | `fuzz_literal_exact_match` | ✅ | ❌ | ❌ | ✅ | ✅✅✅ |
+| `fuzz_lookup` | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ✅ = Covered, ✅✅✅ = Primary focus
 
@@ -157,9 +191,9 @@ cargo +nightly fuzz run fuzz_literal_exact_match
 ### Quick Check (5-10 minutes each)
 Run each target for a few minutes to catch obvious issues:
 ```bash
-for target in fuzz_database_load fuzz_pattern_matching fuzz_ip_lookup fuzz_glob_patterns fuzz_data_values fuzz_literal_exact_match; do
+for target in fuzz_database_load fuzz_pattern_matching fuzz_ip_lookup fuzz_glob_patterns fuzz_data_values fuzz_literal_exact_match fuzz_lookup; do
     echo "Fuzzing $target for 5 minutes..."
-    timeout 300 cargo +nightly fuzz run $target
+    cargo +nightly fuzz run "$target" -- -max_total_time=300
 done
 ```
 
@@ -216,14 +250,19 @@ Example GitHub Actions snippet:
 ```yaml
 - name: Fuzz for 5 minutes
   run: |
-    cargo install cargo-fuzz
+    set -euo pipefail
+    rustup toolchain install nightly --profile minimal
+    cargo install cargo-fuzz --locked
     for target in fuzz_database_load fuzz_glob_patterns; do
-      timeout 300 cargo +nightly fuzz run $target || true
+      cargo +nightly fuzz run "$target" -- -max_total_time=300
     done
 ```
 
+If a sanitizer build hangs before libFuzzer prints its startup banner, first
+retry with a current nightly. Linux CI is the preferred control environment for
+distinguishing a macOS AddressSanitizer startup problem from a harness failure.
+
 ## See Also
 
-- **[FUZZING_GUIDE.md](../.dev/docs/FUZZING_GUIDE.md)** - Comprehensive fuzzing guide (local only)
 - **[fuzz_quickstart.sh](fuzz_quickstart.sh)** - Automated fuzzing setup
-- **cargo-fuzz docs** - https://rust-fuzz.github.io/book/cargo-fuzz.html
+- **[cargo-fuzz documentation](https://rust-fuzz.github.io/book/cargo-fuzz.html)**

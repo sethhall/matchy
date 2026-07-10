@@ -1,6 +1,6 @@
 # System Architecture
 
-Matchy is built on three core principles: **unified querying**, **zero-copy memory mapping**, and **memory safety**.
+Matchy is built on three core principles: **unified querying**, **direct memory-mapped index access**, and **memory safety**.
 
 ## High-Level Architecture
 
@@ -104,7 +104,7 @@ graph LR
 
 ```mermaid
 graph LR
-    A[File] -->|mmap| B["Memory Mapped (<1ms)"]
+    A[File] -->|mmap| B["Memory-mapped bytes"]
     B --> C["Direct Access (100MB)"]
     C --> D["OS Page Sharing"]
     D --> E["Total: 100 MB (64 proc)"]
@@ -124,6 +124,7 @@ graph LR
 graph TD
     A["Database File (.mxy)"] --> B["Standard MMDB"]
     A --> C["PARAGLOB Extension"]
+    A --> D["Literal Hash Extension"]
     
     B --> B1["IP Search Tree"]
     B --> B2["Data Section"]
@@ -132,7 +133,8 @@ graph TD
     C --> C1["Magic: PARAGLOB"]
     C --> C2["AC Automaton"]
     C --> C3["Pattern Strings"]
-    C --> C4["Literal Hash"]
+    D --> D1["Magic: LHSH"]
+    D --> D2["Sharded XXH3 Table"]
     
     style A fill:#e1f5fe
     style B fill:#c8e6c9
@@ -143,7 +145,9 @@ graph TD
     style C1 fill:#fff59d
     style C2 fill:#fff59d
     style C3 fill:#fff59d
-    style C4 fill:#fff59d
+    style D fill:#f3e5f5
+    style D1 fill:#e1bee7
+    style D2 fill:#e1bee7
 ```
 
 **Backwards Compatible:**
@@ -153,7 +157,8 @@ graph TD
 
 ## Zero-Copy Design
 
-All data structures use **file offsets** instead of memory pointers. This is the key to enabling memory mapping:
+Serialized structures use **integer offsets** instead of memory pointers. Each
+field documents its own base; this is the key to enabling memory mapping:
 
 **Traditional approach (pointers):**
 ```rust
@@ -165,30 +170,28 @@ struct Node {
 **Matchy approach (offsets):**
 ```rust
 struct Node {
-    next_offset: u32,   // File offset - works anywhere!
+    next_offset: u32,   // Offset from this field's documented section base
 }
 ```
 
-When you open a memory-mapped file, it might be loaded at address `0x1000` in one process and `0x5000` in another. Pointers break, but offsets always work because they're relative to the file start.
+When you open a memory-mapped file, it might be loaded at address `0x1000` in one process and `0x5000` in another. Pointers break, but offsets remain stable because each is interpreted relative to its documented base (such as the file, MMDB data section, PARAGLOB buffer, or AC buffer).
 
 This applies to all structures:
 - **AC automaton nodes** reference edges by offset
 - **Pattern entries** reference strings by offset  
-- **Tree nodes** reference children by offset
+- **MMDB tree records** encode child node numbers or data-section references
 
 Every offset is validated before dereferencing to prevent undefined behavior.
 
 ## Performance at a Glance
 
-| Operation | Time | Technology |
-|-----------|------|------------|
-| **Load 100K IPs** | <1ms | `mmap()` syscall |
-| **IP Lookup** | 0.25µs | Binary trie O(log n) |
-| **Exact String** | 0.88µs | Hash table O(1) |
-| **Suffix Pattern** | 0.30µs | AC + simple glob |
-| **Complex Pattern** | 2-80µs | AC + backtracking |
+- **Opening** maps the file and validates bounded structure; storage, page-cache state, extensions, and legacy scanning affect latency.
+- **IP lookup** is bounded by 32 IPv4 or 128 IPv6 tree steps, followed by selected-value decoding.
+- **Exact-string lookup** uses average-case O(1) sharded hash probing.
+- **Glob matching** uses Aho-Corasick candidate discovery plus verification whose cost depends on pattern shape and input.
 
-*M4 MacBook Air benchmarks*
+See [Performance Benchmarks](../reference/benchmarks.md) for a reproducible
+measurement checklist. Historical figures are not current guarantees.
 
 ## Safety Guarantees
 
@@ -205,7 +208,7 @@ Every offset is validated before dereferencing to prevent undefined behavior.
 2. **Memory mapping** - `mmap()` system call requires unsafe
 3. **Binary format access** - Reading offset-based structures from raw bytes
 
-All unsafe operations are validated:
+Unsafe boundaries are kept small and guarded by checks appropriate to each operation:
 - Null pointer checks before dereferencing
 - Offset bounds checking before structure access
 - Alignment validation for structured reads
@@ -254,24 +257,25 @@ Databases are read-only, but you can update them **while processes are running**
 1. Build new database with updated entries
 2. Atomically replace the file (e.g., `mv new.mxy old.mxy`)
 3. Close old database handle
-4. Reopen database (<1ms load time)
+4. Reopen the memory-mapped database
 5. Continue serving requests
 
 **Why this works:**
-- Opening a database takes <1ms (just mmap)
+- Opening avoids whole-file deserialization and performs bounded structural parsing
 - Old processes keep using the old file until they reopen
 - No downtime needed - reload between requests
 - OS handles the file transition cleanly
 
-This is why we obsessed over making database opening so fast - you can reload threat feeds every few minutes in production without anyone noticing.
+This design avoids rebuilding indexes during reload. Measure reload latency and
+temporary memory under the production update cadence.
 
 ### Pattern Complexity
 
 ```mermaid
 graph LR
-    A["Suffix: *.domain.com"] -->|"3.3M q/s"| B[Fast]
-    C["Prefix: log-*"] -->|"950K q/s"| D[Moderate]
-    E["Complex: *0-9.*"] -->|"13K q/s"| F[Slow]
+    A["Selective suffix: *.domain.com"] -->|"one anchored check"| B[Lower verification work]
+    C["Prefix: log-*"] -->|"anchored check"| D[Moderate verification work]
+    E["Broad mixed glob"] -->|"more candidates/classes"| F[Higher verification work]
     
     style A fill:#a5d6a7
     style B fill:#66bb6a
@@ -285,6 +289,6 @@ graph LR
 
 ## Next Steps
 
-- [Binary Format Details](./binary-format.md) - Deep dive into file format
+- [Binary Format Details](../reference/binary-format.md) - Deep dive into file format
 - [Performance Analysis](./performance.md) - Benchmarks and optimization
-- [MMDB Integration](../mmdb-integration-design.md) - MaxMind compatibility
+- [MMDB Integration](../reference/mmdb-integration.md) - MaxMind compatibility

@@ -1,6 +1,8 @@
 # Query Result Caching
 
-Matchy includes a built-in LRU (Least Recently Used) cache for query results, providing 2-10x performance improvements for workloads with repeated queries.
+Matchy includes an optional least-recently-used (LRU) query-result cache. It
+can reduce repeated lookup and decoding work when a workload has a useful hot
+set; the benefit depends on hit rate, result size, query type, and hardware.
 
 ## Overview
 
@@ -13,17 +15,14 @@ The cache stores query results in memory, eliminating the need to re-execute dat
 
 ## Performance
 
-Cache performance depends on the **hit rate** (percentage of queries found in cache):
+A cache hit avoids matcher traversal and data decoding, but returning an owned
+`QueryResult` can still clone its data. A miss pays the normal lookup cost plus
+cache bookkeeping. Measure with the intended query distribution and report the
+cache hit rate; unique batch workloads often do better with caching disabled.
 
-| Hit Rate | Speedup vs Uncached | Use Case |
-|----------|---------------------|----------|
-| 0% | 1.0x (no benefit) | Batch processing, unique queries |
-| 50% | 1.5-2x | Mixed workload |
-| 80% | 3-5x | Web API, typical firewall |
-| 95% | 5-8x | High-traffic service |
-| 99% | 8-10x | Repeated pattern checking |
-
-**Zero overhead when disabled**: The cache uses compile-time optimization, so disabling it has no performance cost.
+When disabled, Matchy skips cache lookup and insertion. Normal query dispatch
+still occurs, so this should be described as removing cache overhead rather
+than as a compile-time optimization.
 
 ## Configuration
 
@@ -32,7 +31,7 @@ Cache performance depends on the **hit rate** (percentage of queries found in ca
 Use the builder API to configure cache capacity:
 
 ```rust
-use matchy::Database;
+use matchy::{Database, QueryResult};
 
 // Enable cache with 10,000 entry capacity
 let db = Database::from("threats.mxy")
@@ -40,7 +39,9 @@ let db = Database::from("threats.mxy")
     .open()?;
 
 // Use the database normally - caching is transparent
-if let Some(result) = db.lookup("evil.com")? {
+if let Some(result @ (QueryResult::Ip { .. } | QueryResult::Pattern { .. })) =
+    db.lookup("evil.com")?
+{
     println!("Match: {:?}", result);
 }
 ```
@@ -55,13 +56,16 @@ let db = Database::from("threats.mxy")
     .open()?;
 ```
 
-**Default behavior**: If you don't specify cache configuration, a reasonable default cache is enabled.
+**Default behavior**: If you do not specify cache configuration, caching is
+enabled with a 10,000-entry ceiling per retained generation. Each thread keeps
+at most 16 generations under one aggregate retained-heap ceiling; an oversized
+result is not cached.
 
 ## Cache Management
 
 ### Inspecting Cache Size
 
-Check how many entries are currently cached:
+Check how many entries are currently cached on the calling thread:
 
 ```rust
 println!("Cache entries: {}", db.cache_size());
@@ -69,7 +73,7 @@ println!("Cache entries: {}", db.cache_size());
 
 ### Clearing the Cache
 
-Clear all cached entries:
+Clear this database generation's cached entries on the calling thread:
 
 ```rust
 db.clear_cache();
@@ -83,13 +87,17 @@ This is useful for:
 
 ## How It Works
 
-The cache is an LRU (Least Recently Used) cache:
+The cache is an LRU cache:
 
 1. **On first query**: Result is computed and stored in cache
 2. **On repeated query**: Result is returned from cache (fast!)
-3. **When cache is full**: Least recently used entry is evicted
+3. **When an entry or byte limit is reached**: Least recently used entries are evicted
 
-The cache is **thread-safe** using interior mutability, so multiple queries can safely share the same `Database` instance.
+An opened `Database` is safe to share between threads. Query caches themselves
+are thread-local and keyed by database generation, so each querying thread
+builds its own hot set without a shared cache lock. The configured entry ceiling
+applies to each retained generation. A thread retains at most 16 recent
+generations, all sharing one aggregate retained-byte budget.
 
 ## Cache Capacity Guidelines
 
@@ -102,9 +110,12 @@ Choose cache capacity based on your workload:
 | High-traffic service | 50,000 - 100,000 | Maximize hit rate |
 | Memory-constrained | Disable cache | Save memory |
 
-**Memory usage**: Each cache entry uses ~100-200 bytes, so:
-- 10,000 entries ≈ 1-2 MB
-- 100,000 entries ≈ 10-20 MB
+**Memory usage**: Entry size is data-dependent. A miss result may be small,
+while a pattern result can own vectors, strings, maps, and arrays. Matchy uses
+both the configured entry ceiling and a 64 MiB aggregate estimated
+retained-heap ceiling per thread across its recent generations. Allocator
+overhead and temporary clones can make process RSS differ from that estimate.
+Increasing the entry capacity does not raise the byte ceiling.
 
 ## When to Use Caching
 
@@ -125,7 +136,7 @@ Choose cache capacity based on your workload:
 ## Example: Web API with Caching
 
 ```rust
-use matchy::Database;
+use matchy::{Database, QueryResult};
 use std::sync::Arc;
 
 // Create a shared database with caching
@@ -143,7 +154,9 @@ tokio::spawn(async move {
         let query = receive_request().await;
         
         // Cache hit on repeated queries!
-        if let Some(result) = db_clone.lookup(&query)? {
+        if let Some(result @ (QueryResult::Ip { .. } | QueryResult::Pattern { .. })) =
+            db_clone.lookup(&query)?
+        {
             send_response(result).await;
         }
     }
@@ -156,34 +169,35 @@ Use the provided benchmark to measure cache performance on your workload:
 
 ```bash
 # Run the cache demo
-cargo run --release --example cache_demo
+cargo run --release -p matchy --example cache_demo
 
 # Or run the comprehensive benchmark
-cargo bench --bench cache_bench
+cargo bench -p matchy --bench cache_bench
 ```
 
 See `examples/cache_demo.rs` for a complete working example.
 
 ## Comparison with No Cache
 
-Here's a typical performance comparison:
+Benchmark both policies on the same database and query stream:
 
 ```rust
 // Without cache (baseline)
 let db_uncached = Database::from("db.mxy").no_cache().open()?;
-// 10,000 queries: 2.5s → 4,000 QPS
 
-// With cache (80% hit rate)
+// With the default-sized entry cache
 let db_cached = Database::from("db.mxy").cache_capacity(10_000).open()?;
-// 10,000 queries: 0.8s → 12,500 QPS (3x faster!)
 ```
+
+Warm each cache deliberately, keep the query order identical, and record both
+throughput and memory. Do not infer production speedup from hit rate alone.
 
 ## Summary
 
 - **Simple configuration**: Just add `.cache_capacity(size)` to the builder
 - **Transparent operation**: No code changes after configuration
-- **Significant speedup**: 2-10x for high hit rates
-- **Zero overhead**: No cost when disabled
-- **Thread-safe**: Safe to share across threads
+- **Workload-dependent benefit**: Measure repeated and unique query mixes
+- **Bounded retention**: Entry count and estimated retained bytes are limited
+- **Thread-local state**: Safe database sharing without a global cache lock
 
 Query result caching is one of the easiest ways to improve Matchy performance for real-world workloads.

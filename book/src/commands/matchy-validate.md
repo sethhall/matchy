@@ -1,6 +1,6 @@
 # matchy validate
 
-Validate a database file for safety and correctness.
+Validate a database file for integrity and correctness.
 
 ## Synopsis
 
@@ -10,18 +10,16 @@ matchy validate [OPTIONS] <DATABASE>
 
 ## Description
 
-The `validate` command performs comprehensive validation of Matchy database files (`.mxy`) to ensure they are safe to load and use. This is especially important when working with databases from untrusted sources.
+The `validate` command checks Matchy database files (`.mxy`) and reports structural, reference, and schema errors. Strict validation is the default and is recommended for databases from untrusted sources. Standard samples general MMDB data for trusted inputs, although a declared known schema still causes every referenced entry to be schema-validated.
 
 Validation checks include:
-- **MMDB format structure**: Valid metadata, search tree, and data sections
-- **PARAGLOB section integrity**: Pattern automaton structure and consistency
-- **Bounds checking**: All offsets point within the file
-- **UTF-8 validity**: All strings are valid UTF-8
-- **Graph integrity**: No cycles in the failure function
-- **Data consistency**: Arrays, maps, and pointers are valid
-- **Schema validation**: If `database_type` matches a known schema (e.g., `ThreatDB-v1`), yield values are validated against it
 
-The validator is designed to detect malformed, corrupted, or potentially malicious databases without panicking or causing undefined behavior.
+- **Runtime envelopes**: Metadata, versions, section boundaries, and top-level extension structure
+- **MMDB references**: Sampled in Standard mode and exhaustively traversed in Strict mode
+- **Extension consistency**: Deeper mapping and automaton checks in Strict mode
+- **Schema validation**: Referenced entry values are checked when `database_type` declares a known schema such as `ThreatDB-v1`
+
+A passing report means that the bytes read passed the checks for the selected level. It does not make a validation result apply to different bytes that later appear at the same path.
 
 ## Options
 
@@ -30,8 +28,9 @@ The validator is designed to detect malformed, corrupted, or potentially malicio
 Validation strictness level. Default: `strict`
 
 Levels:
-- **`standard`**: Basic checks - offsets, UTF-8, structure
-- **`strict`**: Deep analysis - cycles, redundancy, consistency (default)
+
+- **`standard`**: Runtime envelope checks plus sampled reachable MMDB data; known-schema checks remain exhaustive
+- **`strict`**: Exhaustive MMDB tree validation plus deeper component checks (default)
 
 ### `-j, --json`
 
@@ -62,6 +61,7 @@ matchy validate database.mxy
 ```
 
 Shows:
+
 - Validation level used (strict by default)
 - Database statistics (nodes, patterns, IPs, size)
 - Validation time
@@ -84,7 +84,8 @@ matchy validate --verbose database.mxy
 ```
 
 Adds additional detail:
-- **Warnings**: Non-fatal issues (unreferenced patterns, duplicates)
+
+- **Warnings**: Non-fatal issues and non-canonical structures
 - **Information**: Validation steps completed successfully
 - Useful for understanding what was checked and any potential optimizations
 
@@ -97,6 +98,7 @@ matchy validate --json database.mxy
 ```
 
 Provides structured output with:
+
 - `is_valid`: Boolean pass/fail
 - `duration_ms`: Validation time
 - `errors`, `warnings`, `info`: Categorized messages
@@ -114,22 +116,25 @@ Useful for CI/CD pipelines and automated testing.
 
 ### Standard
 
-Fast validation with essential safety checks:
-- File format structure
-- Offset bounds checking
-- UTF-8 string validity
-- Basic graph structure
+Fast integrity validation that performs:
+
+- The top-level format and section-envelope checks used by the runtime loader
+- Header, version, and section-boundary checks
+- Sampled structural and value validation of reachable MMDB data from up to 20 tree nodes
+- Exhaustive schema validation of referenced entries when `database_type` declares a known schema
+
+Without a known schema, Standard mode does not exhaustively visit every tree record, data value, offset, or string. With a known schema, it still walks all referenced entries for schema conformance, so its running time can be linear in the database size.
 
 **Use when**: Validating trusted databases for basic integrity
 
 ### Strict (Default)
 
-Comprehensive validation including:
-- All standard checks
-- Cycle detection in automaton
-- Redundancy analysis
-- Deep consistency checks
-- Pattern reachability
+Deeper validation that performs:
+
+- All Standard checks
+- Exhaustive checking of MMDB tree records and the reachable data references they expose
+- Deeper consistency checks for extension components, mappings, and automaton structures
+- The same exhaustive known-schema checks that also run in Standard
 
 **Use when**: Validating databases from untrusted sources (default)
 
@@ -192,24 +197,27 @@ The PARAGLOB section header is corrupted.
 
 ### Skip Validation
 
-- After validation has already passed
+- After validation has already passed for the exact same immutable bytes
 - In performance-critical hot paths
-- When loading the same database repeatedly
+- When an application-managed digest or immutable identity proves the database has not changed
 
 ## Performance
 
-Validation speed depends on database size and complexity. Standard mode is typically faster than strict mode.
+Validation speed and resource use depend on database size, structure, storage, and the selected level. Standard mode is typically faster because it samples general MMDB tree data; Strict traverses every MMDB tree record and performs deeper component checks. A known schema makes both levels inspect every referenced entry for schema conformance.
 
-For very large databases (>100MB), consider using `--level standard` for faster validation, or validate once and cache the result.
+For large trusted databases, Standard can provide a faster integrity check. Continue to use Strict for untrusted input, enforce deployment-appropriate resource limits, and cache results only in application code keyed by a digest or immutable file identity.
 
 ## Security Considerations
 
-The validator is designed to be safe even with malicious input:
+The validator handles malformed input with safe Rust parsing and fail-closed validation errors. The caller remains responsible for resource policy:
 
-- **No panics**: All errors are caught and reported
-- **Bounds checking**: All memory access is validated
-- **Safe Rust**: Core validation uses only safe Rust
-- **No trust**: Assumes file contents may be adversarial
+- **Bounds checks**: Structural references are checked according to the selected level before validation code uses them
+- **Safe Rust**: Core validation parsing uses safe Rust
+- **Fail closed**: Malformed structures become errors rather than successful reports
+- **Bounded diagnostics**: Retains at most 256 errors, 256 warnings, and 128 informational messages, with a suppression sentinel on overflow
+- **Resource limits**: Limit file size, memory, CPU time, and concurrency for the deployment
+
+Separately, database open validates top-level envelopes, and query paths perform deliberate bounds checks before accessing nested serialized references. Those runtime checks complement explicit validation; they do not make a prior report apply to replacement bytes.
 
 However, validation is not a substitute for other security measures:
 
@@ -217,6 +225,8 @@ However, validation is not a substitute for other security measures:
 - Use strict mode for untrusted sources
 - Combine with file integrity checks (checksums)
 - Consider sandboxing if processing user-uploaded files
+
+Validation applies to the bytes read during the command. Reopening a mutable path after validation creates a time-of-check/time-of-use gap: another process could replace the file. Validate a protected immutable or atomic snapshot, or record a content digest and invalidate or repeat validation whenever the file changes.
 
 ## Integration with Other Commands
 
@@ -248,21 +258,23 @@ done
 ### False Positives
 
 Some warnings may be benign:
-- Unreferenced patterns (intentional padding)
-- Duplicate patterns (for testing)
 
-Use `--level standard` to skip these checks if needed.
+- Unreferenced or intentionally padded structures
+- Non-canonical data that remains within the format's accepted rules
+
+Review warnings in the context of how the database was produced; do not downgrade untrusted input merely to avoid warnings.
 
 ### Performance Issues
 
 For very large databases (>100MB):
-- Use `--level standard` for faster validation
-- Validate once and cache the result
-- Skip validation for trusted internal databases
+
+- Use Standard only when sampled general coverage is appropriate for a trusted input; known-schema validation remains exhaustive
+- Use Strict for untrusted input and impose explicit resource limits
+- Cache a result in the application only while a digest or immutable identity remains unchanged
 
 ### Memory Usage
 
-Validation loads the entire file into memory. For databases larger than available RAM, validation may fail with an out-of-memory error.
+Validation reads the file into memory. Enforce a file-size limit before validation and account for report and traversal overhead in the application's memory budget.
 
 ## See Also
 

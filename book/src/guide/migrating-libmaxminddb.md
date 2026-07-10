@@ -28,7 +28,7 @@ Benefits of switching to matchy:
 
 1. **Unified database format**: IP addresses + string patterns + exact strings in one file
 2. **Better performance**: Faster loads, optimized queries
-3. **Memory-mapped by default**: Instant startup times
+3. **Memory-mapped by default**: Avoids whole-file deserialization at startup
 4. **Active development**: Modern codebase in Rust
 5. **Drop-in compatibility**: Minimal code changes required
 
@@ -277,7 +277,9 @@ Both libraries are safe to use from multiple threads for lookups. No changes nee
 
 **matchy:** Always memory-mapped (flag accepted but ignored)
 
-**Impact:** Better performance! Databases load instantly regardless of size.
+**Impact:** Matchy avoids whole-file deserialization. Actual opening time still
+depends on storage, page-cache state, platform, optional sections, and whether
+legacy marker scanning is required.
 
 ### 4. Error Codes
 
@@ -409,10 +411,12 @@ Both libraries use memory-mapping:
 
 For IP address lookups (what libmaxminddb does), both libraries have similar performance:
 - Both use binary trie traversal
-- Sub-microsecond latency typical
-- Performance is comparable
+- Address width bounds tree traversal
+- Actual latency depends on selected-value decoding, cache state, and hardware
 
-**Impact:** Migration should not significantly affect IP lookup performance. Matchy's benefits are in unified database format and additional query types.
+**Impact:** Benchmark both libraries with the production MMDB, selected values,
+and cache state. Matchy's additional benefit is a unified format for string and
+pattern indexes.
 
 ### Memory Usage
 

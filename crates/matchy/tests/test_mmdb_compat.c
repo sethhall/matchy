@@ -374,14 +374,20 @@ void test_mmdb_get_entry_data_list() {
         
         if (list) {
             int count = 0;
+            int all_pools_null = 1;
             MMDB_entry_data_list_s *current = list;
             
             while (current != NULL) {
                 count++;
+                if (current->pool != NULL) {
+                    all_pools_null = 0;
+                }
                 current = current->next;
             }
             
             ASSERT(count > 0, "Should have at least one node");
+            ASSERT(all_pools_null,
+                   "Every compatibility list node should expose a NULL pool pointer");
             printf("  Total nodes in list: %d\n", count);
             
             MMDB_free_entry_data_list(list);

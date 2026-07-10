@@ -18,7 +18,7 @@ The `matchy extract` command scans log files or streams to automatically extract
 - Pre-filtering data before database matching
 
 **Key features:**
-- SIMD-accelerated extraction (200-500 MB/sec typical throughput)
+- SIMD-friendly extraction with workload-dependent throughput
 - Multiple output formats: JSON, CSV, plain text
 - Configurable IP, domain, and email extraction
 - Unicode/IDN domain extraction with the matched text preserved in output
@@ -332,7 +332,9 @@ Useful for ransomware analysis, fraud investigation, and darknet marketplace int
 
 ## Performance
 
-Typical throughput: **200-500 MB/s** on modern hardware.
+Throughput depends on input length, candidate density, enabled extractors,
+validation work, output formatting, CPU, and storage. Use the command's
+reported byte count and duration on representative input.
 
 Performance factors:
 - **Extraction types**: Fewer types = faster (skip unnecessary checks)

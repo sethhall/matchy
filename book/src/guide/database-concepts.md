@@ -48,21 +48,23 @@ This makes querying simple: `db.lookup("anything")` works for all types.
 
 ## Memory Mapping
 
-Databases use [*memory mapping*][def-mmap] (mmap) for instant loading:
+Databases use [*memory mapping*][def-mmap] (mmap) for efficient opening:
 
 ```
 Traditional Database          Matchy Database
 ─────────────────────        ─────────────────
 1. Open file                 1. Open file
 2. Read into memory          2. Memory map
-3. Parse format              3. Done! (<1ms)
+3. Parse full contents       3. Validate bounded structure
 4. Build data structures
    (100-500ms for large DB)
 ```
 
 Memory mapping has several benefits:
 
-**Instant loading** - Databases load in under 1 millisecond regardless of size.
+**Efficient opening** - Memory mapping avoids whole-file deserialization.
+Matchy still validates structural envelopes, and observed latency depends on
+storage, page-cache state, platform, optional sections, and legacy scanning.
 
 **Shared memory** - The OS shares memory-mapped pages across processes automatically:
 - 64 processes with a 100MB database = ~100MB RAM total
@@ -78,12 +80,16 @@ Databases use a compact binary format based on [MaxMind's MMDB specification][mm
 - **IP tree** - Binary trie for IP address lookups (MMDB compatible)
 - **Hash table** - For exact string matches (Matchy extension)
 - **Aho-Corasick automaton** - For pattern matching (Matchy extension)  
-- **Data section** - Structured data storage (MMDB compatible)
+- **Data section** - Standard MMDB values plus an optional Matchy timestamp type
 
 This means:
-- Standard MMDB readers can read the IP portion
-- Matchy can read standard MMDB files (like GeoIP databases)
+- Standard MMDB readers can read IP values that use only standard MMDB types
+- Matchy can read standard MMDB v2 files (like GeoIP databases) within its documented decoder resource limits
 - Cross-platform compatible (same file works on Linux, macOS, Windows)
+
+Matchy's compact `Timestamp` is extended type 128 and is not understood by
+standard MMDB readers. Use standard string values when interoperability is
+required.
 
 ## Building a Database
 
@@ -154,10 +160,11 @@ Builders are **NOT thread-safe**:
 ## Compatibility
 
 Databases are:
+
 - ✅ **Platform-independent** - Same file on Linux, macOS, Windows
 - ✅ **Tool-independent** - CLI-built databases work with APIs
 - ✅ **Language-independent** - Rust-built databases work with C
-- ✅ **MMDB-compatible** - Can read standard MaxMind databases
+- ✅ **MMDB-aware** - Reads standard MMDB v2 types within documented decoder limits
 
 ## Next Steps
 

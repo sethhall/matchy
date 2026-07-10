@@ -1,8 +1,15 @@
 # C Querying
 
-The current C query API uses a zero-allocation result struct. Queries return
+The current C query API uses an offset-only result struct that owns no decoded
+data. Cold string queries can still grow bounded thread-local matcher scratch;
+steady-state queries reuse it. Queries return
 `matchy_result_t` by value, or write into caller-provided storage with
 `matchy_query_into()`.
+
+An offset-only result from an auto-reloading handle is not bound to the database
+generation that produced it. If a reload can occur between `matchy_query()` and
+JSON/entry navigation, the token may refer to different bytes. Use a
+non-watching handle when deferred data access must be snapshot-stable.
 
 ## Opening Databases
 
@@ -106,6 +113,14 @@ if (matchy_result_get_entry(&result, &entry) == MATCHY_SUCCESS) {
 }
 ```
 
+String and byte pointers returned through `matchy_aget_value()` remain valid
+until `matchy_close(db)`. The handle retains successful returned allocations
+without eviction under a 64 MiB estimated-storage cap. Exhaustion preserves all
+earlier pointers and returns `MATCHY_ERROR_OUT_OF_MEMORY` for a new retained
+value. Use `matchy_get_entry_data_list()` plus
+`matchy_free_entry_data_list()` when caller-controlled reclamation is required;
+each list has its own 64 MiB aggregate cap.
+
 ## Complete Example
 
 ```c
@@ -163,6 +178,7 @@ Most query calls return an empty `matchy_result_t` for invalid parameters or
 misses. Data navigation helpers return integer status codes:
 
 - `MATCHY_SUCCESS` (0)
+- `MATCHY_ERROR_OUT_OF_MEMORY` (-4)
 - `MATCHY_ERROR_INVALID_PARAM` (-5)
 - `MATCHY_ERROR_NO_DATA` (-10)
 - `MATCHY_ERROR_DATA_PARSE` (-11)

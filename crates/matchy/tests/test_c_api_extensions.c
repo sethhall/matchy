@@ -333,6 +333,26 @@ void test_get_entry_data_list(matchy_t *db) {
         ASSERT(list != NULL, "List should not be NULL");
         
         if (list) {
+            ASSERT(list->entry_data.type_ == MATCHY_DATA_TYPE_MAP,
+                   "First node should describe the root map");
+            matchy_entry_data_list_t *key_node = list->next;
+            ASSERT(key_node != NULL, "Map should include its key node");
+            if (key_node != NULL) {
+                ASSERT(key_node->entry_data.type_ == MATCHY_DATA_TYPE_UTF8_STRING,
+                       "Map key should be a UTF-8 string node");
+                ASSERT(strcmp(key_node->entry_data.value.utf8_string, "value") == 0,
+                       "Map key should immediately precede its value");
+                matchy_entry_data_list_t *value_node = key_node->next;
+                ASSERT(value_node != NULL, "Map key should be followed by its value node");
+                if (value_node != NULL) {
+                    ASSERT(value_node->entry_data.type_ == MATCHY_DATA_TYPE_UTF8_STRING,
+                           "Map value should be a UTF-8 string node");
+                    ASSERT(strcmp(value_node->entry_data.value.utf8_string,
+                                  "simple_string") == 0,
+                           "Map value should follow its key");
+                }
+            }
+
             // Count nodes
             int count = 0;
             matchy_entry_data_list_t *current = list;
@@ -349,7 +369,7 @@ void test_get_entry_data_list(matchy_t *db) {
                 current = current->next;
             }
             
-            ASSERT(count > 0, "Should have at least one node");
+            ASSERT(count == 3, "Single-entry map should contain map, key, and value nodes");
             printf("  Total nodes: %d\n", count);
             
             matchy_free_entry_data_list(list);

@@ -11,8 +11,11 @@ use matchy::{Database, QueryResult};
 
 let db = Database::from("threats.mxy").open()?;
 
-if let Some(result) = db.lookup("192.168.1.1")? {
-    println!("Found match: {:?}", result);
+match db.lookup("192.168.1.1")? {
+    Some(QueryResult::Ip { .. } | QueryResult::Pattern { .. }) => {
+        println!("Found match");
+    }
+    Some(QueryResult::NotFound) | None => println!("No match"),
 }
 ```
 
@@ -31,7 +34,7 @@ Matchy provides `lookup_extracted()` to make this pattern efficient and ergonomi
 ### Basic Example
 
 ```rust
-use matchy::{Database, extractor::Extractor};
+use matchy::{Database, QueryResult, extractor::Extractor};
 
 let db = Database::from("threats.mxy").open()?;
 let extractor = Extractor::new()?;
@@ -39,7 +42,9 @@ let extractor = Extractor::new()?;
 let log_line = b"Connection from 192.168.1.100 to evil.com";
 
 for item in extractor.extract_from_line(log_line) {
-    if let Some(result) = db.lookup_extracted(&item, log_line)? {
+    if let Some(QueryResult::Ip { .. } | QueryResult::Pattern { .. }) =
+        db.lookup_extracted(&item, log_line)?
+    {
         println!("⚠️  Threat: {} ({})",
             item.as_str(log_line),
             item.item.type_name()
@@ -85,7 +90,9 @@ for item in extractor.extract_from_line(log_line) {
 **With `lookup_extracted()` (clean):**
 ```rust
 for item in extractor.extract_from_line(log_line) {
-    if let Some(result) = db.lookup_extracted(&item, log_line)? {
+    if let Some(result @ (QueryResult::Ip { .. } | QueryResult::Pattern { .. })) =
+        db.lookup_extracted(&item, log_line)?
+    {
         // Process result...
     }
 }
@@ -167,12 +174,18 @@ let extractor = Extractor::new()?;
 
 for item in extractor.extract_from_line(log_line) {
     // Check allowlist first
-    if allowlist.lookup_extracted(&item, log_line)?.is_some() {
+    if matches!(
+        allowlist.lookup_extracted(&item, log_line)?,
+        Some(QueryResult::Ip { .. } | QueryResult::Pattern { .. })
+    ) {
         continue; // Skip - in allowlist
     }
     
     // Check threats
-    if let Some(result) = threats.lookup_extracted(&item, log_line)? {
+    if matches!(
+        threats.lookup_extracted(&item, log_line)?,
+        Some(QueryResult::Ip { .. } | QueryResult::Pattern { .. })
+    ) {
         println!("⚠️  Threat detected: {}", item.as_str(log_line));
     }
 }
@@ -180,11 +193,14 @@ for item in extractor.extract_from_line(log_line) {
 
 ### Performance Characteristics
 
-- **Extraction**: 200-500 MB/sec throughput
-- **Lookup per extracted item**: 
-  - IPs: ~138ns (7M queries/sec)
-  - Domains: ~112ns-1μs depending on pattern complexity
-- **Combined throughput**: Typically 100-300 MB/sec for full extract+lookup pipeline
+- Extraction and lookup have separate costs; report both as well as end-to-end throughput
+- IP lookup cost is bounded by address width plus selected-value decoding
+- Domain lookup cost depends on exact-hit rate, pattern complexity, and result decoding
+- Combined throughput depends on line length, extracted-item density, cache state, and concurrency
+- A database string query shares one bounded decoder budget across all matched values. It limits matches to 65,536, independently caps each matching-work dimension at one million units (query bytes, unique literal hits, or raw candidates plus wildcard checks), and applies a shared 64-million-unit CPU-work allowance across matching phases.
+
+Use representative logs and the current revision for measurements; historical
+throughput figures are not API guarantees.
 
 ### See Also
 

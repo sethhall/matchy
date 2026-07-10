@@ -41,13 +41,16 @@ checks IP addresses, CIDR ranges, exact strings, and patterns.
 *Match mode* determines how string comparisons are performed. `MatchMode::CaseSensitive`
 treats `"ABC"` and `"abc"` as different. `MatchMode::CaseInsensitive` treats them as the same.
 Match mode is set when creating a [*database builder*](#database-builder).
+This guarantee applies consistently to ASCII. Exact and glob matching currently
+use different folding rules for non-ASCII text; use case-sensitive mode when
+that distinction matters.
 
 ### Memory Mapping
 
 *Memory mapping* (mmap) is a technique that maps file contents directly into a process's
-address space. Matchy uses memory mapping to load [*databases*](#database) instantly without
-deserialization. The operating system shares memory-mapped pages across processes, reducing
-memory usage.
+address space. Matchy uses memory mapping to open [*databases*](#database) without
+whole-file deserialization. The operating system can share clean memory-mapped pages across
+processes, reducing duplicated resident memory.
 
 ### MMDB
 

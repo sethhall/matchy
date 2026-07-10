@@ -4,11 +4,11 @@
 /// particularly ASCII lowercase conversion which is heavily used in case-insensitive matching.
 ///
 /// Uses platform-specific SIMD intrinsics:
-/// - x86_64: SSE4.2 (16 bytes/iteration)
+/// - x86_64: SSE2 (16 bytes/iteration)
 /// - aarch64: NEON (16 bytes/iteration)
 /// - Other: Optimized scalar fallback
 ///
-/// SIMD version is 4-8x faster than iterator chains with closures.
+/// Relative performance depends on input size, target CPU, and compiler.
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
@@ -18,12 +18,13 @@ use std::arch::aarch64::*;
 /// Convert ASCII text to lowercase using SIMD (x86_64)
 ///
 /// This function processes 16 bytes at a time using SSE2 instructions,
-/// providing significant speedup over byte-by-byte iteration.
+/// reducing loop overhead for sufficiently long inputs.
 ///
 /// # Performance
-/// - 4-8x faster than iterator chains with closures
-/// - 2-3x faster than optimized scalar loops
-/// - Zero allocation (writes to provided Vec with pre-allocated capacity)
+///
+/// Writes into the provided vector and does not allocate when it already has
+/// sufficient capacity. Benchmark the target workload when comparing SIMD and
+/// scalar conversion.
 ///
 /// # Arguments
 /// * `text` - Input byte slice (ASCII or UTF-8)
@@ -165,7 +166,9 @@ unsafe fn ascii_lowercase_simd_arm(text: &[u8], output: &mut Vec<u8>) {
 /// - Other: Optimized scalar fallback
 ///
 /// # Performance
-/// SIMD versions are 4-8x faster than standard iterator chains.
+///
+/// SIMD reduces per-byte loop overhead on supported targets, but the crossover
+/// point is workload- and platform-dependent.
 ///
 /// # Arguments
 /// * `text` - Input byte slice (ASCII or UTF-8)
@@ -219,8 +222,8 @@ pub fn ascii_lowercase_scalar(text: &[u8], output: &mut Vec<u8>) {
 
 /// Choose the best lowercase implementation based on input size
 ///
-/// For very short strings (< 64 bytes), scalar is faster due to SIMD setup overhead.
-/// For longer strings, SIMD provides significant speedup.
+/// Uses a fixed 64-byte heuristic: scalar below the threshold, SIMD at or above
+/// it. The exact crossover point varies by target.
 #[inline]
 pub fn ascii_lowercase(text: &[u8], output: &mut Vec<u8>) {
     if text.len() < 64 {

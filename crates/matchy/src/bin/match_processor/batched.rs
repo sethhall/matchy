@@ -163,7 +163,7 @@ pub fn process_file_batched(
         // Create slice references for batching (zero-copy)
         let line_refs: Vec<&[u8]> = lines.iter().map(|v| v.as_slice()).collect();
         
-        // Batch domain extraction (uses AC automaton - 1.5-3x faster)
+        // Batch domain extraction reuses automaton setup across the batch.
         let domain_batches = if extractor.extract_domains() {
             extractor.extract_domains_batch(&line_refs)
         } else {

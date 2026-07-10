@@ -4,7 +4,7 @@
 //! including edge cases, complex patterns, and real-world scenarios.
 
 use matchy_data_format::DataValue;
-use matchy_paraglob::{MatchMode, Paraglob, ParaglobBuilder};
+use matchy_paraglob::{error::ParaglobError, MatchMode, Paraglob, ParaglobBuilder};
 use std::collections::HashMap;
 
 #[test]
@@ -21,6 +21,87 @@ fn test_basic_wildcards() {
     assert!(!m2.is_empty(), "test* should match test_case");
     assert!(!m3.is_empty(), "*file* should match myfile.dat");
     assert!(m4.is_empty(), "nothing should match nomatch");
+}
+
+#[test]
+fn single_internal_star_fast_path_preserves_glob_semantics() {
+    let patterns = vec!["prefix*suffix", "aba*aba", "π*λ"];
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+
+    assert_eq!(pg.find_all("prefixsuffix"), vec![0]);
+    assert_eq!(pg.find_all("prefix-middle-suffix"), vec![0]);
+    assert!(
+        pg.find_all("aba").is_empty(),
+        "adjacent literals cannot overlap"
+    );
+    assert_eq!(pg.find_all("abaaba"), vec![1]);
+    assert_eq!(pg.find_all("π-middle-λ"), vec![2]);
+    assert_eq!(
+        pg.try_find_all_bounded("prefix-middle-suffix", 8, 1024)
+            .unwrap(),
+        vec![0]
+    );
+}
+
+#[test]
+fn single_internal_star_fast_path_respects_case_insensitive_mode() {
+    let pg = Paraglob::build_from_patterns(&["PREFIX*SUFFIX"], MatchMode::CaseInsensitive).unwrap();
+
+    assert_eq!(pg.find_all("prefix-Middle-suffix"), vec![0]);
+}
+
+#[test]
+fn test_overlapping_glob_literal_candidates_case_sensitive() {
+    let patterns = vec!["*aaa[b]*LONG", "*aa?LONG"];
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+
+    assert_eq!(
+        pg.find_all("aaaabzzzLONG"),
+        vec![0],
+        "the general verifier must retry an overlapping literal candidate"
+    );
+    assert_eq!(
+        pg.find_all("aaaYLONG"),
+        vec![1],
+        "the fixed-window verifier must retry an overlapping literal candidate"
+    );
+}
+
+#[test]
+fn test_overlapping_glob_literal_candidates_case_insensitive() {
+    let patterns = vec!["*AAA[b]*LONG", "*AA?LONG"];
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseInsensitive).unwrap();
+
+    assert_eq!(pg.find_all("aaaaBzzzlong"), vec![0]);
+    assert_eq!(pg.find_all("aaaYlong"), vec![1]);
+}
+
+#[test]
+fn test_short_literal_glob_candidates_case_sensitive() {
+    let pg = Paraglob::build_from_patterns(&["*aa?X"], MatchMode::CaseSensitive).unwrap();
+
+    assert_eq!(pg.find_all("aaaYX"), vec![0]);
+    assert!(pg.find_all("aaaYZ").is_empty());
+}
+
+#[test]
+fn test_short_literal_glob_candidates_case_insensitive() {
+    let pg = Paraglob::build_from_patterns(&["*AA?X"], MatchMode::CaseInsensitive).unwrap();
+
+    assert_eq!(pg.find_all("aaaYx"), vec![0]);
+    assert!(pg.find_all("aaaYz").is_empty());
+}
+
+#[test]
+fn test_case_insensitive_char_class_preserves_raw_range_semantics() {
+    let patterns = vec!["anchor[!Z-a]", "anchor[Z-a]"];
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseInsensitive).unwrap();
+
+    assert_eq!(
+        pg.find_all("anchorm"),
+        vec![0],
+        "a raw-ordered range that normalizes to an empty interval must retain reference semantics"
+    );
 }
 
 #[test]
@@ -83,6 +164,144 @@ fn test_find_first_matches_find_all_ordering() {
 
     assert_eq!(all.first().copied(), pg.find_first("testfile.txt"));
     assert_eq!(None, pg.find_first("nomatch"));
+}
+
+#[test]
+fn bounded_matching_enforces_raw_candidate_and_match_caps() {
+    let literal =
+        Paraglob::build_from_patterns(&["a", "a?", "a??"], MatchMode::CaseSensitive).unwrap();
+
+    assert!(matches!(
+        literal.try_find_all_bounded("a", 3, 2),
+        Err(ParaglobError::ResourceLimitExceeded(_))
+    ));
+    assert!(matches!(
+        literal.try_find_first_bounded("a", 2),
+        Err(ParaglobError::ResourceLimitExceeded(_))
+    ));
+    assert_eq!(literal.try_find_all_bounded("a", 3, 3).unwrap(), vec![0]);
+    assert_eq!(literal.try_find_first_bounded("a", 3).unwrap(), Some(0));
+
+    let wildcards = Paraglob::build_from_patterns(&["*", "?"], MatchMode::CaseSensitive).unwrap();
+    assert!(matches!(
+        wildcards.try_find_all_bounded("x", 1, 2),
+        Err(ParaglobError::ResourceLimitExceeded(_))
+    ));
+    assert!(matches!(
+        wildcards.try_find_all_bounded("x", 2, 1),
+        Err(ParaglobError::ResourceLimitExceeded(_))
+    ));
+    assert_eq!(
+        wildcards.try_find_all_bounded("x", 2, 2).unwrap(),
+        vec![0, 1]
+    );
+}
+
+#[test]
+fn bounded_matching_caps_unique_ac_literal_hits() {
+    let text = "abcdefgh";
+    let mut patterns = Vec::new();
+    for start in 0..text.len() {
+        for end in start + 1..=text.len() {
+            patterns.push(text[start..end].to_string());
+        }
+    }
+    let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+    let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
+
+    assert!(matches!(
+        pg.try_find_all_bounded(text, patterns.len(), text.len()),
+        Err(ParaglobError::ResourceLimitExceeded(_))
+    ));
+    assert_eq!(
+        pg.try_find_all_bounded(text, patterns.len(), patterns.len())
+            .unwrap(),
+        (0..u32::try_from(patterns.len()).unwrap()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn bounded_matching_caps_pure_wildcard_checks_before_iteration() {
+    let patterns: Vec<String> = (1..=16)
+        .map(|question_count| format!("{}*", "?".repeat(question_count)))
+        .collect();
+    let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+    let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
+    let text = "xxxxxxxxxxxxxxx";
+
+    assert!(matches!(
+        pg.try_find_all_bounded(text, patterns.len(), patterns.len() - 1),
+        Err(ParaglobError::ResourceLimitExceeded(_))
+    ));
+    assert_eq!(
+        pg.try_find_all_bounded(text, patterns.len(), 64).unwrap(),
+        (0..u32::try_from(patterns.len() - 1).unwrap()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn bounded_case_insensitive_matching_caps_query_before_normalization() {
+    let pg = Paraglob::build_from_patterns(&["needle"], MatchMode::CaseInsensitive).unwrap();
+    let text = "X".repeat(1024);
+
+    assert!(matches!(
+        pg.try_find_all_bounded(&text, 1, 8),
+        Err(ParaglobError::ResourceLimitExceeded(_))
+    ));
+    assert!(pg.find_all(&text).is_empty());
+}
+
+#[test]
+fn bounded_matching_shares_work_across_many_false_glob_candidates() {
+    let class_characters = "bcdefghijklmnopqrstuvwxyzBCDEFGH";
+    let patterns: Vec<String> = class_characters
+        .chars()
+        .map(|character| format!("a[{character}]"))
+        .collect();
+    assert_eq!(patterns.len(), 32);
+    let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+    let pg = Paraglob::build_from_patterns(&pattern_refs, MatchMode::CaseSensitive).unwrap();
+    let text = "a".repeat(64);
+
+    let legacy = pg.find_all(&text);
+    assert!(legacy.is_empty(), "legacy lookup must be unchanged");
+    assert_eq!(
+        pg.try_find_all_bounded(&text, usize::MAX, usize::MAX)
+            .unwrap(),
+        legacy,
+        "usize::MAX must retain the legacy matching path"
+    );
+    assert_eq!(
+        pg.try_find_first_bounded(&text, usize::MAX).unwrap(),
+        pg.find_first(&text)
+    );
+    assert!(matches!(
+        pg.try_find_all_bounded(&text, patterns.len(), 64),
+        Err(ParaglobError::ResourceLimitExceeded(_))
+    ));
+    assert!(pg
+        .try_find_all_bounded(&text, patterns.len(), 256)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn bounded_matching_charges_overlapping_literal_comparison_bytes() {
+    let repeated_literal = "A".repeat(128);
+    let pattern = format!("*{repeated_literal}*Z");
+    let pg =
+        Paraglob::build_from_patterns(&[pattern.as_str()], MatchMode::CaseInsensitive).unwrap();
+    let text = "a".repeat(256);
+
+    assert!(
+        pg.find_all(&text).is_empty(),
+        "legacy lookup must be unchanged"
+    );
+    assert!(matches!(
+        pg.try_find_all_bounded(&text, 1, text.len()),
+        Err(ParaglobError::ResourceLimitExceeded(_))
+    ));
+    assert!(pg.try_find_all_bounded(&text, 1, 1024).unwrap().is_empty());
 }
 
 #[test]
@@ -435,6 +654,53 @@ fn test_v2_roundtrip_serialization() {
     }
 
     assert_eq!(data2, DataValue::String("test_data".to_string()));
+}
+
+#[test]
+fn test_pattern_data_batch_preserves_order_and_missing_values() {
+    let patterns = ["first", "second", "third"];
+    let data = [
+        Some(DataValue::String("one".to_string())),
+        None,
+        Some(DataValue::Uint32(3)),
+    ];
+    let paraglob =
+        Paraglob::build_from_patterns_with_data(&patterns, Some(&data), MatchMode::CaseSensitive)
+            .unwrap();
+
+    assert_eq!(
+        paraglob
+            .try_get_pattern_data_many(&[2, 1, 0, 2, u32::MAX])
+            .unwrap(),
+        vec![
+            Some(DataValue::Uint32(3)),
+            None,
+            Some(DataValue::String("one".to_string())),
+            Some(DataValue::Uint32(3)),
+            None,
+        ]
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "aggregate pattern-data allocation fixture is prohibitively slow under Miri"
+)]
+fn test_pattern_data_batch_shares_decode_budget() {
+    let large = DataValue::String("x".repeat(20_000));
+    let paraglob = Paraglob::build_from_patterns_with_data(
+        &["large"],
+        Some(&[Some(large)]),
+        MatchMode::CaseSensitive,
+    )
+    .unwrap();
+
+    assert!(paraglob.try_get_pattern_data(0).unwrap().is_some());
+    let error = paraglob
+        .try_get_pattern_data_many(&[0; 70])
+        .expect_err("repeated values must share one aggregate allocation budget");
+    assert!(matches!(error, ParaglobError::ResourceLimitExceeded(_)));
 }
 
 #[test]

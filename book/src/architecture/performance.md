@@ -6,16 +6,16 @@ Matchy is designed for high-performance lookups with minimal overhead.
 
 This section covers performance aspects of matchy:
 
-- **[Benchmarking Strategy](../benchmarking-strategy.md)** - How we measure performance
-- **[Performance Optimizations](../performance-optimizations.md)** - Design decisions for speed
-- **[Performance Results](./performance-results.md)** - Real-world benchmark numbers
+- **[Benchmarking Guide](../dev/benchmarking.md)** - How to run and interpret measurements
+- **[Performance Guide](../guide/performance.md)** - Workload and tuning considerations
+- **[Archived Performance Results](./performance-results.md)** - Historical v0.5.2 measurements
 
 ## Key Performance Features
 
-### Zero-Copy Architecture
+### Direct Memory-Mapped Index Access
 
-Matchy uses memory-mapped files to achieve zero-copy data access:
-- No deserialization overhead
+Matchy uses memory-mapped files for direct index access:
+- No whole-file deserialization
 - Direct binary format access
 - Shared memory pages across processes
 
@@ -23,12 +23,13 @@ Matchy uses memory-mapped files to achieve zero-copy data access:
 
 - **IP lookups**: Binary trie traversal, O(32) for IPv4
 - **Literal lookups**: Hash table with O(1) average case
-- **Pattern matching**: Aho-Corasick automaton for parallel matching
+- **Pattern matching**: Aho-Corasick candidate discovery followed by selective glob verification
 
-### Minimal Memory Footprint
+### Memory Accounting
 
-- Database handle overhead: ~200 bytes
-- Shared pages reduce memory usage in multi-process scenarios
-- Lazy loading via OS page faults
+- Runtime views and optional query caches use owned memory
+- Clean file-backed pages can be shared across processes
+- Resident pages are loaded on demand and depend on the working set
 
-See [Performance Results](./performance-results.md) for detailed benchmark numbers on real hardware.
+See the [Benchmarking Guide](../dev/benchmarking.md) for current measurement
+guidance. The archived results are not guarantees for the current implementation.

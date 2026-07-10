@@ -225,12 +225,12 @@ Benchmark results depend on:
 ### Database Size
 - Larger databases → slightly slower queries
 - Build time scales linearly
-- Load time remains constant (memory-mapped)
+- Memory mapping avoids whole-file deserialization; load results still vary with cache state, storage, extensions, and legacy scanning
 
 ### Entry Type
-- **IPs**: Fastest (~7M queries/sec)
-- **Literals**: Very fast (~8M queries/sec)
-- **Patterns**: Moderate (~1-2M queries/sec)
+- **IPs**: Bounded tree traversal plus selected-value decoding
+- **Literals**: Average-case O(1) sharded hash probing
+- **Patterns**: Candidate discovery plus pattern-dependent glob verification
 
 ### Hit Rate
 - High hit rate → slightly slower (data extraction overhead)
@@ -251,33 +251,27 @@ Benchmark results depend on:
 ### Build Time
 
 How long it takes to compile entries into optimized format:
-- 1M entries: ~1-3 seconds (typical)
-- Scales approximately linearly
+- Report entry mix, value sizes, pattern styles, and selected record width
+- Measure several sizes before assuming a scaling model
 - One-time cost
 
 ### Load Time
 
-How long it takes to memory-map the database:
-- Should be <1ms for any size
-- Instant startup time
-- Memory-mapped, not loaded into RAM
+How long it takes to map and structurally open the database:
+- Report the storage medium and warm- or cold-page-cache state
+- Compare like-for-like extension layouts and format versions
+- Memory-mapped pages are faulted in on demand rather than eagerly copied into a heap representation
 
 ### Query Performance
 
-**Good performance:**
-- IPs: >5M queries/sec
-- Literals: >6M queries/sec
-- Patterns: >1M queries/sec
+Define a workload-specific baseline on otherwise controlled hardware and
+compare distributions, not a universal queries-per-second threshold.
 
-**Acceptable performance:**
-- IPs: 2-5M queries/sec
-- Literals: 3-6M queries/sec
-- Patterns: 500k-1M queries/sec
-
-**Investigate if slower:**
+**When investigating a regression:**
 - Check system load
 - Verify no swap usage
-- Check disk I/O (shouldn't be any after load)
+- Record page faults and disk I/O rather than assuming all mapped pages are resident
+- Confirm identical database bytes, query mix, cache settings, and Matchy revision
 
 ## Use Cases
 

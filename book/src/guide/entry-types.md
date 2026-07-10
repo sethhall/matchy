@@ -88,9 +88,9 @@ See [Pattern Matching](patterns.md) for complete syntax details.
 - Flexible matching rules
 - Category-based blocking
 
-**Performance**: Pattern matching uses the Aho-Corasick algorithm, which searches for
-all patterns simultaneously. Query time is roughly constant regardless of the number
-of patterns (within reason).
+**Performance**: Aho-Corasick scans the query for literal anchors, then Matchy
+verifies candidate globs and pure-wildcard patterns. Cost depends on pattern
+count and shape, anchor selectivity, text length, and emitted candidates.
 
 ## Exact Strings
 
@@ -322,8 +322,9 @@ Query: evil.example.com
 Matches: All three patterns!
 ```
 
-Matchy returns **all matching entries** for pattern queries. This lets you apply
-multiple rules or categories to a single query.
+Matchy returns all matching entries while the query remains within the documented
+match-count, work, and decode budgets. This lets you apply multiple rules or
+categories to a single query without permitting unbounded result growth.
 
 ## Combining Entry Types
 

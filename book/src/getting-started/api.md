@@ -17,7 +17,7 @@ from your application code. This is perfect for:
 ## Example (Rust)
 
 ```rust
-use matchy::{Database, DatabaseBuilder, MatchMode, DataValue};
+use matchy::{DataValue, Database, DatabaseBuilder, MatchMode, QueryResult};
 use std::collections::HashMap;
 
 // Build database
@@ -31,7 +31,7 @@ std::fs::write("threats.mxy", &db_bytes)?;
 
 // Query database
 let db = Database::from("threats.mxy").open()?;
-if let Some(result) = db.lookup("192.0.2.1")? {
+if let Some(result @ QueryResult::Ip { .. }) = db.lookup("192.0.2.1")? {
     println!("Found: {:?}", result);
 }
 ```

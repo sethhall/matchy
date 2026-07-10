@@ -73,7 +73,9 @@ match db.lookup("192.0.2.1")? {
 }
 ```
 
-The database is memory-mapped, so it loads in under 1 millisecond regardless of size.
+The database is memory-mapped, so opening avoids whole-file deserialization.
+Matchy still performs bounded structural checks, and observed latency depends
+on the system and page-cache state.
 
 ## Query a pattern
 
@@ -117,11 +119,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open and query
     let db = Database::from("example.mxy").open()?;
     
-    if let Some(result) = db.lookup("192.0.2.1")? {
+    if let Some(result @ QueryResult::Ip { .. }) = db.lookup("192.0.2.1")? {
         println!("Found: {:?}", result);
     }
     
-    if let Some(result) = db.lookup("phishing.evil.com")? {
+    if let Some(result @ QueryResult::Pattern { .. }) = db.lookup("phishing.evil.com")? {
         println!("Matched pattern: {:?}", result);
     }
     

@@ -37,26 +37,26 @@ patterns. You don't need to know which type you're querying - Matchy figures it 
 **Optimized data structures** provide efficient lookups for each type. IPs use a binary
 search tree. Exact strings use hash tables. Patterns use the Aho-Corasick algorithm.
 
-**Memory mapping** eliminates deserialization. Databases are memory-mapped files that load
-in under a millisecond. The operating system shares pages across processes automatically.
+**Memory mapping** avoids whole-file deserialization. The operating system pages
+data on demand and can share clean file-backed pages across processes; opening
+still performs structural parsing and depends on storage and page-cache state.
 
 **Compact binary format** reduces size. Matchy uses a space-efficient binary representation
 similar to MaxMind's MMDB format.
 
 ## Performance
 
-A typical Matchy database can perform:
-
-- 7M+ IP address lookups per second
-- 1M+ pattern matches per second (with 50,000 patterns)
-- Sub-microsecond latency for individual queries
-- Sub-millisecond loading time
+Matchy uses specialized indexes and memory mapping to avoid rebuilding the
+database at startup. Actual build, open, and query results depend on the data,
+pattern complexity, hardware, storage, and page-cache state. Use `matchy bench`
+with the production workload for current measurements.
 
 ## Compatibility
 
-Matchy can read standard MaxMind MMDB files, making it a drop-in replacement for GeoIP
-databases. It extends the MMDB format to support string matching and patterns while
-maintaining compatibility with existing files.
+Matchy reads standard MMDB v2 types within documented decoder resource limits
+and extends the format with string and pattern indexes. IP values remain
+readable by standard MMDB tools when they use only standard types; Matchy's
+extended `Timestamp` type is Matchy-specific.
 
 ## When to Use Matchy
 

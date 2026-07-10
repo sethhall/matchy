@@ -8,7 +8,7 @@
 //! - A "not found" marker
 
 use super::format::MmdbHeader;
-use super::types::{MmdbError, RecordSize};
+use super::types::{IpVersion, MmdbError, RecordSize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Result of an IP lookup
@@ -20,9 +20,19 @@ pub struct LookupResult {
     pub prefix_len: u8,
 }
 
+/// Result of walking the IPv4-compatible prefix in an IPv6 tree.
+enum Ipv4Start {
+    /// Continue with the 32 IPv4 address bits from this node.
+    Node(u32),
+    /// The prefix walk reached a data record before reaching a node at depth 96.
+    Data(LookupResult),
+    /// The IPv6 tree contains no IPv4-compatible address space.
+    NotFound,
+}
+
 /// Search tree for IP address lookups
 pub struct SearchTree<'a> {
-    /// The raw file data containing the tree
+    /// The bounded search-tree prefix of the file.
     data: &'a [u8],
     /// Parsed header information
     header: &'a MmdbHeader,
@@ -32,7 +42,14 @@ impl<'a> SearchTree<'a> {
     /// Create a new search tree
     #[must_use]
     pub fn new(data: &'a [u8], header: &'a MmdbHeader) -> Self {
-        Self { data, header }
+        // Keep reads inside both the declared tree and the actual input. A
+        // hand-constructed inconsistent header therefore remains safe without
+        // repeating two bounds comparisons at every traversed bit.
+        let tree_len = header.tree_size.min(data.len());
+        Self {
+            data: &data[..tree_len],
+            header,
+        }
     }
 
     /// Look up an IP address
@@ -45,14 +62,17 @@ impl<'a> SearchTree<'a> {
 
     /// Look up an IPv4 address
     pub fn lookup_v4(&self, addr: Ipv4Addr) -> Result<Option<LookupResult>, MmdbError> {
-        use super::types::IpVersion;
-
         // Check if this is an IPv6 tree
         let (mut node, mut depth) = if self.header.ip_version == IpVersion::V6 {
             // IPv4 addresses in IPv6 trees require finding the IPv4 start node first.
-            // Per MMDB spec and libmaxminddb, we traverse 96 zero bits (::ffff:0:0/96)
-            // to reach the IPv4 address space within the IPv6 tree.
-            self.find_ipv4_start_node()?
+            // Per the MMDB specification, the address is represented as 96 zero
+            // bits followed by its 32 IPv4 bits (not as an IPv4-mapped ::ffff
+            // address).
+            match self.find_ipv4_start_node()? {
+                Ipv4Start::Node(node) => (node, 96),
+                Ipv4Start::Data(result) => return Ok(Some(result)),
+                Ipv4Start::NotFound => return Ok(None),
+            }
         } else {
             // Pure IPv4 tree - start at root
             (0u32, 0u8)
@@ -91,6 +111,13 @@ impl<'a> SearchTree<'a> {
 
     /// Look up an IPv6 address
     pub fn lookup_v6(&self, addr: Ipv6Addr) -> Result<Option<LookupResult>, MmdbError> {
+        // The MMDB API treats an IPv6 query against an IPv4-only database as a
+        // successful lookup with no entry. In particular, an IPv4-mapped IPv6
+        // address is still an IPv6 query and is not silently remapped.
+        if self.header.ip_version == IpVersion::V4 {
+            return Ok(None);
+        }
+
         // Convert IPv6 to bits
         let bits = ipv6_to_bits(addr);
 
@@ -100,13 +127,19 @@ impl<'a> SearchTree<'a> {
 
         for bit_index in 0..max_depth {
             // Extract bit from 128-bit value
-            let bit = if bit_index < 64 {
-                (bits.0 >> (63 - bit_index)) & 1
+            let bit: u8 = if bit_index < 64 {
+                if ((bits.0 >> (63 - bit_index)) & 1) == 0 {
+                    0
+                } else {
+                    1
+                }
+            } else if ((bits.1 >> (127 - bit_index)) & 1) == 0 {
+                0
             } else {
-                (bits.1 >> (127 - bit_index)) & 1
+                1
             };
 
-            let record = self.read_record(node as usize, u8::try_from(bit).unwrap())?;
+            let record = self.read_record(node as usize, bit)?;
 
             if record == self.header.node_count {
                 return Ok(None);
@@ -131,6 +164,12 @@ impl<'a> SearchTree<'a> {
     /// - 0 = left record (for IP bit 0)
     /// - 1 = right record (for IP bit 1)
     fn read_record(&self, node: usize, side: u8) -> Result<u32, MmdbError> {
+        if side > 1 {
+            return Err(MmdbError::InvalidFormat(format!(
+                "Invalid tree record side {side}; expected 0 or 1"
+            )));
+        }
+
         if node >= usize::try_from(self.header.node_count).unwrap_or(usize::MAX) {
             return Err(MmdbError::InvalidFormat(format!(
                 "Node index {} exceeds node count {}",
@@ -145,22 +184,33 @@ impl<'a> SearchTree<'a> {
         }
     }
 
+    /// Return one complete node from the already bounded tree prefix.
+    #[inline]
+    fn node_bytes(&self, node: usize, width: usize) -> Result<&'a [u8], MmdbError> {
+        let offset = node.checked_mul(width).ok_or_else(|| {
+            MmdbError::InvalidFormat(format!("Tree node offset overflows for node {node}"))
+        })?;
+        let end = offset.checked_add(width).ok_or_else(|| {
+            MmdbError::InvalidFormat(format!("Tree node end overflows for node {node}"))
+        })?;
+        self.data.get(offset..end).ok_or_else(|| {
+            MmdbError::InvalidFormat(format!(
+                "Tree node range [{offset}, {end}) exceeds bounded tree bytes {}",
+                self.data.len()
+            ))
+        })
+    }
+
     /// Read a 24-bit record (3 bytes per record, 6 bytes per node)
     fn read_24bit_record(&self, node: usize, side: u8) -> Result<u32, MmdbError> {
-        let node_offset = node * 6; // 6 bytes per node
-        let record_offset = node_offset + (side as usize * 3);
-
-        if record_offset + 3 > self.header.tree_size {
-            return Err(MmdbError::InvalidFormat(format!(
-                "Record offset {} exceeds tree size {}",
-                record_offset, self.header.tree_size
-            )));
-        }
+        let node_bytes = self.node_bytes(node, 6)?;
+        let offset = usize::from(side) * 3;
+        let bytes = &node_bytes[offset..offset + 3];
 
         // Read 3 bytes in big-endian order
-        let b0 = u32::from(self.data[record_offset]);
-        let b1 = u32::from(self.data[record_offset + 1]);
-        let b2 = u32::from(self.data[record_offset + 2]);
+        let b0 = u32::from(bytes[0]);
+        let b1 = u32::from(bytes[1]);
+        let b2 = u32::from(bytes[2]);
 
         Ok((b0 << 16) | (b1 << 8) | b2)
     }
@@ -170,16 +220,7 @@ impl<'a> SearchTree<'a> {
     /// Layout: [Left 24 bits][Middle 8 bits][Right 24 bits]
     /// Middle byte contains 4 high bits of left + 4 high bits of right
     fn read_28bit_record(&self, node: usize, side: u8) -> Result<u32, MmdbError> {
-        let node_offset = node * 7; // 7 bytes per node
-
-        if node_offset + 7 > self.header.tree_size {
-            return Err(MmdbError::InvalidFormat(format!(
-                "Node offset {} exceeds tree size {}",
-                node_offset, self.header.tree_size
-            )));
-        }
-
-        let bytes = &self.data[node_offset..node_offset + 7];
+        let bytes = self.node_bytes(node, 7)?;
 
         if side == 0 {
             // Left record: bytes[0..3] with 4 high bits from middle byte
@@ -198,21 +239,15 @@ impl<'a> SearchTree<'a> {
 
     /// Read a 32-bit record (4 bytes per record, 8 bytes per node)
     fn read_32bit_record(&self, node: usize, side: u8) -> Result<u32, MmdbError> {
-        let node_offset = node * 8; // 8 bytes per node
-        let record_offset = node_offset + (side as usize * 4);
-
-        if record_offset + 4 > self.header.tree_size {
-            return Err(MmdbError::InvalidFormat(format!(
-                "Record offset {} exceeds tree size {}",
-                record_offset, self.header.tree_size
-            )));
-        }
+        let node_bytes = self.node_bytes(node, 8)?;
+        let offset = usize::from(side) * 4;
+        let bytes = &node_bytes[offset..offset + 4];
 
         // Read 4 bytes in big-endian order
-        let b0 = u32::from(self.data[record_offset]);
-        let b1 = u32::from(self.data[record_offset + 1]);
-        let b2 = u32::from(self.data[record_offset + 2]);
-        let b3 = u32::from(self.data[record_offset + 3]);
+        let b0 = u32::from(bytes[0]);
+        let b1 = u32::from(bytes[1]);
+        let b2 = u32::from(bytes[2]);
+        let b3 = u32::from(bytes[3]);
 
         Ok((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
     }
@@ -252,31 +287,33 @@ impl<'a> SearchTree<'a> {
 
     /// Find the IPv4 start node in an IPv6 tree
     ///
-    /// Per MMDB spec, IPv4 addresses in IPv6 trees are accessed via the
-    /// ::ffff:0:0/96 prefix. We traverse 96 zero bits to find where the
-    /// IPv4 address space begins.
-    ///
-    /// Returns (node, depth) where node is the starting node for IPv4 lookups
-    /// and depth is 96 (the number of bits traversed).
-    fn find_ipv4_start_node(&self) -> Result<(u32, u8), MmdbError> {
+    /// Per the MMDB specification, IPv4 addresses in IPv6 trees are accessed
+    /// through a 96-zero-bit prefix. A terminal record before depth 96 applies
+    /// to the IPv4-compatible address space and must be returned directly.
+    fn find_ipv4_start_node(&self) -> Result<Ipv4Start, MmdbError> {
         let mut node = 0u32;
 
         // Traverse 96 zero bits (left record each time)
-        for _ in 0..96 {
+        for depth in 1..=96u8 {
             let record = self.read_record(node as usize, 0)?;
 
             if record == self.header.node_count {
                 // IPv4 space not found in this tree
-                return Ok((node, 96));
+                return Ok(Ipv4Start::NotFound);
             } else if record < self.header.node_count {
                 node = record;
             } else {
-                // Shouldn't hit data in the first 96 bits, but handle it
-                return Ok((node, 96));
+                let data_offset = self.calculate_data_offset(record)?;
+                return Ok(Ipv4Start::Data(LookupResult {
+                    data_offset,
+                    // A prefix terminating at or before the 96-bit IPv4
+                    // boundary covers the complete IPv4 address space.
+                    prefix_len: depth.saturating_sub(96),
+                }));
             }
         }
 
-        Ok((node, 96))
+        Ok(Ipv4Start::Node(node))
     }
 }
 
@@ -324,8 +361,6 @@ mod tests {
 
     #[test]
     fn test_read_24bit_record() {
-        use super::super::types::IpVersion;
-
         // Create a small test tree with 24-bit records
         // Node 0: left=1, right=2
         let mut data = vec![0u8; 1000];
@@ -351,8 +386,6 @@ mod tests {
 
     #[test]
     fn test_read_28bit_record() {
-        use super::super::types::IpVersion;
-
         // Create test data for 28-bit records
         let mut data = vec![0u8; 1000];
         // Node 0 with 28-bit records
@@ -379,9 +412,62 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_data_offset() {
-        use super::super::types::IpVersion;
+    fn test_read_32bit_record() {
+        let data = [0x01, 0x02, 0x03, 0x04, 0xA0, 0xB0, 0xC0, 0xD0];
+        let header = MmdbHeader {
+            node_count: 1,
+            record_size: RecordSize::Bits32,
+            ip_version: IpVersion::V6,
+            tree_size: data.len(),
+        };
+        let tree = SearchTree::new(&data, &header);
 
+        assert_eq!(tree.read_32bit_record(0, 0).unwrap(), 0x0102_0304);
+        assert_eq!(tree.read_32bit_record(0, 1).unwrap(), 0xA0B0_C0D0);
+    }
+
+    #[test]
+    fn test_record_reads_reject_actual_buffer_truncation_for_every_width() {
+        for (record_size, node_bytes) in [
+            (RecordSize::Bits24, 6),
+            (RecordSize::Bits28, 7),
+            (RecordSize::Bits32, 8),
+        ] {
+            let data = vec![0; node_bytes - 1];
+            let header = MmdbHeader {
+                node_count: 1,
+                record_size,
+                ip_version: IpVersion::V6,
+                tree_size: node_bytes,
+            };
+            let tree = SearchTree::new(&data, &header);
+
+            assert!(
+                tree.read_record(0, 1).is_err(),
+                "{record_size:?} reader trusted declared size over actual bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn test_record_read_rejects_invalid_side() {
+        let data = [0; 6];
+        let header = MmdbHeader {
+            node_count: 1,
+            record_size: RecordSize::Bits24,
+            ip_version: IpVersion::V4,
+            tree_size: data.len(),
+        };
+        let tree = SearchTree::new(&data, &header);
+
+        assert!(matches!(
+            tree.read_record(0, 2),
+            Err(MmdbError::InvalidFormat(_))
+        ));
+    }
+
+    #[test]
+    fn test_calculate_data_offset() {
         let header = MmdbHeader {
             node_count: 100,
             record_size: RecordSize::Bits24,
@@ -398,6 +484,67 @@ mod tests {
         // Record 200 -> data offset 84
         // (200 - 100 - 16 = 84)
         assert_eq!(tree.calculate_data_offset(200).unwrap(), 84);
+    }
+
+    #[test]
+    fn test_ipv4_lookup_stops_when_ipv6_tree_has_no_ipv4_subtree() {
+        // At the first zero bit the tree says "not found". The right edge is
+        // deliberately a valid data pointer: the old implementation returned
+        // to the root and could falsely follow this edge using the IPv4 bits.
+        let data = [0, 0, 1, 0, 0, 17];
+        let header = MmdbHeader {
+            node_count: 1,
+            record_size: RecordSize::Bits24,
+            ip_version: IpVersion::V6,
+            tree_size: data.len(),
+        };
+        let tree = SearchTree::new(&data, &header);
+
+        assert_eq!(tree.lookup_v4(Ipv4Addr::new(192, 0, 2, 1)).unwrap(), None);
+    }
+
+    #[test]
+    fn test_ipv4_lookup_returns_data_reached_before_ipv4_subtree() {
+        // Record 17 means data offset 0 for node_count 1. A data record on the
+        // zero-prefix walk covers the entire IPv4-compatible address space.
+        let data = [0, 0, 17, 0, 0, 1];
+        let header = MmdbHeader {
+            node_count: 1,
+            record_size: RecordSize::Bits24,
+            ip_version: IpVersion::V6,
+            tree_size: data.len(),
+        };
+        let tree = SearchTree::new(&data, &header);
+
+        assert_eq!(
+            tree.lookup_v4(Ipv4Addr::new(203, 0, 113, 7)).unwrap(),
+            Some(LookupResult {
+                data_offset: 0,
+                prefix_len: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn test_ipv6_lookup_in_ipv4_database_is_not_found() {
+        // Both records point to data, so traversing this as a 128-bit tree would
+        // incorrectly return a match. MMDB specifies a successful not-found
+        // result for IPv6 queries against IPv4-only databases.
+        let data = [0, 0, 17, 0, 0, 17];
+        let header = MmdbHeader {
+            node_count: 1,
+            record_size: RecordSize::Bits24,
+            ip_version: IpVersion::V4,
+            tree_size: data.len(),
+        };
+        let tree = SearchTree::new(&data, &header);
+
+        assert_eq!(tree.lookup_v6(Ipv6Addr::LOCALHOST).unwrap(), None);
+        assert_eq!(
+            tree.lookup_v6(Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped())
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

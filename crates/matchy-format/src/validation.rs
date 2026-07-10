@@ -4,10 +4,29 @@
 //! consistency checks.
 
 use crate::{ParaglobHeader, PatternDataMapping};
-use matchy_data_format::DataValue;
+use matchy_data_format::{DataDecoder, DataValue};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use zerocopy::FromBytes;
+
+const MAX_VALIDATION_ERRORS: usize = 256;
+const MAX_VALIDATION_WARNINGS: usize = 256;
+const ERRORS_SUPPRESSED: &str =
+    "Additional validation errors suppressed after reaching the limit of 256";
+const WARNINGS_SUPPRESSED: &str =
+    "Additional validation warnings suppressed after reaching the limit of 256";
+
+fn push_capped(messages: &mut Vec<String>, message: String, limit: usize, sentinel: &str) {
+    let already_has_sentinel = messages.iter().any(|existing| existing == sentinel);
+    if message == sentinel && already_has_sentinel {
+        return;
+    }
+    if messages.len() < limit {
+        messages.push(message);
+    } else if !already_has_sentinel {
+        messages[limit - 1] = sentinel.to_string();
+    }
+}
 
 /// Trait for validating entry data before insertion into a database
 ///
@@ -74,9 +93,9 @@ pub trait EntryValidator: Send + Sync {
 /// Validation result for format-level checks
 #[derive(Debug, Clone)]
 pub struct FormatValidationResult {
-    /// Errors found during validation
+    /// Errors, capped at 256 retained messages including a suppression sentinel.
     pub errors: Vec<String>,
-    /// Warnings about potential issues
+    /// Warnings, capped at 256 retained messages including a suppression sentinel.
     pub warnings: Vec<String>,
     /// Validation statistics
     pub stats: FormatStats,
@@ -101,12 +120,22 @@ impl FormatValidationResult {
 
     /// Add an error
     pub fn error(&mut self, msg: String) {
-        self.errors.push(msg);
+        push_capped(
+            &mut self.errors,
+            msg,
+            MAX_VALIDATION_ERRORS,
+            ERRORS_SUPPRESSED,
+        );
     }
 
     /// Add a warning
     pub fn warning(&mut self, msg: String) {
-        self.warnings.push(msg);
+        push_capped(
+            &mut self.warnings,
+            msg,
+            MAX_VALIDATION_WARNINGS,
+            WARNINGS_SUPPRESSED,
+        );
     }
 }
 
@@ -147,10 +176,22 @@ pub fn validate_data_mapping_consistency(
 ) -> FormatValidationResult {
     let mut result = FormatValidationResult::new();
 
-    let mapping_offset = header.mapping_table_offset as usize;
-    let mapping_count = header.mapping_count as usize;
-    let data_offset = header.data_section_offset as usize;
-    let data_size = header.data_section_size as usize;
+    let Some(mapping_offset) = usize::try_from(header.mapping_table_offset).ok() else {
+        result.error("Mapping table offset is not addressable".to_string());
+        return result;
+    };
+    let Some(mapping_count) = usize::try_from(header.mapping_count).ok() else {
+        result.error("Mapping count is not addressable".to_string());
+        return result;
+    };
+    let Some(data_offset) = usize::try_from(header.data_section_offset).ok() else {
+        result.error("Data section offset is not addressable".to_string());
+        return result;
+    };
+    let Some(data_size) = usize::try_from(header.data_section_size).ok() else {
+        result.error("Data section size is not addressable".to_string());
+        return result;
+    };
 
     if mapping_count == 0 {
         // No mappings is valid (not all patterns need data)
@@ -158,23 +199,60 @@ pub fn validate_data_mapping_consistency(
     }
 
     if mapping_offset == 0 {
-        result.warning("Mapping table offset is 0 but mapping_count > 0".to_string());
+        result.error("Mapping table offset is 0 but mapping_count > 0".to_string());
+        return result;
+    }
+    if !header.has_data_section() {
+        result.error("Mapping table is present without a data section".to_string());
         return result;
     }
 
+    let mapping_entry_size = std::mem::size_of::<PatternDataMapping>();
+    let Some(mapping_bytes) = mapping_count.checked_mul(mapping_entry_size) else {
+        result.error("Mapping table size overflows address space".to_string());
+        return result;
+    };
+    let Some(mapping_end) = mapping_offset.checked_add(mapping_bytes) else {
+        result.error("Mapping table range overflows address space".to_string());
+        return result;
+    };
+    if mapping_end > buffer.len() {
+        result.error(format!(
+            "Mapping table range [{mapping_offset}, {mapping_end}) exceeds buffer size {}",
+            buffer.len()
+        ));
+        return result;
+    }
+
+    let Some(data_end) = data_offset.checked_add(data_size) else {
+        result.error("Data section range overflows address space".to_string());
+        return result;
+    };
+    if data_end > buffer.len() {
+        result.error(format!(
+            "Data section range [{data_offset}, {data_end}) exceeds buffer size {}",
+            buffer.len()
+        ));
+        return result;
+    }
+    if !header.has_inline_data() {
+        result.warning(
+            "Data section is present without the inline-data flag; current runtime still treats it as inline"
+                .to_string(),
+        );
+    }
+    let data_section = &buffer[data_offset..data_end];
+    let decoder = DataDecoder::new(data_section, 0);
+
     let mut patterns_with_data = HashSet::new();
     let mut duplicate_mappings = 0;
+    let mut previous_pattern_id = None;
 
     for i in 0..mapping_count {
-        let entry_offset = mapping_offset + i * std::mem::size_of::<PatternDataMapping>();
-        if entry_offset + std::mem::size_of::<PatternDataMapping>() > buffer.len() {
-            result.error(format!(
-                "Mapping entry {i} at offset {entry_offset} truncated"
-            ));
-            continue;
-        }
+        let entry_offset = mapping_offset + i * mapping_entry_size;
+        let entry_end = entry_offset + mapping_entry_size;
 
-        let mapping = match PatternDataMapping::read_from_prefix(&buffer[entry_offset..]) {
+        let mapping = match PatternDataMapping::read_from_prefix(&buffer[entry_offset..entry_end]) {
             Ok((m, _)) => m,
             Err(_) => {
                 result.error(format!(
@@ -189,34 +267,50 @@ pub fn validate_data_mapping_consistency(
             duplicate_mappings += 1;
         }
 
+        if previous_pattern_id.is_some_and(|previous| mapping.pattern_id < previous) {
+            result.error(format!(
+                "Mapping table is not sorted: entry {i} pattern ID {} follows a larger ID",
+                mapping.pattern_id
+            ));
+        }
+        previous_pattern_id = Some(mapping.pattern_id);
+
         // Validate pattern ID is valid
         if mapping.pattern_id >= header.pattern_count {
-            result.error(format!(
-                "Mapping entry {} references invalid pattern ID {} (max: {})",
-                i,
-                mapping.pattern_id,
-                header.pattern_count - 1
-            ));
+            if header.pattern_count == 0 {
+                result.error(format!(
+                    "Mapping entry {i} references pattern ID {} but pattern_count is zero",
+                    mapping.pattern_id
+                ));
+            } else {
+                result.error(format!(
+                    "Mapping entry {} references invalid pattern ID {} (max: {})",
+                    i,
+                    mapping.pattern_id,
+                    header.pattern_count - 1
+                ));
+            }
             continue;
         }
 
-        // Validate inline data bounds if applicable
-        if header.has_inline_data() {
-            let data_ref = mapping.data_offset as usize;
-            // Check if this looks like an inline data reference
-            if data_ref >= data_offset && data_ref < data_offset + data_size {
-                let data_end = data_ref + mapping.data_size as usize;
-                if data_end > data_offset + data_size {
-                    result.error(format!(
-                        "Mapping entry {} data range [{}, {}) exceeds data section [{}, {})",
-                        i,
-                        data_ref,
-                        data_end,
-                        data_offset,
-                        data_offset + data_size
-                    ));
-                }
-            }
+        // Mapping offsets are relative to the start of the data section.
+        let relative_start = usize::try_from(mapping.data_offset).unwrap_or(usize::MAX);
+        let mapping_size = usize::try_from(mapping.data_size).unwrap_or(usize::MAX);
+        let relative_end = relative_start.checked_add(mapping_size);
+        if relative_start >= data_size {
+            result.error(format!(
+                "Mapping entry {i} relative data offset {relative_start} is outside data section size {data_size}"
+            ));
+        } else if mapping_size != 0 && relative_end.is_none_or(|end| end > data_size) {
+            result.error(format!(
+                "Mapping entry {i} relative data range [{relative_start}, {}) exceeds data section size {data_size}",
+                relative_end.map_or_else(|| "overflow".to_string(), |end| end.to_string())
+            ));
+        } else if let Err(error) = decoder.decode(mapping.data_offset) {
+            result.error(format!(
+                "Mapping entry {i} data at relative offset {} does not decode: {error}",
+                mapping.data_offset
+            ));
         }
 
         result.stats.mappings_validated += 1;
@@ -226,7 +320,7 @@ pub fn validate_data_mapping_consistency(
     result.stats.duplicate_mappings = duplicate_mappings;
 
     if duplicate_mappings > 0 {
-        result.warning(format!(
+        result.error(format!(
             "Found {duplicate_mappings} duplicate pattern IDs in data mapping table"
         ));
     }
@@ -237,6 +331,37 @@ pub fn validate_data_mapping_consistency(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_result_caps_retained_findings() {
+        let mut result = FormatValidationResult::new();
+        for i in 0..MAX_VALIDATION_ERRORS + 10 {
+            result.error(format!("error {i}"));
+        }
+        for i in 0..MAX_VALIDATION_WARNINGS + 10 {
+            result.warning(format!("warning {i}"));
+        }
+
+        assert_eq!(result.errors.len(), MAX_VALIDATION_ERRORS);
+        assert_eq!(result.warnings.len(), MAX_VALIDATION_WARNINGS);
+        assert_eq!(
+            result
+                .errors
+                .iter()
+                .filter(|message| message.as_str() == ERRORS_SUPPRESSED)
+                .count(),
+            1
+        );
+        assert_eq!(
+            result
+                .warnings
+                .iter()
+                .filter(|message| message.as_str() == WARNINGS_SUPPRESSED)
+                .count(),
+            1
+        );
+        assert!(!result.is_valid());
+    }
 
     fn create_test_header(pattern_count: u32, mapping_count: u32) -> ParaglobHeader {
         let mut header = ParaglobHeader::new();
@@ -257,6 +382,12 @@ mod tests {
         buf
     }
 
+    fn mark_empty_strings(buffer: &mut [u8], relative_offsets: &[usize]) {
+        for &offset in relative_offsets {
+            buffer[5000 + offset] = 0x40;
+        }
+    }
+
     #[test]
     fn test_validate_no_mappings() {
         let header = create_test_header(10, 0);
@@ -274,9 +405,9 @@ mod tests {
 
         // Write three valid mappings at offset 1000
         let mappings = vec![
-            encode_mapping(0, 5100, 50),
-            encode_mapping(1, 5200, 50),
-            encode_mapping(2, 5300, 50),
+            encode_mapping(0, 100, 50),
+            encode_mapping(1, 200, 50),
+            encode_mapping(2, 300, 50),
         ];
 
         let mut offset = 1000;
@@ -284,6 +415,7 @@ mod tests {
             buffer[offset..offset + mapping_bytes.len()].copy_from_slice(&mapping_bytes);
             offset += mapping_bytes.len();
         }
+        mark_empty_strings(&mut buffer, &[100, 200, 300]);
 
         let result = validate_data_mapping_consistency(&buffer, &header);
         assert!(result.is_valid());
@@ -299,9 +431,9 @@ mod tests {
 
         // Write mappings with duplicate pattern IDs
         let mappings = vec![
-            encode_mapping(0, 5100, 50),
-            encode_mapping(1, 5200, 50),
-            encode_mapping(0, 5300, 50), // Duplicate!
+            encode_mapping(0, 100, 50),
+            encode_mapping(0, 200, 50), // Duplicate!
+            encode_mapping(1, 300, 50),
         ];
 
         let mut offset = 1000;
@@ -309,10 +441,11 @@ mod tests {
             buffer[offset..offset + mapping_bytes.len()].copy_from_slice(&mapping_bytes);
             offset += mapping_bytes.len();
         }
+        mark_empty_strings(&mut buffer, &[100, 200, 300]);
 
         let result = validate_data_mapping_consistency(&buffer, &header);
-        assert!(result.is_valid()); // Duplicates are warnings, not errors
-        assert_eq!(result.warnings.len(), 1);
+        assert!(!result.is_valid());
+        assert_eq!(result.errors.len(), 1);
         assert_eq!(result.stats.duplicate_mappings, 1);
         assert_eq!(result.stats.patterns_with_data, 2); // Only 2 unique patterns
     }
@@ -324,8 +457,8 @@ mod tests {
 
         // Write mappings, one with invalid pattern ID
         let mappings = vec![
-            encode_mapping(5, 5100, 50),
-            encode_mapping(99, 5200, 50), // Invalid! >= pattern_count
+            encode_mapping(5, 100, 50),
+            encode_mapping(99, 200, 50), // Invalid! >= pattern_count
         ];
 
         let mut offset = 1000;
@@ -333,6 +466,7 @@ mod tests {
             buffer[offset..offset + mapping_bytes.len()].copy_from_slice(&mapping_bytes);
             offset += mapping_bytes.len();
         }
+        mark_empty_strings(&mut buffer, &[100, 200]);
 
         let result = validate_data_mapping_consistency(&buffer, &header);
         assert!(!result.is_valid());
@@ -347,8 +481,8 @@ mod tests {
 
         // Write mappings with out-of-bounds data
         let mappings = vec![
-            encode_mapping(0, 5100, 50),  // Valid
-            encode_mapping(1, 5900, 200), // Exceeds data section (5000 + 1000 = 6000)
+            encode_mapping(0, 100, 50),  // Valid relative range
+            encode_mapping(1, 900, 200), // Exceeds 1000-byte data section
         ];
 
         let mut offset = 1000;
@@ -356,6 +490,7 @@ mod tests {
             buffer[offset..offset + mapping_bytes.len()].copy_from_slice(&mapping_bytes);
             offset += mapping_bytes.len();
         }
+        mark_empty_strings(&mut buffer, &[100]);
 
         let result = validate_data_mapping_consistency(&buffer, &header);
         assert!(!result.is_valid());
@@ -370,6 +505,53 @@ mod tests {
 
         let result = validate_data_mapping_consistency(&buffer, &header);
         assert!(!result.is_valid());
-        assert!(result.errors.iter().any(|e| e.contains("truncated")));
+        assert!(result.errors.iter().any(|e| e.contains("exceeds buffer")));
+    }
+
+    #[test]
+    fn test_validate_zero_pattern_count_without_underflow() {
+        let header = create_test_header(0, 1);
+        let mut buffer = vec![0u8; 6000];
+        let mapping = encode_mapping(0, 0, 1);
+        buffer[1000..1000 + mapping.len()].copy_from_slice(&mapping);
+
+        let result = validate_data_mapping_consistency(&buffer, &header);
+        assert!(!result.is_valid());
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("pattern_count is zero")));
+    }
+
+    #[test]
+    fn test_validate_rejects_unsorted_mapping_table() {
+        let header = create_test_header(10, 2);
+        let mut buffer = vec![0u8; 6000];
+        let mappings = [encode_mapping(2, 100, 1), encode_mapping(1, 200, 1)];
+        let mut offset = 1000;
+        for mapping in mappings {
+            buffer[offset..offset + mapping.len()].copy_from_slice(&mapping);
+            offset += mapping.len();
+        }
+        mark_empty_strings(&mut buffer, &[100, 200]);
+
+        let result = validate_data_mapping_consistency(&buffer, &header);
+        assert!(!result.is_valid());
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("not sorted")));
+    }
+
+    #[test]
+    fn test_validate_accepts_legacy_implicit_sized_mapping() {
+        let header = create_test_header(1, 1);
+        let mut buffer = vec![0u8; 6000];
+        let mapping = encode_mapping(0, 100, 0);
+        buffer[1000..1000 + mapping.len()].copy_from_slice(&mapping);
+        mark_empty_strings(&mut buffer, &[100]);
+
+        let result = validate_data_mapping_consistency(&buffer, &header);
+        assert!(result.is_valid(), "{:?}", result.errors);
     }
 }

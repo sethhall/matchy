@@ -136,7 +136,7 @@ matchy_t *db = matchy_open("threats.mxy");
 matchy_result_t result = matchy_query(db, "192.0.2.1");
 ```
 
-The database is memory-mapped for instant loading. Check `result.found` to see if
+The database is memory-mapped to avoid whole-file deserialization. Check `result.found` to see if
 a match was found.
 
 > **Note**: For FFI systems that have issues with return-by-value structs (like some

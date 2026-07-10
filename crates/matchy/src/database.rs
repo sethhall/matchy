@@ -10,9 +10,9 @@
 
 use crate::mmdb::{MmdbError, MmdbHeader, SearchTree};
 use lru::LruCache;
-use matchy_data_format::DataValue;
+use matchy_data_format::{DataDecoder, DataValue, DecodeBudget};
 use matchy_literal_hash::LiteralHash;
-use matchy_paraglob::Paraglob;
+use matchy_paraglob::{error::ParaglobError, offset_format::ParaglobHeader, Paraglob};
 use std::cell::RefCell;
 use std::hash::BuildHasherDefault;
 use std::net::IpAddr;
@@ -20,6 +20,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use zerocopy::FromBytes;
 
 #[cfg(not(target_family = "wasm"))]
 use std::time::Duration;
@@ -37,16 +38,433 @@ pub use crate::updater::{
     FallbackCallback, FallbackEvent, ReloadCallback, ReloadEvent, ReloadSource,
 };
 
-// Per-database query cache type
-// Each database has its own cache, stored as thread-local for lock-free access
-type QueryCacheInner = LruCache<String, QueryResult, BuildHasherDefault<rustc_hash::FxHasher>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheQueryKind {
+    Ip,
+    String,
+}
 
-// Thread-local cache storage keyed by database generation ID.
-// This allows multiple databases to coexist in the same thread without
-// cache collisions, while still providing lock-free per-thread access.
+#[derive(Debug, Clone)]
+enum CachedQueryValue {
+    Owned(QueryResult),
+    Reference(LookupRef),
+}
+
+#[derive(Debug, Clone)]
+struct CachedQueryResult {
+    kind: CacheQueryKind,
+    value: CachedQueryValue,
+}
+
+type QueryCacheEntries =
+    LruCache<String, CachedQueryResult, BuildHasherDefault<rustc_hash::FxHasher>>;
+
+/// Maximum estimated result heap retained by all database caches in one thread.
+const QUERY_CACHE_HEAP_BUDGET: usize = 64 * 1024 * 1024;
+const MAX_QUERY_CACHE_NAMESPACES: usize = 16;
+const QUERY_CACHE_COMPACTION_MIN_HIGH_WATER: usize = 64;
+const MAX_STRING_QUERY_MATCHES: usize = 65_536;
+const MAX_STRING_QUERY_MATCHING_WORK: usize = 1_000_000;
+
+/// A result cache bounded by both entry count and estimated retained heap.
+struct QueryCacheInner {
+    entries: QueryCacheEntries,
+    entry_limit: usize,
+    entry_high_water_len: usize,
+    retained_heap_bytes: usize,
+    heap_budget: usize,
+    #[cfg(test)]
+    compaction_count: usize,
+}
+
+impl QueryCacheInner {
+    fn empty_entries() -> QueryCacheEntries {
+        LruCache::unbounded_with_hasher(BuildHasherDefault::<rustc_hash::FxHasher>::default())
+    }
+
+    fn new(capacity: NonZeroUsize, heap_budget: usize) -> Self {
+        Self {
+            // The bounded constructor preallocates for the full capacity. Use
+            // incremental storage and enforce the configured entry limit below
+            // so an enormous user-supplied limit cannot allocate up front.
+            entries: Self::empty_entries(),
+            entry_limit: capacity.get(),
+            entry_high_water_len: 0,
+            retained_heap_bytes: 0,
+            heap_budget,
+            #[cfg(test)]
+            compaction_count: 0,
+        }
+    }
+
+    fn get(&mut self, key: &str, kind: CacheQueryKind) -> Option<&QueryResult> {
+        let cached = self.entries.get(key)?;
+        if cached.kind != kind {
+            return None;
+        }
+        match &cached.value {
+            CachedQueryValue::Owned(result) => Some(result),
+            CachedQueryValue::Reference(_) => None,
+        }
+    }
+
+    fn get_ref(
+        &mut self,
+        key: &str,
+        kind: CacheQueryKind,
+        format: DatabaseFormat,
+    ) -> Option<LookupRef> {
+        let cached = self.entries.get(key)?;
+        if cached.kind != kind {
+            return None;
+        }
+        Some(match &cached.value {
+            CachedQueryValue::Owned(result) => lookup_ref_from_query_result(result, format),
+            CachedQueryValue::Reference(lookup) => *lookup,
+        })
+    }
+
+    fn can_cache(&self, key: &str, value: &QueryResult) -> bool {
+        estimated_cache_entry_heap(key.len(), value) <= self.heap_budget
+    }
+
+    fn put_borrowed(&mut self, key: &str, kind: CacheQueryKind, value: &QueryResult) {
+        if let Some((old_key, old_value)) = self.entries.pop_entry(key) {
+            self.retained_heap_bytes =
+                self.retained_heap_bytes
+                    .saturating_sub(estimated_cached_entry_heap(
+                        old_key.capacity(),
+                        &old_value.value,
+                    ));
+        }
+
+        // Check the borrowed inputs before allocating either an owned key or a
+        // cloned result. Oversized entries are never materialized for caching.
+        if !self.can_cache(key, value) {
+            self.maybe_compact_entries();
+            return;
+        }
+
+        let key = key.to_string();
+        let new_weight = estimated_cache_entry_heap(key.capacity(), value);
+        if new_weight > self.heap_budget {
+            self.maybe_compact_entries();
+            return;
+        }
+
+        // Evict before cloning so the cache never transiently grows beyond its
+        // configured entry or heap bounds. A one-for-one full-cache eviction
+        // leaves the live set unchanged, so its bucket capacity remains useful.
+        while self.entries.len() >= self.entry_limit
+            || self.retained_heap_bytes.saturating_add(new_weight) > self.heap_budget
+        {
+            if !self.pop_lru_accounted() {
+                self.retained_heap_bytes = 0;
+                break;
+            }
+        }
+
+        let value = CachedQueryResult {
+            kind,
+            value: CachedQueryValue::Owned(value.clone()),
+        };
+        self.retained_heap_bytes = self.retained_heap_bytes.saturating_add(new_weight);
+        if let Some((old_key, old_value)) = self.entries.push(key, value) {
+            self.retained_heap_bytes =
+                self.retained_heap_bytes
+                    .saturating_sub(estimated_cached_entry_heap(
+                        old_key.capacity(),
+                        &old_value.value,
+                    ));
+        }
+
+        self.entry_high_water_len = self.entry_high_water_len.max(self.entries.len());
+        self.maybe_compact_entries();
+    }
+
+    fn put_ref(&mut self, key: &str, kind: CacheQueryKind, lookup: LookupRef) {
+        if let Some((old_key, old_value)) = self.entries.pop_entry(key) {
+            self.retained_heap_bytes =
+                self.retained_heap_bytes
+                    .saturating_sub(estimated_cached_entry_heap(
+                        old_key.capacity(),
+                        &old_value.value,
+                    ));
+        }
+
+        let borrowed_weight = estimated_reference_cache_entry_heap(key.len());
+        if borrowed_weight > self.heap_budget {
+            self.maybe_compact_entries();
+            return;
+        }
+
+        let key = key.to_string();
+        let new_weight = estimated_reference_cache_entry_heap(key.capacity());
+        if new_weight > self.heap_budget {
+            self.maybe_compact_entries();
+            return;
+        }
+
+        while self.entries.len() >= self.entry_limit
+            || self.retained_heap_bytes.saturating_add(new_weight) > self.heap_budget
+        {
+            if !self.pop_lru_accounted() {
+                self.retained_heap_bytes = 0;
+                break;
+            }
+        }
+
+        let value = CachedQueryResult {
+            kind,
+            value: CachedQueryValue::Reference(lookup),
+        };
+        self.retained_heap_bytes = self.retained_heap_bytes.saturating_add(new_weight);
+        if let Some((old_key, old_value)) = self.entries.push(key, value) {
+            self.retained_heap_bytes =
+                self.retained_heap_bytes
+                    .saturating_sub(estimated_cached_entry_heap(
+                        old_key.capacity(),
+                        &old_value.value,
+                    ));
+        }
+
+        self.entry_high_water_len = self.entry_high_water_len.max(self.entries.len());
+        self.maybe_compact_entries();
+    }
+
+    fn pop_lru_accounted(&mut self) -> bool {
+        let Some((key, value)) = self.entries.pop_lru() else {
+            return false;
+        };
+        self.retained_heap_bytes = self
+            .retained_heap_bytes
+            .saturating_sub(estimated_cached_entry_heap(key.capacity(), &value.value));
+        true
+    }
+
+    fn compact_entries(&mut self) {
+        let mut compacted = Self::empty_entries();
+        while let Some((key, value)) = self.entries.pop_lru() {
+            let _ = compacted.push(key, value);
+        }
+        self.entries = compacted;
+        self.entry_high_water_len = self.entries.len();
+        #[cfg(test)]
+        {
+            self.compaction_count = self.compaction_count.saturating_add(1);
+        }
+    }
+
+    fn maybe_compact_entries(&mut self) {
+        let live_len = self.entries.len();
+        let shrank_materially = self.entry_high_water_len >= QUERY_CACHE_COMPACTION_MIN_HIGH_WATER
+            && live_len <= self.entry_high_water_len / 2;
+        if (live_len == 0 && self.entry_high_water_len != 0) || shrank_materially {
+            self.compact_entries();
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+fn estimated_cache_entry_heap(key_capacity: usize, value: &QueryResult) -> usize {
+    estimated_cache_entry_heap_with_value(key_capacity, estimated_query_result_heap(value))
+}
+
+fn estimated_reference_cache_entry_heap(key_capacity: usize) -> usize {
+    estimated_cache_entry_heap_with_value(key_capacity, 0)
+}
+
+fn estimated_cached_entry_heap(key_capacity: usize, value: &CachedQueryValue) -> usize {
+    let value_heap = match value {
+        CachedQueryValue::Owned(result) => estimated_query_result_heap(result),
+        CachedQueryValue::Reference(_) => 0,
+    };
+    estimated_cache_entry_heap_with_value(key_capacity, value_heap)
+}
+
+fn estimated_cache_entry_heap_with_value(key_capacity: usize, value_heap: usize) -> usize {
+    std::mem::size_of::<String>()
+        .saturating_add(std::mem::size_of::<CachedQueryResult>())
+        .saturating_add(4 * std::mem::size_of::<usize>())
+        .saturating_add(key_capacity)
+        .saturating_add(value_heap)
+}
+
+fn estimated_query_result_heap(value: &QueryResult) -> usize {
+    match value {
+        QueryResult::Ip { data, .. } => estimated_data_value_heap(data),
+        QueryResult::Pattern {
+            pattern_ids,
+            data,
+            data_offsets,
+        } => pattern_ids
+            .capacity()
+            .saturating_mul(std::mem::size_of::<u32>())
+            .saturating_add(
+                data.capacity()
+                    .saturating_mul(std::mem::size_of::<Option<DataValue>>()),
+            )
+            .saturating_add(
+                data_offsets
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u32>()),
+            )
+            .saturating_add(data.iter().flatten().fold(0usize, |total, value| {
+                total.saturating_add(estimated_data_value_heap(value))
+            })),
+        QueryResult::NotFound => 0,
+    }
+}
+
+fn estimated_data_value_heap(value: &DataValue) -> usize {
+    match value {
+        DataValue::String(value) => value.capacity(),
+        DataValue::Bytes(value) => value.capacity(),
+        DataValue::Map(values) => values
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(String, DataValue)>().saturating_add(1))
+            .saturating_mul(2)
+            .saturating_add(values.iter().fold(0usize, |total, (key, value)| {
+                total
+                    .saturating_add(key.capacity())
+                    .saturating_add(estimated_data_value_heap(value))
+            })),
+        DataValue::Array(values) => values
+            .capacity()
+            .saturating_mul(std::mem::size_of::<DataValue>())
+            .saturating_add(values.iter().fold(0usize, |total, value| {
+                total.saturating_add(estimated_data_value_heap(value))
+            })),
+        DataValue::Pointer(_)
+        | DataValue::Double(_)
+        | DataValue::Uint16(_)
+        | DataValue::Uint32(_)
+        | DataValue::Int32(_)
+        | DataValue::Uint64(_)
+        | DataValue::Uint128(_)
+        | DataValue::Bool(_)
+        | DataValue::Float(_)
+        | DataValue::Timestamp(_) => 0,
+    }
+}
+
+fn is_decoder_resource_error(error: &str) -> bool {
+    matches!(
+        error,
+        "Decoded value exceeds work limit"
+            | "Decoded value exceeds allocation limit"
+            | "String allocation failed"
+            | "Bytes allocation failed"
+            | "Map allocation failed"
+            | "Array allocation failed"
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CacheNamespace {
+    generation: u64,
+    instance: u64,
+}
+
+impl CacheNamespace {
+    const fn new(generation: u64, instance: u64) -> Self {
+        Self {
+            generation,
+            instance,
+        }
+    }
+}
+
+type QueryCacheNamespaces =
+    LruCache<CacheNamespace, QueryCacheInner, BuildHasherDefault<rustc_hash::FxHasher>>;
+
+/// Per-thread manager that bounds both stale generations and aggregate heap.
+struct QueryCacheManager {
+    namespaces: QueryCacheNamespaces,
+    heap_budget: usize,
+}
+
+impl QueryCacheManager {
+    fn new(max_generations: NonZeroUsize, heap_budget: usize) -> Self {
+        Self {
+            namespaces: LruCache::with_hasher(
+                max_generations,
+                BuildHasherDefault::<rustc_hash::FxHasher>::default(),
+            ),
+            heap_budget,
+        }
+    }
+
+    fn with_namespace<F, R>(
+        &mut self,
+        namespace: CacheNamespace,
+        entry_capacity: NonZeroUsize,
+        operation: F,
+    ) -> R
+    where
+        F: FnOnce(&mut QueryCacheInner) -> R,
+    {
+        let result = {
+            let heap_budget = self.heap_budget;
+            let cache = self.namespaces.get_or_insert_mut(namespace, || {
+                QueryCacheInner::new(entry_capacity, heap_budget)
+            });
+            operation(cache)
+        };
+        self.enforce_heap_budget();
+        result
+    }
+
+    fn remove_namespace(&mut self, namespace: CacheNamespace) {
+        self.namespaces.pop(&namespace);
+    }
+
+    fn remove_generation(&mut self, generation: u64) {
+        while let Some(namespace) = self
+            .namespaces
+            .iter()
+            .find_map(|(namespace, _)| (namespace.generation == generation).then_some(*namespace))
+        {
+            self.namespaces.pop(&namespace);
+        }
+    }
+
+    fn namespace_size(&mut self, namespace: CacheNamespace) -> usize {
+        let size = self
+            .namespaces
+            .get(&namespace)
+            .map_or(0, QueryCacheInner::len);
+        self.enforce_heap_budget();
+        size
+    }
+
+    fn retained_heap_bytes(&self) -> usize {
+        self.namespaces.iter().fold(0usize, |total, (_, cache)| {
+            total.saturating_add(cache.retained_heap_bytes)
+        })
+    }
+
+    fn enforce_heap_budget(&mut self) {
+        while self.retained_heap_bytes() > self.heap_budget {
+            if self.namespaces.pop_lru().is_none() {
+                break;
+            }
+        }
+    }
+}
+
+// Thread-local cache storage bounded across database namespaces. This keeps
+// lock-free locality without allowing reloads or dropped databases to retain
+// an unbounded number of independent caches.
 thread_local! {
-    static QUERY_CACHES: RefCell<rustc_hash::FxHashMap<u64, QueryCacheInner>> =
-        RefCell::new(rustc_hash::FxHashMap::default());
+    static QUERY_CACHES: RefCell<QueryCacheManager> = RefCell::new(QueryCacheManager::new(
+        NonZeroUsize::new(MAX_QUERY_CACHE_NAMESPACES)
+            .expect("query cache namespace limit is non-zero"),
+        QUERY_CACHE_HEAP_BUDGET,
+    ));
 }
 
 /// Global counter for generating unique cache generation IDs.
@@ -57,6 +475,19 @@ static NEXT_CACHE_GENERATION: AtomicU64 = AtomicU64::new(1);
 /// Generate a unique cache generation ID for a new database instance
 pub(crate) fn next_cache_generation() -> u64 {
     NEXT_CACHE_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Monotonic private database-instance IDs make a caller-supplied generation
+/// safe to reuse across independently opened databases. Refuse to wrap instead
+/// of ever reusing an instance ID while an older database could still be live.
+static NEXT_CACHE_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
+fn next_cache_instance() -> u64 {
+    NEXT_CACHE_INSTANCE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .expect("database cache instance ID space exhausted")
 }
 
 /// Statistics for database queries and cache performance
@@ -161,13 +592,17 @@ pub enum QueryResult {
     NotFound,
 }
 
-/// Zero-allocation lookup result for C API.
-/// Stores offsets into mmap'd data instead of owned values.
+/// Offset-only lookup result for the C API.
+///
+/// The result itself owns no decoded data. A cold string lookup may still grow
+/// bounded thread-local matcher scratch; steady-state lookups reuse it.
 #[derive(Debug, Clone, Copy)]
 pub struct LookupRef {
     /// Whether a match was found
     pub found: bool,
-    /// Offset to data in the MMDB data section (0 if not found or no data)
+    /// Data token for [`Database::decode_at_offset`]. This is an MMDB data-section
+    /// offset for IP/combined databases and a pattern ID for pattern-only files.
+    /// It is 0 when not found or when a combined match has no mapped data.
     pub data_offset: u32,
     /// Network prefix length (for IP results, 0 for patterns)
     pub prefix_len: u8,
@@ -214,16 +649,22 @@ impl LookupRef {
 }
 
 #[inline]
-fn lookup_ref_from_query_result(result: &QueryResult) -> LookupRef {
+fn lookup_ref_from_query_result(result: &QueryResult, format: DatabaseFormat) -> LookupRef {
     match result {
         QueryResult::Ip {
             prefix_len,
             data_offset,
             ..
         } => LookupRef::ip(*data_offset, *prefix_len),
-        QueryResult::Pattern { data_offsets, .. } => {
-            LookupRef::pattern(data_offsets.first().copied().unwrap_or(0))
-        }
+        QueryResult::Pattern {
+            pattern_ids,
+            data_offsets,
+            ..
+        } => LookupRef::pattern(if matches!(format, DatabaseFormat::PatternOnly) {
+            pattern_ids.first().copied().unwrap_or(0)
+        } else {
+            data_offsets.first().copied().unwrap_or(0)
+        }),
         QueryResult::NotFound => LookupRef::not_found(),
     }
 }
@@ -239,6 +680,75 @@ enum DatabaseFormat {
     Combined,
 }
 
+const PATTERN_SECTION_MARKER: &[u8; 16] = b"MMDB_PATTERN\x00\x00\x00\x00";
+const LITERAL_SECTION_MARKER: &[u8; 16] = b"MMDB_LITERAL\x00\x00\x00\x00";
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EmbeddedSections {
+    pattern_data_offset: Option<usize>,
+    literal_marker_offset: Option<usize>,
+    metadata_offset: usize,
+}
+
+impl EmbeddedSections {
+    const fn pattern_only(file_len: usize) -> Self {
+        Self {
+            pattern_data_offset: None,
+            literal_marker_offset: None,
+            metadata_offset: file_len,
+        }
+    }
+
+    pub(crate) fn data_section_end(self) -> Option<usize> {
+        let pattern_marker_offset = self
+            .pattern_data_offset
+            .and_then(|offset| offset.checked_sub(PATTERN_SECTION_MARKER.len()));
+        [
+            Some(self.metadata_offset),
+            pattern_marker_offset,
+            self.literal_marker_offset,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    pub(crate) const fn pattern_data_offset(self) -> Option<usize> {
+        self.pattern_data_offset
+    }
+
+    pub(crate) fn literal_data_offset(self) -> Option<usize> {
+        self.literal_marker_offset
+            .and_then(|offset| offset.checked_add(LITERAL_SECTION_MARKER.len()))
+    }
+
+    fn validate_after_mmdb_separator(self, data_section_start: usize) -> Result<(), String> {
+        let pattern_marker_offset = match self.pattern_data_offset {
+            Some(offset) => Some(
+                offset
+                    .checked_sub(PATTERN_SECTION_MARKER.len())
+                    .ok_or_else(|| "Pattern data offset precedes its section marker".to_string())?,
+            ),
+            None => None,
+        };
+
+        for (section_name, marker_offset) in [
+            ("Pattern", pattern_marker_offset),
+            ("Literal", self.literal_marker_offset),
+        ] {
+            if let Some(marker_offset) = marker_offset {
+                if marker_offset < data_section_start {
+                    return Err(format!(
+                        "{section_name} section marker at {marker_offset} overlaps the MMDB tree or 16-byte separator ending at {data_section_start}"
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Unified database for IP and pattern lookups
 ///
 /// This is the primary public API for querying threat intelligence,
@@ -248,17 +758,17 @@ enum DatabaseFormat {
 /// # Examples
 ///
 /// ```no_run
-/// use matchy::Database;
+/// use matchy::{Database, QueryResult};
 ///
 /// let db = Database::from("threats.db").open()?;
 ///
 /// // IP lookup
-/// if let Some(result) = db.lookup("1.2.3.4")? {
+/// if let Some(result @ QueryResult::Ip { .. }) = db.lookup("1.2.3.4")? {
 ///     println!("Found threat data: {:?}", result);
 /// }
 ///
 /// // Pattern lookup
-/// if let Some(result) = db.lookup("evil.com")? {
+/// if let Some(result @ QueryResult::Pattern { .. }) = db.lookup("evil.com")? {
 ///     println!("Domain matches patterns: {:?}", result);
 /// }
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -293,26 +803,23 @@ struct PatternDataMappings {
 impl PatternDataMappings {
     /// Get data offset for a specific pattern_id by parsing only that entry
     fn get_offset(&self, pattern_id: u32, data: &[u8]) -> Option<u32> {
-        if pattern_id as usize >= self.pattern_count {
+        let pattern_index = usize::try_from(pattern_id).ok()?;
+        if pattern_index >= self.pattern_count {
             return None;
         }
 
-        let offset_pos = self.mappings_offset + (pattern_id as usize * 4);
-        if offset_pos + 4 > data.len() {
-            return None;
-        }
+        let relative_offset = pattern_index.checked_mul(std::mem::size_of::<u32>())?;
+        let offset_pos = self.mappings_offset.checked_add(relative_offset)?;
+        let offset_end = offset_pos.checked_add(std::mem::size_of::<u32>())?;
+        let bytes = data.get(offset_pos..offset_end)?;
 
-        Some(u32::from_le_bytes([
-            data[offset_pos],
-            data[offset_pos + 1],
-            data[offset_pos + 2],
-            data[offset_pos + 3],
-        ]))
+        Some(u32::from_le_bytes(bytes.try_into().ok()?))
     }
 }
 
-/// Default LRU cache size for query results
-/// ~1-5 MB memory usage depending on result sizes
+/// Default LRU entry ceiling for query results.
+///
+/// Retained result heap is also capped by a 64 MiB aggregate budget.
 const DEFAULT_QUERY_CACHE_SIZE: usize = 10_000;
 
 /// Options for opening a database
@@ -321,13 +828,21 @@ pub struct DatabaseOptions {
     /// Path to the database file (optional for from_bytes)
     pub path: PathBuf,
 
-    /// LRU cache capacity (None = use default, Some(0) = disable)
+    /// LRU entry ceiling (`None` = default, `Some(0)` = disabled).
+    ///
+    /// The estimated retained heap has a separate fixed 64 MiB aggregate
+    /// ceiling per calling thread across at most 16 recent database namespaces.
     pub cache_capacity: Option<usize>,
 
     /// Optional in-memory bytes (for from_bytes builder)
     pub bytes: Option<Vec<u8>>,
 
-    /// Optional cache generation (for WatchingDatabase to prevent stale cache hits)
+    /// Optional logical cache generation, primarily for live-update internals.
+    ///
+    /// A private per-database discriminator prevents two databases with the
+    /// same value from sharing results. Leave this as `None` unless coordinated
+    /// generation-wide clearing via [`Database::clear_cache_generation`] is
+    /// required.
     pub cache_generation: Option<u64>,
 }
 
@@ -353,7 +868,11 @@ impl DatabaseOpener {
         }
     }
 
-    /// Set LRU cache capacity. Default: 10,000 entries.
+    /// Set the LRU entry ceiling. Default: 10,000 entries.
+    ///
+    /// Increasing this value does not increase the separate 64 MiB aggregate
+    /// estimated-retained-heap ceiling per calling thread. Each thread retains
+    /// caches for at most 16 recent database namespaces.
     #[must_use]
     pub fn cache_capacity(mut self, capacity: usize) -> Self {
         self.options.cache_capacity = Some(capacity);
@@ -475,6 +994,11 @@ impl DatabaseOpener {
     }
 
     /// Open the database with configured options.
+    ///
+    /// On native platforms the file is memory-mapped. Keep the mapped inode
+    /// immutable for the lifetime of the returned database: do not truncate or
+    /// rewrite it in place. Publish updates by writing a new file and atomically
+    /// replacing the path.
     #[cfg(not(target_family = "wasm"))]
     pub fn open(self) -> Result<Database, DatabaseError> {
         let db = Database::open_with_options(self.options.clone())?;
@@ -522,6 +1046,8 @@ pub struct Database {
     data: DatabaseStorage,
     format: DatabaseFormat,
     ip_header: Option<MmdbHeader>,
+    /// Exclusive end of the MMDB data section, before extensions/metadata.
+    data_section_end: Option<usize>,
     literal_hash: Option<LiteralHash<'static>>,
     pattern_matcher: Option<Paraglob>,
     pattern_data_mappings: Option<PatternDataMappings>,
@@ -529,6 +1055,7 @@ pub struct Database {
     cache_enabled: bool,
     stats: Arc<DatabaseStats>,
     cache_generation: u64,
+    cache_instance: u64,
     #[cfg(not(target_family = "wasm"))]
     live: Option<Box<LiveState>>,
 }
@@ -549,9 +1076,10 @@ unsafe impl Sync for Database {}
 impl Database {
     /// Helper: Access thread-local cache for this database, initializing if needed
     ///
-    /// Each database instance has its own cache (keyed by cache_generation),
+    /// Each database instance has its own cache namespace, combining the public
+    /// generation with a private per-instance discriminator,
     /// stored per-thread for lock-free access. This allows multiple databases
-    /// to coexist in the same thread without cache collisions.
+    /// to coexist safely even when callers assign the same generation.
     #[inline]
     fn with_cache<F, R>(&self, f: F) -> Option<R>
     where
@@ -562,21 +1090,20 @@ impl Database {
         }
 
         QUERY_CACHES.with(|caches| {
-            let mut caches_borrow = caches.borrow_mut();
-
-            // Get or create the cache for this specific database
-            let cache = caches_borrow
-                .entry(self.cache_generation)
-                .or_insert_with(|| {
-                    LruCache::with_hasher(
-                        NonZeroUsize::new(self.cache_capacity)
-                            .expect("cache_capacity > 0 when cache_enabled is true"),
-                        BuildHasherDefault::<rustc_hash::FxHasher>::default(),
-                    )
-                });
-
-            Some(f(cache))
+            Some(
+                caches.borrow_mut().with_namespace(
+                    self.cache_namespace(),
+                    NonZeroUsize::new(self.cache_capacity)
+                        .expect("cache_capacity > 0 when cache_enabled is true"),
+                    f,
+                ),
+            )
         })
+    }
+
+    #[inline]
+    const fn cache_namespace(&self) -> CacheNamespace {
+        CacheNamespace::new(self.cache_generation, self.cache_instance)
     }
 
     /// Create a database opener with fluent builder API
@@ -654,11 +1181,15 @@ impl Database {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn clear_cache(&self) {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(ref live) = self.live {
+            Self::resolve_live_db(live).clear_cache();
+            return;
+        }
+
         if self.cache_enabled {
             QUERY_CACHES.with(|caches| {
-                if let Some(cache) = caches.borrow_mut().get_mut(&self.cache_generation) {
-                    cache.clear();
-                }
+                caches.borrow_mut().remove_namespace(self.cache_namespace());
             });
         }
     }
@@ -666,7 +1197,7 @@ impl Database {
     /// Clear cache entries for a specific generation (used by WatchingDatabase)
     pub fn clear_cache_generation(generation: u64) {
         QUERY_CACHES.with(|caches| {
-            caches.borrow_mut().remove(&generation);
+            caches.borrow_mut().remove_generation(generation);
         });
     }
 
@@ -690,15 +1221,15 @@ impl Database {
     /// ```
     #[must_use]
     pub fn cache_size(&self) -> usize {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(ref live) = self.live {
+            return Self::resolve_live_db(live).cache_size();
+        }
+
         if !self.cache_enabled {
             return 0;
         }
-        QUERY_CACHES.with(|caches| {
-            caches
-                .borrow()
-                .get(&self.cache_generation)
-                .map_or(0, lru::LruCache::len)
-        })
+        QUERY_CACHES.with(|caches| caches.borrow_mut().namespace_size(self.cache_namespace()))
     }
 
     /// Get database statistics snapshot
@@ -834,6 +1365,7 @@ impl Database {
             data: DatabaseStorage::Owned(vec![]),
             format: snapshot.format,
             ip_header: None,
+            data_section_end: None,
             literal_hash: None,
             pattern_matcher: None,
             pattern_data_mappings: None,
@@ -841,6 +1373,7 @@ impl Database {
             cache_enabled: snapshot.cache_enabled,
             stats: snapshot.stats.clone(),
             cache_generation: live_state.generation.load(Ordering::Acquire),
+            cache_instance: snapshot.cache_instance,
             live: Some(Box::new(live_state)),
         }
     }
@@ -912,6 +1445,7 @@ impl Database {
             data: storage,
             format: DatabaseFormat::IpOnly,
             ip_header: None,
+            data_section_end: None,
             literal_hash: None,
             pattern_matcher: None,
             pattern_data_mappings: None,
@@ -919,6 +1453,7 @@ impl Database {
             cache_enabled: true,
             stats: Arc::new(DatabaseStats::default()),
             cache_generation: next_cache_generation(),
+            cache_instance: next_cache_instance(),
             #[cfg(not(target_family = "wasm"))]
             live: None,
         };
@@ -941,13 +1476,21 @@ impl Database {
         // initialization and the invariant is straightforward to maintain.
         let data: &'static [u8] = unsafe { std::mem::transmute(db.data.as_slice()) };
 
-        // Detect format
-        db.format = Self::detect_format(data)?;
+        // Detect the format and locate any embedded pattern sections in one metadata
+        // pass. Keeping the validated locations together prevents later loaders from
+        // trusting the same untrusted offsets differently.
+        let (format, sections) = Self::detect_format_and_sections(data)?;
+        db.format = format;
+        if db.format != DatabaseFormat::PatternOnly {
+            db.data_section_end = sections.data_section_end();
+        }
 
         // Parse based on format
         match db.format {
             DatabaseFormat::IpOnly => {
-                db.ip_header = Some(MmdbHeader::from_file(data).map_err(DatabaseError::Format)?);
+                let header = MmdbHeader::from_file(data).map_err(DatabaseError::Format)?;
+                Self::validate_embedded_sections_for_header(&header, sections)?;
+                db.ip_header = Some(header);
             }
             DatabaseFormat::PatternOnly => {
                 // Pattern-only: load from start of file
@@ -958,16 +1501,24 @@ impl Database {
             }
             DatabaseFormat::Combined => {
                 // Parse IP header first
-                db.ip_header = Some(MmdbHeader::from_file(data).map_err(DatabaseError::Format)?);
+                let header = MmdbHeader::from_file(data).map_err(DatabaseError::Format)?;
+                Self::validate_embedded_sections_for_header(&header, sections)?;
+                db.ip_header = Some(header);
 
                 // Find and load pattern section after MMDB_PATTERN separator
-                if let Some(offset) = Self::find_pattern_section_fast(data) {
-                    let (pg, map) =
-                        Self::load_combined_pattern_section(data, offset).map_err(|e| {
-                            DatabaseError::Unsupported(format!(
-                                "Failed to load pattern section: {e}"
-                            ))
-                        })?;
+                if let Some(offset) = sections.pattern_data_offset {
+                    let section_limit = sections
+                        .literal_marker_offset
+                        .filter(|literal_offset| *literal_offset >= offset)
+                        .unwrap_or(sections.metadata_offset);
+                    let (pg, map) = Self::load_combined_pattern_section(
+                        data,
+                        offset,
+                        section_limit,
+                    )
+                    .map_err(|e| {
+                        DatabaseError::Unsupported(format!("Failed to load pattern section: {e}"))
+                    })?;
                     db.pattern_matcher = Some(pg);
                     db.pattern_data_mappings = Some(map);
                 }
@@ -975,9 +1526,23 @@ impl Database {
         }
 
         // Load literal hash section if present (MMDB_LITERAL marker)
-        if let Some(offset) = Self::find_literal_section_fast(data) {
-            // Skip the 16-byte marker
-            let literal_data = &data[offset + 16..];
+        if let Some(marker_offset) = sections.literal_marker_offset {
+            let literal_start = marker_offset
+                .checked_add(LITERAL_SECTION_MARKER.len())
+                .ok_or_else(|| {
+                    DatabaseError::Unsupported(
+                        "Literal section start offset overflowed usize".to_string(),
+                    )
+                })?;
+            let literal_data = data
+                .get(literal_start..sections.metadata_offset)
+                .ok_or_else(|| {
+                    DatabaseError::Unsupported(format!(
+                        "Literal section range [{literal_start}, {}) is invalid for file length {}",
+                        sections.metadata_offset,
+                        data.len()
+                    ))
+                })?;
             // Read match mode from metadata
             let match_mode = Self::read_match_mode_from_metadata(data);
             db.literal_hash = Some(LiteralHash::from_buffer(literal_data, match_mode).map_err(
@@ -986,6 +1551,20 @@ impl Database {
         }
 
         Ok(db)
+    }
+
+    fn validate_embedded_sections_for_header(
+        header: &MmdbHeader,
+        sections: EmbeddedSections,
+    ) -> Result<(), DatabaseError> {
+        let data_section_start = header.tree_size.checked_add(16).ok_or_else(|| {
+            DatabaseError::Format(MmdbError::InvalidFormat(
+                "Tree size overflows data section offset".to_string(),
+            ))
+        })?;
+        sections
+            .validate_after_mmdb_separator(data_section_start)
+            .map_err(|error| DatabaseError::Format(MmdbError::InvalidFormat(error)))
     }
 
     /// Get the current generation counter. Increments on each reload.
@@ -1005,88 +1584,94 @@ impl Database {
         0
     }
 
+    fn ensure_string_query_within_limit(query: &str) -> Result<(), DatabaseError> {
+        if query.len() > MAX_STRING_QUERY_MATCHING_WORK {
+            return Err(DatabaseError::Config(format!(
+                "String query is {} bytes; the maximum is {MAX_STRING_QUERY_MATCHING_WORK}",
+                query.len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn record_query_stats(
+        &self,
+        kind: CacheQueryKind,
+        result: Option<&QueryResult>,
+        cache_hit: bool,
+    ) {
+        self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
+        if cache_hit {
+            self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+        } else if self.cache_enabled {
+            self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
+        }
+
+        match kind {
+            CacheQueryKind::Ip => {
+                self.stats.ip_queries.fetch_add(1, Ordering::Relaxed);
+            }
+            CacheQueryKind::String => {
+                self.stats.string_queries.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        if matches!(
+            result,
+            Some(QueryResult::Ip { .. } | QueryResult::Pattern { .. })
+        ) {
+            self.stats
+                .queries_with_match
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.stats
+                .queries_without_match
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Look up a query string (IP address or string pattern).
-    /// Returns `Ok(Some(result))` if found, `Ok(None)` if not found.
+    ///
+    /// Returns [`QueryResult::NotFound`] when an applicable lookup table exists
+    /// but has no match. `Ok(None)` means this database has no applicable table
+    /// for the query type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DatabaseError::Format`] for malformed database data and
+    /// [`DatabaseError::Config`] when a string query exceeds a runtime resource
+    /// limit.
     pub fn lookup(&self, query: &str) -> Result<Option<QueryResult>, DatabaseError> {
+        Self::ensure_string_query_within_limit(query)?;
+
         #[cfg(not(target_family = "wasm"))]
         if let Some(ref live) = self.live {
             return self.lookup_live(query, live);
         }
 
-        if let Some(Some(result)) = self.with_cache(|cache| cache.get(query).cloned()) {
-            self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
-            self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-            // Track query type and match status for cache hits too
-            match &result {
-                QueryResult::Ip { .. } => {
-                    self.stats.ip_queries.fetch_add(1, Ordering::Relaxed);
-                    self.stats
-                        .queries_with_match
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                QueryResult::Pattern { .. } => {
-                    self.stats.string_queries.fetch_add(1, Ordering::Relaxed);
-                    self.stats
-                        .queries_with_match
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                QueryResult::NotFound => {
-                    // Determine query type from the query string itself
-                    if query.parse::<IpAddr>().is_ok() {
-                        self.stats.ip_queries.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        self.stats.string_queries.fetch_add(1, Ordering::Relaxed);
-                    }
-                    self.stats
-                        .queries_without_match
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-            }
+        let parsed_address = query.parse::<IpAddr>().ok();
+        let kind = if parsed_address.is_some() {
+            CacheQueryKind::Ip
+        } else {
+            CacheQueryKind::String
+        };
+
+        if let Some(Some(result)) = self.with_cache(|cache| cache.get(query, kind).cloned()) {
+            self.record_query_stats(kind, Some(&result), true);
             return Ok(Some(result));
         }
 
         // Cache miss (or cache disabled) - perform actual lookup
-        let result = if let Ok(addr) = query.parse::<IpAddr>() {
+        let result = if let Some(addr) = parsed_address {
             self.lookup_ip_uncached(addr)?
         } else {
             self.lookup_string_uncached(query)?
         };
-
-        // Update stats
-        self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
-        if self.cache_enabled {
-            self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
-        }
-
-        match &result {
-            Some(QueryResult::Ip { .. }) => {
-                self.stats.ip_queries.fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .queries_with_match
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            Some(QueryResult::Pattern { .. }) => {
-                self.stats.string_queries.fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .queries_with_match
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            Some(QueryResult::NotFound) => {
-                self.stats.string_queries.fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .queries_without_match
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            None => {
-                self.stats
-                    .queries_without_match
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        self.record_query_stats(kind, result.as_ref(), false);
 
         // Store in cache if found
         if let Some(ref res) = result {
-            self.with_cache(|cache| cache.put(query.to_string(), res.clone()));
+            self.with_cache(|cache| cache.put_borrowed(query, kind, res));
         }
 
         Ok(result)
@@ -1122,22 +1707,33 @@ impl Database {
 
     /// Look up an IP address (public API, uses thread-local cache)
     ///
-    /// Returns data associated with the IP address if found.
+    /// Returns [`QueryResult::Ip`] when found, [`QueryResult::NotFound`] when an
+    /// IP index exists but has no match, and `None` when the database has no IP
+    /// index.
     pub fn lookup_ip(&self, addr: IpAddr) -> Result<Option<QueryResult>, DatabaseError> {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(ref live) = self.live {
+            return Self::resolve_live_db(live).lookup_ip(addr);
+        }
+
         // Convert to string for cache key
         let query = addr.to_string();
 
         // Check thread-local cache first
-        if let Some(Some(result)) = self.with_cache(|cache| cache.get(&query).cloned()) {
+        if let Some(Some(result)) =
+            self.with_cache(|cache| cache.get(&query, CacheQueryKind::Ip).cloned())
+        {
+            self.record_query_stats(CacheQueryKind::Ip, Some(&result), true);
             return Ok(Some(result));
         }
 
         // Cache miss - do actual lookup
         let result = self.lookup_ip_uncached(addr)?;
+        self.record_query_stats(CacheQueryKind::Ip, result.as_ref(), false);
 
         // Store in cache if found
         if let Some(ref res) = result {
-            self.with_cache(|cache| cache.put(query, res.clone()));
+            self.with_cache(|cache| cache.put_borrowed(&query, CacheQueryKind::Ip, res));
         }
 
         Ok(result)
@@ -1161,7 +1757,7 @@ impl Database {
     /// # Examples
     ///
     /// ```no_run
-    /// use matchy::{Database, extractor::Extractor};
+    /// use matchy::{Database, QueryResult, extractor::Extractor};
     ///
     /// let db = Database::from("threats.mxy").open()?;
     /// let extractor = Extractor::new()?;
@@ -1169,7 +1765,9 @@ impl Database {
     /// let log_line = b"Connection from 192.168.1.1 to evil.com";
     ///
     /// for item in extractor.extract_from_line(log_line) {
-    ///     if let Some(result) = db.lookup_extracted(&item, log_line)? {
+    ///     if let Some(result @ (QueryResult::Ip { .. } | QueryResult::Pattern { .. })) =
+    ///         db.lookup_extracted(&item, log_line)?
+    ///     {
     ///         println!("Match: {} -> {:?}", item.as_str(log_line), result);
     ///     }
     /// }
@@ -1201,17 +1799,38 @@ impl Database {
         let mut all_pattern_ids = Vec::new();
         let mut all_data_values = Vec::new();
         let mut all_data_offsets = Vec::new();
+        let data_decoder = if self.literal_hash.is_some() || self.pattern_data_mappings.is_some() {
+            let header = self.ip_header.as_ref().ok_or_else(|| {
+                DatabaseError::Format(MmdbError::InvalidFormat(
+                    "String data mappings present but no IP header".to_string(),
+                ))
+            })?;
+            Some(DataDecoder::new(self.bounded_data_section(header)?, 0))
+        } else {
+            None
+        };
+        let mut decode_budget = data_decoder.as_ref().map(DataDecoder::new_budget);
 
         // 1. Try literal hash table first (O(1) lookup)
         if let Some(literal_hash) = &self.literal_hash {
             if let Some(pattern_id) = literal_hash.lookup(pattern) {
                 if let Some(data_offset) = literal_hash.get_data_offset(pattern_id) {
-                    let header = self.ip_header.as_ref().ok_or_else(|| {
+                    if all_pattern_ids.len() >= MAX_STRING_QUERY_MATCHES {
+                        return Err(DatabaseError::Config(format!(
+                            "String query exceeded the maximum of {MAX_STRING_QUERY_MATCHES} matches"
+                        )));
+                    }
+                    let decoder = data_decoder.as_ref().ok_or_else(|| {
                         DatabaseError::Format(MmdbError::InvalidFormat(
-                            "Literal hash present but no IP header".to_string(),
+                            "Literal hash present but no data decoder".to_string(),
                         ))
                     })?;
-                    let data = self.decode_ip_data(header, data_offset)?;
+                    let budget = decode_budget.as_mut().ok_or_else(|| {
+                        DatabaseError::Format(MmdbError::InvalidFormat(
+                            "Literal hash present but no decode budget".to_string(),
+                        ))
+                    })?;
+                    let data = Self::decode_data_with_budget(decoder, budget, data_offset)?;
                     all_pattern_ids.push(pattern_id);
                     all_data_values.push(Some(data));
                     all_data_offsets.push(data_offset);
@@ -1221,32 +1840,80 @@ impl Database {
 
         // 2. Check glob patterns (for wildcard matches)
         if let Some(ref pg) = self.pattern_matcher {
-            let glob_pattern_ids = pg.find_all(pattern);
+            let remaining_matches = MAX_STRING_QUERY_MATCHES
+                .checked_sub(all_pattern_ids.len())
+                .ok_or_else(|| {
+                    DatabaseError::Config(format!(
+                        "String query exceeded the maximum of {MAX_STRING_QUERY_MATCHES} matches"
+                    ))
+                })?;
+            let glob_pattern_ids = pg
+                .try_find_all_bounded(pattern, remaining_matches, MAX_STRING_QUERY_MATCHING_WORK)
+                .map_err(|error| {
+                    Self::map_paraglob_query_error("Pattern matching failed", error)
+                })?;
+            if glob_pattern_ids.len() > remaining_matches {
+                return Err(DatabaseError::Config(format!(
+                    "String query exceeded the maximum of {MAX_STRING_QUERY_MATCHES} matches"
+                )));
+            }
 
-            for &pattern_id in &glob_pattern_ids {
-                let (data, offset) = match (&self.pattern_data_mappings, &self.ip_header) {
-                    (Some(mappings), Some(header)) => {
+            match (&self.pattern_data_mappings, &self.ip_header) {
+                (Some(mappings), Some(_)) => {
+                    for &pattern_id in &glob_pattern_ids {
                         if let Some(data_offset) =
                             mappings.get_offset(pattern_id, self.data.as_slice())
                         {
-                            (Some(self.decode_ip_data(header, data_offset)?), data_offset)
+                            let decoder = data_decoder.as_ref().ok_or_else(|| {
+                                DatabaseError::Format(MmdbError::InvalidFormat(
+                                    "Pattern mappings present but no data decoder".to_string(),
+                                ))
+                            })?;
+                            let budget = decode_budget.as_mut().ok_or_else(|| {
+                                DatabaseError::Format(MmdbError::InvalidFormat(
+                                    "Pattern mappings present but no decode budget".to_string(),
+                                ))
+                            })?;
+                            all_pattern_ids.push(pattern_id);
+                            all_data_values.push(Some(Self::decode_data_with_budget(
+                                decoder,
+                                budget,
+                                data_offset,
+                            )?));
+                            all_data_offsets.push(data_offset);
                         } else {
-                            (None, 0)
+                            all_pattern_ids.push(pattern_id);
+                            all_data_values.push(None);
+                            all_data_offsets.push(0);
                         }
                     }
-                    (Some(_), None) => {
-                        unreachable!(
-                            "pattern_data_mappings present without ip_header - invalid database state"
-                        )
+                }
+                (Some(_), None) => {
+                    unreachable!(
+                        "pattern_data_mappings present without ip_header - invalid database state"
+                    )
+                }
+                (None, _) => {
+                    // Pattern-only databases store data inside the Paraglob
+                    // section, so decode every match under one aggregate budget.
+                    let data =
+                        pg.try_get_pattern_data_many(&glob_pattern_ids)
+                            .map_err(|error| {
+                                Self::map_paraglob_query_error(
+                                    "Failed to decode data for matched patterns",
+                                    error,
+                                )
+                            })?;
+                    if data.len() != glob_pattern_ids.len() {
+                        return Err(DatabaseError::Format(MmdbError::InvalidFormat(
+                            "Pattern data batch length does not match the matched pattern count"
+                                .to_string(),
+                        )));
                     }
-                    (None, _) => {
-                        // Pattern-only database: no MMDB offsets available
-                        (pg.get_pattern_data(pattern_id), 0)
-                    }
-                };
-                all_pattern_ids.push(pattern_id);
-                all_data_values.push(data);
-                all_data_offsets.push(offset);
+                    all_pattern_ids.extend_from_slice(&glob_pattern_ids);
+                    all_data_offsets.resize(all_data_offsets.len() + data.len(), 0);
+                    all_data_values.extend(data);
+                }
             }
         }
 
@@ -1265,45 +1932,117 @@ impl Database {
         }
     }
 
-    /// Look up a string (literal or glob pattern) - public API, uses thread-local cache
+    /// Look up a string (literal or glob pattern) - public API, uses thread-local cache.
     ///
-    /// Returns matching pattern IDs and associated data.
+    /// Returns [`QueryResult::Pattern`] when one or more strings match,
+    /// [`QueryResult::NotFound`] when a string index exists but none match, and
+    /// `None` when the database has no string index. All decoded values in
+    /// one query share an aggregate decoder budget. Queries that exceed 65,536
+    /// matches, one million units in any bounded matching-work dimension (query
+    /// bytes, unique literal hits, or raw candidates plus wildcard checks), the
+    /// derived 64-million-unit shared matching CPU allowance, or the decoder
+    /// work/allocation limits return [`DatabaseError::Config`] instead of
+    /// allocating unbounded intermediate or result storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DatabaseError::Format`] for malformed database data and
+    /// [`DatabaseError::Config`] when a query exceeds a runtime resource limit.
     pub fn lookup_string(&self, pattern: &str) -> Result<Option<QueryResult>, DatabaseError> {
+        Self::ensure_string_query_within_limit(pattern)?;
+
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(ref live) = self.live {
+            return Self::resolve_live_db(live).lookup_string(pattern);
+        }
+
         // Check thread-local cache first
-        if let Some(Some(result)) = self.with_cache(|cache| cache.get(pattern).cloned()) {
+        if let Some(Some(result)) =
+            self.with_cache(|cache| cache.get(pattern, CacheQueryKind::String).cloned())
+        {
+            self.record_query_stats(CacheQueryKind::String, Some(&result), true);
             return Ok(Some(result));
         }
 
         // Cache miss - do actual lookup
         let result = self.lookup_string_uncached(pattern)?;
+        self.record_query_stats(CacheQueryKind::String, result.as_ref(), false);
 
         // Store in cache if found
         if let Some(ref res) = result {
-            self.with_cache(|cache| cache.put(pattern.to_string(), res.clone()));
+            self.with_cache(|cache| cache.put_borrowed(pattern, CacheQueryKind::String, res));
         }
 
         Ok(result)
     }
 
-    /// Decode IP data at a given offset
-    /// Decode IP data at a given offset
-    fn decode_ip_data(&self, header: &MmdbHeader, offset: u32) -> Result<DataValue, DatabaseError> {
-        use matchy_data_format::DataDecoder;
-
-        // Offsets from the tree are relative to the start of the data section (after the 16-byte separator)
-        // So we slice the buffer to start at tree_size + 16
+    fn bounded_data_section(&self, header: &MmdbHeader) -> Result<&[u8], DatabaseError> {
         let data_section_start = header.tree_size.checked_add(16).ok_or_else(|| {
             DatabaseError::Format(MmdbError::InvalidFormat(
                 "Tree size overflows data section offset".to_string(),
             ))
         })?;
-        let data = self.data.as_slice();
-        let data_section = data.get(data_section_start..).ok_or_else(|| {
-            DatabaseError::Format(MmdbError::InvalidFormat(format!(
-                "Data section starts at {data_section_start}, beyond file length {}",
-                data.len()
-            )))
+        let data_section_end = self.data_section_end.ok_or_else(|| {
+            DatabaseError::Format(MmdbError::InvalidFormat(
+                "MMDB data section boundary is unavailable".to_string(),
+            ))
         })?;
+        let data = self.data.as_slice();
+        data.get(data_section_start..data_section_end).ok_or_else(|| {
+            DatabaseError::Format(MmdbError::InvalidFormat(format!(
+                "Data section range [{data_section_start}, {data_section_end}) is invalid for file length {}",
+                data.len(),
+            )))
+        })
+    }
+
+    fn validate_data_offset(&self, header: &MmdbHeader, offset: u32) -> Result<(), DatabaseError> {
+        let data_section = self.bounded_data_section(header)?;
+        let offset = usize::try_from(offset).map_err(|_| {
+            DatabaseError::Format(MmdbError::InvalidFormat(
+                "Data offset is not addressable on this platform".to_string(),
+            ))
+        })?;
+        if offset >= data_section.len() {
+            return Err(DatabaseError::Format(MmdbError::InvalidFormat(format!(
+                "Data offset {offset} exceeds bounded data section ({} bytes)",
+                data_section.len()
+            ))));
+        }
+        Ok(())
+    }
+
+    fn decode_data_with_budget(
+        decoder: &DataDecoder<'_>,
+        budget: &mut DecodeBudget,
+        offset: u32,
+    ) -> Result<DataValue, DatabaseError> {
+        decoder.decode_with_budget(offset, budget).map_err(|error| {
+            if is_decoder_resource_error(error) {
+                DatabaseError::Config(format!(
+                    "String query data at offset {offset} hit a decode resource limit: {error}"
+                ))
+            } else {
+                DatabaseError::Format(MmdbError::DecodeError(error.to_string()))
+            }
+        })
+    }
+
+    fn map_paraglob_query_error(context: &str, error: ParaglobError) -> DatabaseError {
+        match error {
+            ParaglobError::ResourceLimitExceeded(message) => {
+                DatabaseError::Config(format!("{context}: {message}"))
+            }
+            error => DatabaseError::Format(MmdbError::DecodeError(format!("{context}: {error}"))),
+        }
+    }
+
+    /// Decode IP data at a given offset.
+    fn decode_ip_data(&self, header: &MmdbHeader, offset: u32) -> Result<DataValue, DatabaseError> {
+        // Tree, literal, and pattern mappings store offsets relative to this
+        // bounded MMDB data section. Extension sections and metadata are not
+        // valid decoder input.
+        let data_section = self.bounded_data_section(header)?;
 
         // Offsets from tree are relative to data_section, which we've sliced
         // So base_offset is 0 (the decoder will resolve pointers relative to the buffer start)
@@ -1314,10 +2053,17 @@ impl Database {
             .map_err(|e| DatabaseError::Format(MmdbError::DecodeError(e.to_string())))
     }
 
-    /// Zero-allocation lookup that returns offsets instead of decoded data.
+    /// Offset-only lookup that returns references as offsets instead of decoded data.
     ///
-    /// This is designed for the C API where queries that just check `found`
-    /// should not allocate. Data can be decoded on-demand via `decode_at_offset()`.
+    /// This is designed for the C API where the returned result should not own
+    /// decoded values. Cold string queries may allocate bounded thread-local
+    /// matcher scratch; repeated queries reuse that capacity. Data can be
+    /// decoded on demand via `decode_at_offset()`.
+    ///
+    /// For a live-reloading database, the token is not bound to a generation.
+    /// A reload between this call and [`Self::decode_at_offset`] can make the
+    /// token refer to different bytes. Applications that need snapshot-stable
+    /// deferred decoding should use a non-watching `Database` snapshot.
     ///
     /// # Arguments
     /// * `query` - IP address or string to look up
@@ -1325,36 +2071,45 @@ impl Database {
     /// # Returns
     /// `LookupRef` containing:
     /// - `found`: whether a match was found
-    /// - `data_offset`: offset into the MMDB data section (use with `decode_at_offset()`)
+    /// - `data_offset`: format-specific data token (use only with `decode_at_offset()`)
     /// - `prefix_len`: network prefix length (for IP results)
     /// - `result_type`: 0=not found, 1=ip, 2=pattern
     pub fn lookup_ref(&self, query: &str) -> Result<LookupRef, DatabaseError> {
+        Self::ensure_string_query_within_limit(query)?;
+
         // Delegate to live database if auto-reload is enabled
         #[cfg(not(target_family = "wasm"))]
         if let Some(ref live) = self.live {
             return Self::resolve_live_db(live).lookup_ref(query);
         }
 
-        // Check cache without cloning decoded data. Cloning a cached QueryResult
-        // can allocate, but deriving a LookupRef from a borrowed result keeps the
-        // offset-only fast path cheap while preserving cache hit behavior.
-        if let Some(Some(lookup)) =
-            self.with_cache(|cache| cache.get(query).map(lookup_ref_from_query_result))
+        let parsed_address = query.parse::<IpAddr>().ok();
+        let kind = if parsed_address.is_some() {
+            CacheQueryKind::Ip
+        } else {
+            CacheQueryKind::String
+        };
+
+        // An owned full result and a lightweight offset-only result share one
+        // cache slot. The latter avoids decoding and retaining DataValue trees
+        // solely to warm the C-facing lookup path.
+        if let Some(Some(lookup)) = self.with_cache(|cache| cache.get_ref(query, kind, self.format))
         {
-            self.record_lookup_ref_stats(query, lookup, true);
+            self.record_lookup_ref_stats(kind, lookup, true);
             return Ok(lookup);
         }
 
-        let lookup = if let Ok(addr) = query.parse::<IpAddr>() {
+        let lookup = if let Some(addr) = parsed_address {
             self.lookup_ip_ref(addr)
         } else {
-            Ok(self.lookup_string_ref(query))
+            self.lookup_string_ref(query)
         }?;
-        self.record_lookup_ref_stats(query, lookup, false);
+        self.record_lookup_ref_stats(kind, lookup, false);
+        self.with_cache(|cache| cache.put_ref(query, kind, lookup));
         Ok(lookup)
     }
 
-    fn record_lookup_ref_stats(&self, query: &str, lookup: LookupRef, cache_hit: bool) {
+    fn record_lookup_ref_stats(&self, kind: CacheQueryKind, lookup: LookupRef, cache_hit: bool) {
         self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
 
         if cache_hit {
@@ -1363,33 +2118,26 @@ impl Database {
             self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
         }
 
-        match lookup.result_type {
-            1 => {
+        match kind {
+            CacheQueryKind::Ip => {
                 self.stats.ip_queries.fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .queries_with_match
-                    .fetch_add(1, Ordering::Relaxed);
             }
-            2 => {
+            CacheQueryKind::String => {
                 self.stats.string_queries.fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .queries_with_match
-                    .fetch_add(1, Ordering::Relaxed);
             }
-            _ => {
-                if query.parse::<IpAddr>().is_ok() {
-                    self.stats.ip_queries.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    self.stats.string_queries.fetch_add(1, Ordering::Relaxed);
-                }
-                self.stats
-                    .queries_without_match
-                    .fetch_add(1, Ordering::Relaxed);
-            }
+        }
+        if lookup.found {
+            self.stats
+                .queries_with_match
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.stats
+                .queries_without_match
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// Zero-allocation IP lookup that returns offset instead of decoded data.
+    /// Offset-only IP lookup that returns an offset instead of decoded data.
     fn lookup_ip_ref(&self, addr: IpAddr) -> Result<LookupRef, DatabaseError> {
         let header = match &self.ip_header {
             Some(h) => h,
@@ -1400,47 +2148,71 @@ impl Database {
         let tree_result = tree.lookup(addr).map_err(DatabaseError::Format)?;
 
         match tree_result {
-            Some(r) => Ok(LookupRef::ip(r.data_offset, r.prefix_len)),
+            Some(r) => {
+                self.validate_data_offset(header, r.data_offset)?;
+                Ok(LookupRef::ip(r.data_offset, r.prefix_len))
+            }
             None => Ok(LookupRef::not_found()),
         }
     }
 
-    /// Zero-allocation string lookup that returns offset instead of decoded data.
-    fn lookup_string_ref(&self, pattern: &str) -> LookupRef {
+    /// Offset-only string lookup that returns an offset instead of decoded data.
+    fn lookup_string_ref(&self, pattern: &str) -> Result<LookupRef, DatabaseError> {
         // 1. Try literal hash table first (O(1) lookup)
         if let Some(literal_hash) = &self.literal_hash {
             if let Some(pattern_id) = literal_hash.lookup(pattern) {
                 if let Some(data_offset) = literal_hash.get_data_offset(pattern_id) {
-                    return LookupRef::pattern(data_offset);
+                    let header = self.ip_header.as_ref().ok_or_else(|| {
+                        DatabaseError::Format(MmdbError::InvalidFormat(
+                            "Literal hash has no MMDB header".to_string(),
+                        ))
+                    })?;
+                    self.validate_data_offset(header, data_offset)?;
+                    return Ok(LookupRef::pattern(data_offset));
                 }
             }
         }
 
         // 2. Check glob patterns (for wildcard matches)
         if let Some(ref pg) = self.pattern_matcher {
-            if let Some(pattern_id) = pg.find_first(pattern) {
+            let pattern_id = pg
+                .try_find_first_bounded(pattern, MAX_STRING_QUERY_MATCHING_WORK)
+                .map_err(|error| {
+                    Self::map_paraglob_query_error("Pattern matching failed", error)
+                })?;
+            if let Some(pattern_id) = pattern_id {
                 // For combined databases, use mappings to get offset
                 if let Some(mappings) = &self.pattern_data_mappings {
                     if let Some(data_offset) = mappings.get_offset(pattern_id, self.data.as_slice())
                     {
-                        return LookupRef::pattern(data_offset);
+                        let header = self.ip_header.as_ref().ok_or_else(|| {
+                            DatabaseError::Format(MmdbError::InvalidFormat(
+                                "Pattern mappings have no MMDB header".to_string(),
+                            ))
+                        })?;
+                        self.validate_data_offset(header, data_offset)?;
+                        return Ok(LookupRef::pattern(data_offset));
                     }
                 } else {
-                    return LookupRef::pattern(0);
+                    // Pattern-only files keep their data inside the Paraglob
+                    // section. Use the pattern ID as the opaque decode token.
+                    return Ok(LookupRef::pattern(pattern_id));
                 }
             }
         }
 
-        LookupRef::not_found()
+        Ok(LookupRef::not_found())
     }
 
-    /// Decode data at a given offset in the MMDB data section.
+    /// Decode data selected by a [`LookupRef`] data token.
     ///
     /// This is the companion to `lookup_ref()` - use it to decode data on-demand
-    /// after getting an offset from a zero-allocation lookup.
+    /// after getting an offset from an offset-only lookup.
+    /// On a live-reloading database, see [`Self::lookup_ref`] for the generation
+    /// limitation of deferred tokens.
     ///
     /// # Arguments
-    /// * `offset` - Offset into the MMDB data section (from `LookupRef.data_offset`)
+    /// * `offset` - The format-specific token from [`LookupRef::data_offset`]
     ///
     /// # Returns
     /// The decoded `DataValue` or an error if the offset is invalid.
@@ -1464,62 +2236,64 @@ impl Database {
             return Self::resolve_live_db(live).decode_at_offset(offset);
         }
 
-        let header = self.ip_header.as_ref().ok_or_else(|| {
-            DatabaseError::Format(MmdbError::InvalidFormat(
-                "No IP header - cannot decode data".to_string(),
-            ))
-        })?;
-
-        self.decode_ip_data(header, offset)
+        match self.format {
+            DatabaseFormat::PatternOnly => {
+                let matcher = self.pattern_matcher.as_ref().ok_or_else(|| {
+                    DatabaseError::Format(MmdbError::InvalidFormat(
+                        "Pattern-only database has no pattern matcher".to_string(),
+                    ))
+                })?;
+                matcher
+                    .try_get_pattern_data(offset)
+                    .map_err(|error| {
+                        Self::map_paraglob_query_error("Pattern data decoding failed", error)
+                    })?
+                    .ok_or_else(|| {
+                        DatabaseError::Unsupported(format!(
+                            "Pattern {offset} has no associated data"
+                        ))
+                    })
+            }
+            DatabaseFormat::IpOnly | DatabaseFormat::Combined => {
+                let header = self.ip_header.as_ref().ok_or_else(|| {
+                    DatabaseError::Format(MmdbError::InvalidFormat(
+                        "MMDB-backed database has no IP header".to_string(),
+                    ))
+                })?;
+                self.decode_ip_data(header, offset)
+            }
+        }
     }
 
-    /// Detect database format (optimized to avoid full file scan)
-    fn detect_format(data: &[u8]) -> Result<DatabaseFormat, DatabaseError> {
+    /// Detect database format and validate embedded-section locations.
+    fn detect_format_and_sections(
+        data: &[u8],
+    ) -> Result<(DatabaseFormat, EmbeddedSections), DatabaseError> {
         // Check for paraglob magic at start (pattern-only format)
         let has_paraglob_start = data.len() >= 8 && &data[0..8] == b"PARAGLOB";
         if has_paraglob_start {
-            return Ok(DatabaseFormat::PatternOnly);
+            return Ok((
+                DatabaseFormat::PatternOnly,
+                EmbeddedSections::pattern_only(data.len()),
+            ));
         }
 
-        // Check for MMDB metadata marker (searches last 128KB only)
-        let has_mmdb = crate::mmdb::find_metadata_marker(data).is_ok();
-        if !has_mmdb {
-            return Err(DatabaseError::Format(MmdbError::InvalidFormat(
+        let metadata_offset = crate::mmdb::find_metadata_marker(data).map_err(|_| {
+            DatabaseError::Format(MmdbError::InvalidFormat(
                 "Unknown database format (no MMDB or PARAGLOB marker)".to_string(),
-            )));
-        }
+            ))
+        })?;
+        let sections = Self::locate_embedded_sections(data, metadata_offset)
+            .map_err(|error| DatabaseError::Format(MmdbError::InvalidFormat(error)))?;
 
-        // Fast path: Check metadata for section offsets (new format)
-        if let Ok(metadata) = crate::mmdb::MmdbMetadata::from_file(data) {
-            if let Ok(DataValue::Map(map)) = metadata.as_value() {
-                // If pattern_section_offset exists in metadata, use it to determine format
-                if let Some(DataValue::Uint32(pattern_offset)) = map.get("pattern_section_offset") {
-                    // New format with metadata offsets
-                    let has_patterns = *pattern_offset != 0;
-                    if let Some(DataValue::Uint32(literal_offset)) =
-                        map.get("literal_section_offset")
-                    {
-                        let has_literals = *literal_offset != 0;
-                        if has_patterns || has_literals {
-                            return Ok(DatabaseFormat::Combined);
-                        } else {
-                            return Ok(DatabaseFormat::IpOnly);
-                        }
-                    }
-                }
-            }
-        }
+        let format =
+            if sections.pattern_data_offset.is_some() || sections.literal_marker_offset.is_some() {
+                DatabaseFormat::Combined
+            } else {
+                DatabaseFormat::IpOnly
+            };
 
-        // Slow path: Old format without metadata offsets - need to scan
-        // Check for MMDB_PATTERN separator (combined format)
-        let pattern_separator = b"MMDB_PATTERN\x00\x00\x00\x00";
-        let has_pattern_section = data.windows(16).any(|window| window == pattern_separator);
-
-        if has_pattern_section {
-            Ok(DatabaseFormat::Combined)
-        } else {
-            Ok(DatabaseFormat::IpOnly)
-        }
+        Ok((format, sections))
     }
 
     /// Get database format
@@ -1697,72 +2471,141 @@ impl Database {
         }
     }
 
-    /// Find the pattern section using fast metadata lookup with fallback to scanning
-    /// Returns the offset to the start of pattern data (after MMDB_PATTERN marker)
-    fn find_pattern_section_fast(data: &[u8]) -> Option<usize> {
-        // Fast path: Try to read offset from metadata
+    /// Locate embedded pattern and literal sections. Metadata offsets are the
+    /// fast path, but each non-zero offset must point immediately after the
+    /// corresponding marker and remain before MMDB metadata. Older databases
+    /// without usable offset fields fall back to one bounded scan.
+    pub(crate) fn locate_embedded_sections(
+        data: &[u8],
+        metadata_offset: usize,
+    ) -> Result<EmbeddedSections, String> {
+        let searchable = data.get(..metadata_offset).ok_or_else(|| {
+            format!(
+                "Metadata offset {metadata_offset} exceeds file length {}",
+                data.len()
+            )
+        })?;
+
+        let mut pattern_data_offset = None;
+        let mut literal_marker_offset = None;
+        let mut scan_for_pattern = true;
+        let mut scan_for_literal = true;
+        let mut invalid_pattern_offset = None;
+        let mut invalid_literal_offset = None;
+
         if let Ok(metadata) = crate::mmdb::MmdbMetadata::from_file(data) {
             if let Ok(DataValue::Map(map)) = metadata.as_value() {
                 if let Some(DataValue::Uint32(offset)) = map.get("pattern_section_offset") {
-                    let offset_val = *offset as usize;
-                    // 0 means no pattern section (fast negative result)
-                    if offset_val == 0 {
-                        return None;
+                    if *offset == 0 {
+                        scan_for_pattern = false;
+                    } else if let Some(marker_offset) = Self::validated_marker_before_offset(
+                        data,
+                        metadata_offset,
+                        *offset,
+                        PATTERN_SECTION_MARKER,
+                    ) {
+                        pattern_data_offset =
+                            marker_offset.checked_add(PATTERN_SECTION_MARKER.len());
+                        scan_for_pattern = false;
+                    } else {
+                        invalid_pattern_offset = Some(*offset);
                     }
-                    return Some(offset_val);
                 }
-            }
-        }
 
-        // Slow path: scan for the separator for backwards compatibility.
-        Self::find_pattern_section_slow(data)
-    }
-
-    /// Find the pattern section by scanning (slow, for backwards compatibility)
-    /// Returns the offset to the start of pattern data (after MMDB_PATTERN marker)
-    fn find_pattern_section_slow(data: &[u8]) -> Option<usize> {
-        let separator = b"MMDB_PATTERN\x00\x00\x00\x00";
-
-        // Search for the separator
-        for i in 0..data.len().saturating_sub(16) {
-            if &data[i..i + 16] == separator {
-                // Pattern section starts after the 16-byte separator
-                return Some(i + 16);
-            }
-        }
-        None
-    }
-
-    /// Find the literal section using fast metadata lookup with fallback to scanning
-    /// Returns the offset to the start of MMDB_LITERAL marker
-    fn find_literal_section_fast(data: &[u8]) -> Option<usize> {
-        // Fast path: Try to read offset from metadata
-        if let Ok(metadata) = crate::mmdb::MmdbMetadata::from_file(data) {
-            if let Ok(DataValue::Map(map)) = metadata.as_value() {
                 if let Some(DataValue::Uint32(offset)) = map.get("literal_section_offset") {
-                    let offset_val = *offset as usize;
-                    // 0 means no literal section (fast negative result)
-                    if offset_val == 0 {
-                        return None;
+                    if *offset == 0 {
+                        scan_for_literal = false;
+                    } else if let Some(marker_offset) = Self::validated_marker_before_offset(
+                        data,
+                        metadata_offset,
+                        *offset,
+                        LITERAL_SECTION_MARKER,
+                    ) {
+                        literal_marker_offset = Some(marker_offset);
+                        scan_for_literal = false;
+                    } else {
+                        invalid_literal_offset = Some(*offset);
                     }
-                    // Metadata stores offset to start of data, but we need offset to marker
-                    // So subtract 16 bytes for the "MMDB_LITERAL" marker
-                    return Some(offset_val - 16);
                 }
             }
         }
 
-        // Slow path: scan for the separator for backwards compatibility.
-        Self::find_literal_section_slow(data)
+        if scan_for_pattern {
+            pattern_data_offset = searchable
+                .windows(PATTERN_SECTION_MARKER.len())
+                .position(|window| window == PATTERN_SECTION_MARKER)
+                .and_then(|marker_offset| marker_offset.checked_add(PATTERN_SECTION_MARKER.len()));
+            if pattern_data_offset.is_none() {
+                if let Some(offset) = invalid_pattern_offset {
+                    return Err(format!(
+                        "pattern_section_offset {offset} is invalid and no legacy marker was found"
+                    ));
+                }
+            }
+        }
+
+        if scan_for_literal {
+            literal_marker_offset = searchable
+                .windows(LITERAL_SECTION_MARKER.len())
+                .position(|window| window == LITERAL_SECTION_MARKER);
+            if literal_marker_offset.is_none() {
+                if let Some(offset) = invalid_literal_offset {
+                    return Err(format!(
+                        "literal_section_offset {offset} is invalid and no legacy marker was found"
+                    ));
+                }
+            }
+        }
+
+        if let (Some(pattern_offset), Some(literal_offset)) =
+            (pattern_data_offset, literal_marker_offset)
+        {
+            if literal_offset < pattern_offset {
+                return Err(format!(
+                    "Literal section at {literal_offset} precedes pattern data at {pattern_offset}"
+                ));
+            }
+        }
+
+        Ok(EmbeddedSections {
+            pattern_data_offset,
+            literal_marker_offset,
+            metadata_offset,
+        })
     }
 
-    /// Find the literal hash section by scanning (slow, for backwards compatibility)
-    /// Returns the offset to the start of MMDB_LITERAL marker
-    fn find_literal_section_slow(data: &[u8]) -> Option<usize> {
-        let separator = b"MMDB_LITERAL\x00\x00\x00\x00";
+    fn validated_marker_before_offset(
+        data: &[u8],
+        metadata_offset: usize,
+        data_offset: u32,
+        marker: &[u8; 16],
+    ) -> Option<usize> {
+        let data_offset = usize::try_from(data_offset).ok()?;
+        if data_offset > metadata_offset {
+            return None;
+        }
+        let marker_offset = data_offset.checked_sub(marker.len())?;
+        let marker_end = marker_offset.checked_add(marker.len())?;
+        if marker_end != data_offset {
+            return None;
+        }
+        (data.get(marker_offset..marker_end)? == marker).then_some(marker_offset)
+    }
 
-        // Search for the separator
-        (0..data.len().saturating_sub(16)).find(|&i| &data[i..i + 16] == separator)
+    fn read_match_mode_from_paraglob_header(
+        data: &[u8],
+    ) -> Result<matchy_match_mode::MatchMode, String> {
+        use matchy_match_mode::MatchMode;
+
+        let (header, _) = ParaglobHeader::read_from_prefix(data)
+            .map_err(|_| "Paraglob header is truncated".to_string())?;
+        match header.match_mode {
+            0 => Ok(MatchMode::CaseSensitive),
+            1 => Ok(MatchMode::CaseInsensitive),
+            value => Err(format!(
+                "Invalid Paraglob match_mode value {value}; expected 0 or 1"
+            )),
+        }
     }
 
     /// Load pattern section from data at given offset (for pattern-only databases)
@@ -1773,11 +2616,9 @@ impl Database {
             return Err("Pattern section offset out of bounds".to_string());
         }
 
-        // Try to read match mode from metadata
-        let match_mode = Self::read_match_mode_from_metadata(data);
-
         // For pattern-only databases, data starts with PARAGLOB magic
         if offset == 0 && data.len() >= 8 && &data[0..8] == b"PARAGLOB" {
+            let match_mode = Self::read_match_mode_from_paraglob_header(data)?;
             // Standard .pgb format - load with zero-copy
             // SAFETY: data is 'static lifetime from mmap, valid for entire Database lifetime
             let result = unsafe { Paraglob::from_mmap(data, match_mode) };
@@ -1794,72 +2635,113 @@ impl Database {
     fn load_combined_pattern_section(
         data: &'static [u8],
         offset: usize,
+        section_limit: usize,
     ) -> Result<(Paraglob, PatternDataMappings), String> {
-        if offset >= data.len() {
-            return Err("Pattern section offset out of bounds".to_string());
+        if section_limit > data.len() || offset > section_limit {
+            return Err(format!(
+                "Pattern section range [{offset}, {section_limit}) is invalid for file length {}",
+                data.len()
+            ));
         }
 
         // Try to read match mode from metadata
         let match_mode = Self::read_match_mode_from_metadata(data);
 
         // Read section header
-        if offset + 8 > data.len() {
-            return Err("Pattern section header truncated".to_string());
-        }
+        let header_end = offset
+            .checked_add(2 * std::mem::size_of::<u32>())
+            .ok_or_else(|| "Pattern section header offset overflow".to_string())?;
+        let header = data
+            .get(offset..header_end)
+            .filter(|_| header_end <= section_limit)
+            .ok_or_else(|| "Pattern section header truncated".to_string())?;
 
         // Read sizes (little-endian u32)
-        let _total_size = u32::from_le_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
-        let paraglob_size = u32::from_le_bytes([
-            data[offset + 4],
-            data[offset + 5],
-            data[offset + 6],
-            data[offset + 7],
-        ]) as usize;
+        let total_size = usize::try_from(u32::from_le_bytes(
+            header[..4]
+                .try_into()
+                .expect("section size slice has exact length"),
+        ))
+        .map_err(|_| "Pattern section size does not fit usize".to_string())?;
+        let paraglob_size = usize::try_from(u32::from_le_bytes(
+            header[4..8]
+                .try_into()
+                .expect("paraglob size slice has exact length"),
+        ))
+        .map_err(|_| "Paraglob size does not fit usize".to_string())?;
+
+        let section_end = offset
+            .checked_add(total_size)
+            .ok_or_else(|| "Pattern section end offset overflow".to_string())?;
+        if section_end > section_limit {
+            return Err(format!(
+                "Pattern section ends at {section_end}, beyond containing section limit {section_limit}"
+            ));
+        }
+        if section_end < header_end {
+            return Err(format!(
+                "Pattern total_size {total_size} is smaller than its header"
+            ));
+        }
 
         // Paraglob data starts at offset + 8
-        let paraglob_start = offset + 8;
-        let paraglob_end = paraglob_start + paraglob_size;
+        let paraglob_start = header_end;
+        let paraglob_end = paraglob_start
+            .checked_add(paraglob_size)
+            .ok_or_else(|| "Paraglob section end offset overflow".to_string())?;
 
-        if paraglob_end > data.len() {
+        if paraglob_end > section_end {
             return Err(format!(
-                "Paraglob section extends beyond file (start={}, size={}, file_len={})",
-                paraglob_start,
-                paraglob_size,
-                data.len()
+                "Paraglob range [{paraglob_start}, {paraglob_end}) exceeds declared pattern section ending at {section_end}"
             ));
         }
 
         // Extract and load paraglob data with zero-copy
-        let paraglob_data = &data[paraglob_start..paraglob_end];
+        let paraglob_data = data
+            .get(paraglob_start..paraglob_end)
+            .ok_or_else(|| "Paraglob range is outside the file".to_string())?;
+        let serialized_match_mode = Self::read_match_mode_from_paraglob_header(paraglob_data)?;
+        if serialized_match_mode != match_mode {
+            return Err(format!(
+                "Paraglob match mode {serialized_match_mode:?} disagrees with MMDB metadata mode {match_mode:?}"
+            ));
+        }
         // SAFETY: data is 'static lifetime from mmap, valid for entire Database lifetime
-        let paraglob = unsafe { Paraglob::from_mmap(paraglob_data, match_mode) };
+        let paraglob = unsafe { Paraglob::from_mmap(paraglob_data, serialized_match_mode) };
         let paraglob = paraglob.map_err(|e| format!("Failed to parse paraglob section: {e}"))?;
 
         // Store mapping metadata WITHOUT parsing all offsets (O(1) instead of O(n))
         let mappings_start = paraglob_end;
-        if mappings_start + 4 > data.len() {
-            return Err("Pattern mappings section truncated".to_string());
+        let offsets_start = mappings_start
+            .checked_add(std::mem::size_of::<u32>())
+            .ok_or_else(|| "Pattern mapping count offset overflow".to_string())?;
+        let count_bytes = data
+            .get(mappings_start..offsets_start)
+            .filter(|_| offsets_start <= section_end)
+            .ok_or_else(|| "Pattern mappings section truncated".to_string())?;
+        let pattern_count = usize::try_from(u32::from_le_bytes(
+            count_bytes
+                .try_into()
+                .expect("pattern count slice has exact length"),
+        ))
+        .map_err(|_| "Pattern mapping count does not fit usize".to_string())?;
+        if pattern_count < paraglob.pattern_count() {
+            return Err(format!(
+                "Pattern mapping count {pattern_count} is smaller than Paraglob pattern count {}",
+                paraglob.pattern_count()
+            ));
         }
 
-        let pattern_count = u32::from_le_bytes([
-            data[mappings_start],
-            data[mappings_start + 1],
-            data[mappings_start + 2],
-            data[mappings_start + 3],
-        ]) as usize;
-
-        let offsets_start = mappings_start + 4;
-
         // Validate the mapping section exists, but don't parse it
-        let total_mapping_bytes = pattern_count * 4;
-        if offsets_start + total_mapping_bytes > data.len() {
+        let total_mapping_bytes = pattern_count
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| "Pattern mapping table size overflow".to_string())?;
+        let mappings_end = offsets_start
+            .checked_add(total_mapping_bytes)
+            .ok_or_else(|| "Pattern mapping table end offset overflow".to_string())?;
+        if mappings_end != section_end {
             return Err(format!(
-                "Pattern mappings section out of bounds (need {total_mapping_bytes} bytes)"
+                "Pattern mappings end at {mappings_end}, but declared pattern section ends at {section_end}"
             ));
         }
 
@@ -1902,7 +2784,7 @@ pub enum DatabaseError {
     Format(MmdbError),
     /// Unsupported operation
     Unsupported(String),
-    /// Configuration error
+    /// Configuration or runtime resource-policy error
     Config(String),
 }
 
@@ -1912,7 +2794,7 @@ impl std::fmt::Display for DatabaseError {
             Self::Io(msg) => write!(f, "I/O error: {msg}"),
             Self::Format(err) => write!(f, "Format error: {err}"),
             Self::Unsupported(msg) => write!(f, "Unsupported: {msg}"),
-            Self::Config(msg) => write!(f, "Configuration error: {msg}"),
+            Self::Config(msg) => write!(f, "Configuration or resource error: {msg}"),
         }
     }
 }
@@ -1930,6 +2812,760 @@ impl DatabaseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use matchy_data_format::DataEncoder;
+    use matchy_format::DatabaseBuilder;
+    use matchy_match_mode::MatchMode;
+    use std::collections::HashMap;
+
+    const METADATA_MARKER: &[u8] = b"\xAB\xCD\xEFMaxMind.com";
+
+    fn build_database(keys: &[&str]) -> Vec<u8> {
+        let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+        for (index, key) in keys.iter().enumerate() {
+            let mut value = HashMap::new();
+            value.insert(
+                "index".to_string(),
+                DataValue::Uint32(u32::try_from(index).unwrap()),
+            );
+            builder.add_entry(key, value).unwrap();
+        }
+        builder.build().unwrap()
+    }
+
+    fn expanding_data_value(fill: char) -> DataValue {
+        let repeated = DataValue::String(fill.to_string().repeat(1024));
+        let row = DataValue::Array(vec![repeated; 24]);
+        DataValue::Array(vec![row; 24])
+    }
+
+    fn expanding_record(fill: char) -> HashMap<String, DataValue> {
+        HashMap::from([("matrix".to_string(), expanding_data_value(fill))])
+    }
+
+    fn rewrite_section_offset(bytes: &[u8], field: &str, value: u32) -> Vec<u8> {
+        let metadata = crate::mmdb::MmdbMetadata::from_file(bytes)
+            .unwrap()
+            .as_value()
+            .unwrap();
+        let DataValue::Map(mut map) = metadata else {
+            panic!("test database metadata must be a map");
+        };
+        map.insert(field.to_string(), DataValue::Uint32(value));
+
+        let metadata_offset = crate::mmdb::find_metadata_marker(bytes).unwrap();
+        let mut rewritten = bytes[..metadata_offset].to_vec();
+        let mut encoder = DataEncoder::new();
+        encoder.encode(&DataValue::Map(map));
+        rewritten.extend_from_slice(METADATA_MARKER);
+        rewritten.extend_from_slice(&encoder.into_bytes());
+        rewritten
+    }
+
+    fn metadata_u32(bytes: &[u8], field: &str) -> u32 {
+        let metadata = crate::mmdb::MmdbMetadata::from_file(bytes)
+            .unwrap()
+            .as_value()
+            .unwrap();
+        let DataValue::Map(map) = metadata else {
+            panic!("test database metadata must be a map");
+        };
+        let Some(DataValue::Uint32(value)) = map.get(field) else {
+            panic!("test database metadata lacks {field}");
+        };
+        *value
+    }
+
+    fn rewrite_offset_to_eof(bytes: &[u8], field: &str) -> Vec<u8> {
+        let mut offset = u32::try_from(bytes.len()).unwrap();
+        for _ in 0..4 {
+            let rewritten = rewrite_section_offset(bytes, field, offset);
+            let next_offset = u32::try_from(rewritten.len()).unwrap();
+            if next_offset == offset {
+                return rewritten;
+            }
+            offset = next_offset;
+        }
+        panic!("metadata length did not stabilize");
+    }
+
+    fn assert_database_rejected(bytes: Vec<u8>, case: &str) {
+        assert!(
+            Database::from_bytes(bytes).is_err(),
+            "{case}: malformed database was accepted"
+        );
+    }
+
+    fn result_index(result: &QueryResult) -> Option<u32> {
+        let data = match result {
+            QueryResult::Ip { data, .. } => data,
+            QueryResult::Pattern { data, .. } => data.first()?.as_ref()?,
+            QueryResult::NotFound => return None,
+        };
+        let DataValue::Map(map) = data else {
+            return None;
+        };
+        let DataValue::Uint32(index) = map.get("index")? else {
+            return None;
+        };
+        Some(*index)
+    }
+
+    #[test]
+    fn typed_lookup_cache_entries_do_not_cross_contaminate() {
+        let db = Database::from_bytes(build_database(&["192.0.2.1", "literal:192.0.2.1"])).unwrap();
+
+        let string_result = db.lookup_string("192.0.2.1").unwrap().unwrap();
+        assert!(matches!(string_result, QueryResult::Pattern { .. }));
+        assert_eq!(result_index(&string_result), Some(1));
+
+        let ip_result = db.lookup("192.0.2.1").unwrap().unwrap();
+        assert!(matches!(ip_result, QueryResult::Ip { .. }));
+        assert_eq!(result_index(&ip_result), Some(0));
+
+        let string_result_again = db.lookup_string("192.0.2.1").unwrap().unwrap();
+        assert!(matches!(string_result_again, QueryResult::Pattern { .. }));
+        assert_eq!(result_index(&string_result_again), Some(1));
+    }
+
+    #[test]
+    fn reused_public_generation_does_not_share_cache_between_databases() {
+        let first = Database::open_with_options(DatabaseOptions {
+            bytes: Some(build_database(&["shared.test"])),
+            cache_generation: Some(7),
+            ..Default::default()
+        })
+        .unwrap();
+        let second = Database::open_with_options(DatabaseOptions {
+            bytes: Some(build_database(&["filler.test", "shared.test"])),
+            cache_generation: Some(7),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let first_result = first.lookup_string("shared.test").unwrap().unwrap();
+        let second_result = second.lookup_string("shared.test").unwrap().unwrap();
+        assert_eq!(result_index(&first_result), Some(0));
+        assert_eq!(result_index(&second_result), Some(1));
+        assert_ne!(first.cache_namespace(), second.cache_namespace());
+    }
+
+    #[test]
+    fn lookup_ref_warms_lightweight_cache_and_interoperates_with_owned_results() {
+        let db = Database::from_bytes(build_database(&["literal.test"])).unwrap();
+
+        let first = db.lookup_ref("literal.test").unwrap();
+        assert!(first.found);
+        assert_eq!(db.cache_size(), 1);
+        let second = db.lookup_ref("literal.test").unwrap();
+        assert_eq!(second.data_offset, first.data_offset);
+
+        let stats = db.stats();
+        assert_eq!(stats.cache_misses, 1);
+        assert_eq!(stats.cache_hits, 1);
+
+        // A full lookup cannot use the offset-only cache entry, so it replaces
+        // that slot with an owned result. A later ref lookup derives its token
+        // from the owned result without decoding again.
+        assert!(matches!(
+            db.lookup_string("literal.test").unwrap(),
+            Some(QueryResult::Pattern { .. })
+        ));
+        assert_eq!(db.cache_size(), 1);
+        let third = db.lookup_ref("literal.test").unwrap();
+        assert_eq!(third.data_offset, first.data_offset);
+
+        let stats = db.stats();
+        assert_eq!(stats.cache_misses, 2);
+        assert_eq!(stats.cache_hits, 2);
+    }
+
+    #[test]
+    fn typed_lookup_methods_record_consistent_stats() {
+        let db = Database::from_bytes(build_database(&["192.0.2.1", "literal.test"])).unwrap();
+
+        for _ in 0..2 {
+            let _ = db.lookup_ip("192.0.2.1".parse().unwrap()).unwrap();
+            let _ = db.lookup_ip("192.0.2.2".parse().unwrap()).unwrap();
+            let _ = db.lookup_string("literal.test").unwrap();
+            let _ = db.lookup_string("absent.test").unwrap();
+        }
+
+        let stats = db.stats();
+        assert_eq!(stats.total_queries, 8);
+        assert_eq!(stats.ip_queries, 4);
+        assert_eq!(stats.string_queries, 4);
+        assert_eq!(stats.queries_with_match, 4);
+        assert_eq!(stats.queries_without_match, 4);
+        assert_eq!(stats.cache_hits, 4);
+        assert_eq!(stats.cache_misses, 4);
+    }
+
+    #[test]
+    fn pattern_only_lookup_ref_token_decodes_inline_data() {
+        let mut first_metadata = HashMap::new();
+        first_metadata.insert("kind".to_string(), DataValue::String("first".to_string()));
+        let mut metadata = HashMap::new();
+        metadata.insert("kind".to_string(), DataValue::String("inline".to_string()));
+        let paraglob = Paraglob::build_from_patterns_with_data(
+            &["first.pattern.test", "*.pattern.test"],
+            Some(&[
+                Some(DataValue::Map(first_metadata)),
+                Some(DataValue::Map(metadata.clone())),
+            ]),
+            MatchMode::CaseSensitive,
+        )
+        .unwrap();
+        let db = Database::from_bytes(paraglob.buffer().to_vec()).unwrap();
+
+        // Populate the full-result cache first. Pattern-only data tokens are
+        // pattern IDs, not the zero placeholders in `data_offsets`.
+        assert!(matches!(
+            db.lookup("value.pattern.test").unwrap(),
+            Some(QueryResult::Pattern { .. })
+        ));
+        let lookup = db.lookup_ref("value.pattern.test").unwrap();
+        assert!(lookup.found);
+        assert_eq!(lookup.result_type, 2);
+        assert_eq!(lookup.data_offset, 1);
+        assert_eq!(
+            db.decode_at_offset(lookup.data_offset).unwrap(),
+            DataValue::Map(metadata)
+        );
+    }
+
+    #[test]
+    fn oversized_literal_only_query_is_rejected_before_hashing() {
+        let db = Database::from_bytes(build_database(&["literal.test"])).unwrap();
+        let query = "x".repeat(MAX_STRING_QUERY_MATCHING_WORK + 1);
+        assert!(matches!(
+            db.lookup_string(&query),
+            Err(DatabaseError::Config(_))
+        ));
+        assert!(matches!(
+            db.lookup_ref(&query),
+            Err(DatabaseError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn query_cache_enforces_heap_budget_and_lru_order() {
+        let result = QueryResult::Ip {
+            data: DataValue::Array(vec![DataValue::String("x".repeat(256))]),
+            prefix_len: 32,
+            data_offset: 0,
+        };
+        let entry_weight = estimated_cache_entry_heap("first1".len(), &result);
+        let mut cache = QueryCacheInner::new(NonZeroUsize::new(10).unwrap(), entry_weight * 2);
+
+        cache.put_borrowed("first1", CacheQueryKind::String, &result);
+        cache.put_borrowed("second", CacheQueryKind::String, &result);
+        assert!(cache.get("first1", CacheQueryKind::String).is_some());
+        cache.put_borrowed("third3", CacheQueryKind::String, &result);
+
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get("first1", CacheQueryKind::String).is_some());
+        assert!(cache.get("second", CacheQueryKind::String).is_none());
+        assert!(cache.get("third3", CacheQueryKind::String).is_some());
+        assert!(cache.retained_heap_bytes <= cache.heap_budget);
+
+        let mut too_small = QueryCacheInner::new(
+            NonZeroUsize::new(10).unwrap(),
+            entry_weight.saturating_sub(1),
+        );
+        too_small.put_borrowed("first1", CacheQueryKind::String, &result);
+        assert_eq!(too_small.len(), 0);
+        assert_eq!(too_small.retained_heap_bytes, 0);
+    }
+
+    #[test]
+    fn query_cache_entry_limit_is_incremental_and_evicts_lru() {
+        let result = QueryResult::NotFound;
+        let mut cache = QueryCacheInner::new(NonZeroUsize::new(2).unwrap(), usize::MAX);
+        cache.put_borrowed("first", CacheQueryKind::String, &result);
+        cache.put_borrowed("second", CacheQueryKind::String, &result);
+        assert!(cache.get("first", CacheQueryKind::String).is_some());
+        cache.put_borrowed("third", CacheQueryKind::String, &result);
+
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get("first", CacheQueryKind::String).is_some());
+        assert!(cache.get("second", CacheQueryKind::String).is_none());
+        assert!(cache.get("third", CacheQueryKind::String).is_some());
+
+        let mut huge_limit =
+            QueryCacheInner::new(NonZeroUsize::new(usize::MAX).unwrap(), usize::MAX);
+        assert_eq!(huge_limit.len(), 0);
+        huge_limit.put_borrowed("one", CacheQueryKind::String, &result);
+        assert_eq!(huge_limit.len(), 1);
+        assert_eq!(huge_limit.entry_limit, usize::MAX);
+    }
+
+    #[test]
+    fn query_cache_compacts_after_live_set_shrinks_and_preserves_lru() {
+        let result = QueryResult::NotFound;
+        let entry_weight = estimated_cache_entry_heap("key000".len(), &result);
+        let mut cache = QueryCacheInner::new(NonZeroUsize::new(512).unwrap(), usize::MAX);
+        for index in 0..256 {
+            cache.put_borrowed(&format!("key{index:03}"), CacheQueryKind::String, &result);
+        }
+        assert!(cache.get("key000", CacheQueryKind::String).is_some());
+
+        cache.heap_budget = entry_weight.saturating_mul(2);
+        let compactions_before = cache.compaction_count;
+        cache.put_borrowed("newkey", CacheQueryKind::String, &result);
+
+        assert_eq!(cache.compaction_count, compactions_before + 1);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.entries.peek("key000").is_some());
+        assert!(cache.entries.peek("newkey").is_some());
+
+        // `key000` was touched before the shrink and remains the older of the
+        // two survivors. A subsequent eviction proves rebuilding kept that LRU
+        // order instead of reversing it.
+        cache.put_borrowed("last00", CacheQueryKind::String, &result);
+        assert!(cache.entries.peek("key000").is_none());
+        assert!(cache.entries.peek("newkey").is_some());
+        assert!(cache.entries.peek("last00").is_some());
+    }
+
+    #[test]
+    fn query_cache_compacts_gradual_shrink_without_thrashing() {
+        let small = QueryResult::NotFound;
+        let entry_weight = estimated_cache_entry_heap("key000".len(), &small);
+        let heap_budget = entry_weight.saturating_mul(512);
+        let oversized = QueryResult::Ip {
+            data: DataValue::String("x".repeat(heap_budget)),
+            prefix_len: 32,
+            data_offset: 0,
+        };
+        let mut cache = QueryCacheInner::new(NonZeroUsize::new(512).unwrap(), heap_budget);
+        for index in 0..256 {
+            cache.put_borrowed(&format!("key{index:03}"), CacheQueryKind::String, &small);
+        }
+
+        let compactions_before = cache.compaction_count;
+        cache.put_borrowed("key000", CacheQueryKind::String, &oversized);
+        assert_eq!(cache.compaction_count, compactions_before);
+        assert_eq!(cache.len(), 255);
+
+        for index in 1..128 {
+            cache.put_borrowed(
+                &format!("key{index:03}"),
+                CacheQueryKind::String,
+                &oversized,
+            );
+        }
+        assert_eq!(cache.compaction_count, compactions_before + 1);
+        assert_eq!(cache.len(), 128);
+        assert_eq!(cache.entry_high_water_len, 128);
+
+        // The remaining keys retain their original order across compaction.
+        cache.entry_limit = 128;
+        cache.put_borrowed("newkey", CacheQueryKind::String, &small);
+        assert!(cache.entries.peek("key128").is_none());
+        assert!(cache.entries.peek("key255").is_some());
+        assert!(cache.entries.peek("newkey").is_some());
+    }
+
+    #[test]
+    fn query_cache_manager_caps_retained_namespaces() {
+        let mut manager = QueryCacheManager::new(NonZeroUsize::new(3).unwrap(), usize::MAX);
+        let entry_capacity = NonZeroUsize::new(1).unwrap();
+        let result = QueryResult::NotFound;
+
+        for generation in 1..=4 {
+            let namespace = CacheNamespace::new(generation, generation + 100);
+            manager.with_namespace(namespace, entry_capacity, |cache| {
+                cache.put_borrowed("query", CacheQueryKind::String, &result);
+            });
+        }
+
+        assert_eq!(manager.namespaces.len(), 3);
+        assert!(manager
+            .namespaces
+            .peek(&CacheNamespace::new(1, 101))
+            .is_none());
+        for generation in 2..=4 {
+            assert!(manager
+                .namespaces
+                .peek(&CacheNamespace::new(generation, generation + 100))
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn query_cache_manager_enforces_aggregate_heap_budget() {
+        let result = QueryResult::Ip {
+            data: DataValue::String("x".repeat(256)),
+            prefix_len: 32,
+            data_offset: 0,
+        };
+        let entry_weight = estimated_cache_entry_heap("query".len(), &result);
+        let mut manager = QueryCacheManager::new(
+            NonZeroUsize::new(4).unwrap(),
+            entry_weight.saturating_mul(2),
+        );
+        let entry_capacity = NonZeroUsize::new(1).unwrap();
+
+        for generation in 1..=2 {
+            manager.with_namespace(
+                CacheNamespace::new(generation, generation),
+                entry_capacity,
+                |cache| {
+                    cache.put_borrowed("query", CacheQueryKind::String, &result);
+                },
+            );
+        }
+        manager.with_namespace(CacheNamespace::new(1, 1), entry_capacity, |cache| {
+            assert!(cache.get("query", CacheQueryKind::String).is_some());
+        });
+        manager.with_namespace(CacheNamespace::new(3, 3), entry_capacity, |cache| {
+            cache.put_borrowed("query", CacheQueryKind::String, &result);
+        });
+
+        assert!(manager.retained_heap_bytes() <= manager.heap_budget);
+        assert!(manager
+            .namespaces
+            .peek(&CacheNamespace::new(1, 1))
+            .is_some());
+        assert!(manager
+            .namespaces
+            .peek(&CacheNamespace::new(2, 2))
+            .is_none());
+        assert!(manager
+            .namespaces
+            .peek(&CacheNamespace::new(3, 3))
+            .is_some());
+    }
+
+    #[test]
+    fn decoder_allocation_failures_are_resource_errors() {
+        for error in [
+            "Decoded value exceeds work limit",
+            "Decoded value exceeds allocation limit",
+            "String allocation failed",
+            "Bytes allocation failed",
+            "Map allocation failed",
+            "Array allocation failed",
+        ] {
+            assert!(is_decoder_resource_error(error), "{error}");
+        }
+        assert!(!is_decoder_resource_error("Invalid UTF-8"));
+    }
+
+    #[test]
+    fn string_query_shares_one_aggregate_decode_budget() {
+        let query = "payload.aggregate.test";
+        let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+        builder.add_entry(query, expanding_record('a')).unwrap();
+        builder
+            .add_entry("*.aggregate.test", expanding_record('b'))
+            .unwrap();
+        let db = Database::from_bytes(builder.build().unwrap()).unwrap();
+
+        let literal_hash = db.literal_hash.as_ref().unwrap();
+        let literal_id = literal_hash.lookup(query).unwrap();
+        let literal_offset = literal_hash.get_data_offset(literal_id).unwrap();
+        let paraglob = db.pattern_matcher.as_ref().unwrap();
+        let glob_id = paraglob.find_first(query).unwrap();
+        let glob_offset = db
+            .pattern_data_mappings
+            .as_ref()
+            .unwrap()
+            .get_offset(glob_id, db.data.as_slice())
+            .unwrap();
+
+        assert!(db.decode_at_offset(literal_offset).is_ok());
+        assert!(db.decode_at_offset(glob_offset).is_ok());
+
+        let error = db
+            .lookup_string_uncached(query)
+            .expect_err("related decodes must not each receive a fresh allocation budget");
+        assert!(matches!(error, DatabaseError::Config(_)));
+        assert!(
+            error.to_string().contains("allocation limit"),
+            "unexpected aggregate decode error: {error}"
+        );
+    }
+
+    #[test]
+    fn pattern_only_query_batch_shares_one_decode_budget() {
+        let pattern_data = [
+            Some(expanding_data_value('a')),
+            Some(expanding_data_value('b')),
+        ];
+        let paraglob = Paraglob::build_from_patterns_with_data(
+            &["*.batch.test", "payload.*"],
+            Some(&pattern_data),
+            MatchMode::CaseSensitive,
+        )
+        .unwrap();
+        assert!(paraglob.try_get_pattern_data(0).is_ok());
+        assert!(paraglob.try_get_pattern_data(1).is_ok());
+
+        let db = Database::from_bytes(paraglob.buffer().to_vec()).unwrap();
+        let error = db
+            .lookup_string_uncached("payload.batch.test")
+            .expect_err("pattern-only matches must share one aggregate decode budget");
+        assert!(matches!(error, DatabaseError::Config(_)));
+        assert!(
+            error.to_string().contains("allocation limit"),
+            "unexpected aggregate decode error: {error}"
+        );
+    }
+
+    #[test]
+    fn builder_generated_combined_sections_remain_compatible() {
+        let bytes = build_database(&["192.0.2.1", "literal.example", "*.malware.test"]);
+        let db = Database::from_bytes(bytes).unwrap();
+
+        assert!(matches!(
+            db.lookup("192.0.2.1").unwrap(),
+            Some(QueryResult::Ip { .. })
+        ));
+        assert!(matches!(
+            db.lookup("literal.example").unwrap(),
+            Some(QueryResult::Pattern { .. })
+        ));
+        assert!(matches!(
+            db.lookup("payload.malware.test").unwrap(),
+            Some(QueryResult::Pattern { .. })
+        ));
+
+        // DatabaseBuilder currently retains one mapping per submitted glob even
+        // when Paraglob deduplicates identical patterns. That is valid existing
+        // output, so extra fully-bounded mappings remain compatible.
+        let duplicate_globs = build_database(&["*.duplicate.test", "*.duplicate.test"]);
+        let duplicate_db = Database::from_bytes(duplicate_globs).unwrap();
+        assert!(matches!(
+            duplicate_db.lookup("payload.duplicate.test").unwrap(),
+            Some(QueryResult::Pattern { .. })
+        ));
+
+        let duplicate_literals = build_database(&["literal.duplicate", "literal.duplicate"]);
+        let duplicate_db = Database::from_bytes(duplicate_literals).unwrap();
+        assert!(matches!(
+            duplicate_db.lookup("literal.duplicate").unwrap(),
+            Some(QueryResult::Pattern { .. })
+        ));
+    }
+
+    #[test]
+    fn stale_fast_offsets_fall_back_to_legacy_markers() {
+        let valid = build_database(&["literal.example", "*.malware.test"]);
+        let pattern_offset = metadata_u32(&valid, "pattern_section_offset");
+        let literal_offset = metadata_u32(&valid, "literal_section_offset");
+
+        for (stale_pattern, stale_literal) in [
+            (1, 15),
+            (pattern_offset + 1, literal_offset + 1),
+            (u32::MAX, u32::MAX),
+        ] {
+            let bytes = rewrite_section_offset(&valid, "pattern_section_offset", stale_pattern);
+            let bytes = rewrite_section_offset(&bytes, "literal_section_offset", stale_literal);
+            let db = Database::from_bytes(bytes).unwrap();
+
+            assert!(matches!(
+                db.lookup("literal.example").unwrap(),
+                Some(QueryResult::Pattern { .. })
+            ));
+            assert!(matches!(
+                db.lookup("payload.malware.test").unwrap(),
+                Some(QueryResult::Pattern { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn invalid_fast_offsets_without_legacy_markers_are_rejected() {
+        let ip_only = build_database(&["192.0.2.1"]);
+
+        for field in ["pattern_section_offset", "literal_section_offset"] {
+            for offset in [1, 15, 16, u32::MAX] {
+                assert_database_rejected(
+                    rewrite_section_offset(&ip_only, field, offset),
+                    &format!("{field}={offset}"),
+                );
+            }
+
+            assert_database_rejected(
+                rewrite_offset_to_eof(&ip_only, field),
+                &format!("{field}=EOF"),
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_section_markers_cannot_overlap_mmdb_tree() {
+        let original = build_database(&["192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"]);
+        let header = MmdbHeader::from_file(&original).unwrap();
+
+        for (field, marker) in [
+            ("pattern_section_offset", PATTERN_SECTION_MARKER),
+            ("literal_section_offset", LITERAL_SECTION_MARKER),
+        ] {
+            let marker_offset = header
+                .tree_size
+                .checked_sub(marker.len())
+                .expect("test database tree must fit an extension marker");
+            let mut bytes = original.clone();
+            bytes[marker_offset..marker_offset + marker.len()].copy_from_slice(marker);
+            let section_data_offset = u32::try_from(marker_offset + marker.len()).unwrap();
+            let bytes = rewrite_section_offset(&bytes, field, section_data_offset);
+
+            let error = Database::from_bytes(bytes)
+                .err()
+                .expect("extension marker overlapping the MMDB tree must be rejected");
+            assert!(
+                error.to_string().contains("overlaps the MMDB tree"),
+                "unexpected error for {field}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn marked_sections_without_payloads_are_rejected_at_metadata_boundary() {
+        let ip_only = build_database(&["192.0.2.1"]);
+        let metadata_offset = crate::mmdb::find_metadata_marker(&ip_only).unwrap();
+
+        for (field, marker) in [
+            ("pattern_section_offset", PATTERN_SECTION_MARKER.as_slice()),
+            ("literal_section_offset", LITERAL_SECTION_MARKER.as_slice()),
+        ] {
+            let mut with_empty_section = ip_only[..metadata_offset].to_vec();
+            with_empty_section.extend_from_slice(marker);
+            with_empty_section.extend_from_slice(&ip_only[metadata_offset..]);
+            let section_data_offset = u32::try_from(metadata_offset + marker.len()).unwrap();
+            let with_empty_section =
+                rewrite_section_offset(&with_empty_section, field, section_data_offset);
+            assert_database_rejected(with_empty_section, field);
+        }
+    }
+
+    #[test]
+    fn malformed_combined_pattern_envelopes_are_rejected() {
+        let valid = build_database(&["*.malware.test"]);
+        let pattern_start =
+            usize::try_from(metadata_u32(&valid, "pattern_section_offset")).unwrap();
+        let total_size =
+            u32::from_le_bytes(valid[pattern_start..pattern_start + 4].try_into().unwrap());
+        let paraglob_size = usize::try_from(u32::from_le_bytes(
+            valid[pattern_start + 4..pattern_start + 8]
+                .try_into()
+                .unwrap(),
+        ))
+        .unwrap();
+        let pattern_count_offset = pattern_start + 8 + paraglob_size;
+
+        let mut zero_total_size = valid.clone();
+        zero_total_size[pattern_start..pattern_start + 4].copy_from_slice(&0u32.to_le_bytes());
+        assert_database_rejected(zero_total_size, "zero pattern total_size");
+
+        let mut oversized_total = valid.clone();
+        oversized_total[pattern_start..pattern_start + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_database_rejected(oversized_total, "oversized pattern total_size");
+
+        let mut short_total = valid.clone();
+        short_total[pattern_start..pattern_start + 4]
+            .copy_from_slice(&(total_size - 1).to_le_bytes());
+        assert_database_rejected(short_total, "truncated declared mapping range");
+
+        let mut oversized_paraglob = valid.clone();
+        oversized_paraglob[pattern_start + 4..pattern_start + 8]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_database_rejected(oversized_paraglob, "oversized paraglob range");
+
+        let mut inconsistent_match_mode = valid.clone();
+        let match_mode_offset =
+            pattern_start + 8 + std::mem::offset_of!(ParaglobHeader, match_mode);
+        inconsistent_match_mode[match_mode_offset..match_mode_offset + 4]
+            .copy_from_slice(&1u32.to_le_bytes());
+        assert_database_rejected(
+            inconsistent_match_mode,
+            "Paraglob match mode inconsistent with metadata",
+        );
+
+        let mut mismatched_count = valid.clone();
+        mismatched_count[pattern_count_offset..pattern_count_offset + 4]
+            .copy_from_slice(&2u32.to_le_bytes());
+        assert_database_rejected(mismatched_count, "mismatched pattern mapping count");
+
+        let mut missing_mapping = valid.clone();
+        missing_mapping[pattern_start..pattern_start + 4]
+            .copy_from_slice(&(total_size - 4).to_le_bytes());
+        missing_mapping[pattern_count_offset..pattern_count_offset + 4]
+            .copy_from_slice(&0u32.to_le_bytes());
+        assert_database_rejected(missing_mapping, "missing pattern mapping");
+
+        let mut physically_truncated = valid;
+        let metadata_offset = crate::mmdb::find_metadata_marker(&physically_truncated).unwrap();
+        physically_truncated.remove(metadata_offset - 1);
+        assert_database_rejected(
+            physically_truncated,
+            "physically truncated pattern mappings",
+        );
+    }
+
+    #[test]
+    fn pattern_mapping_offsets_fail_closed_on_arithmetic_and_bounds_errors() {
+        let mappings = PatternDataMappings {
+            mappings_offset: usize::MAX,
+            pattern_count: usize::MAX,
+        };
+        assert_eq!(mappings.get_offset(0, &[0; 4]), None);
+        assert_eq!(mappings.get_offset(u32::MAX, &[0; 4]), None);
+
+        let mappings = PatternDataMappings {
+            mappings_offset: 1,
+            pattern_count: 1,
+        };
+        assert_eq!(mappings.get_offset(0, &[0; 4]), None);
+        assert_eq!(mappings.get_offset(1, &[0; 4]), None);
+    }
+
+    #[test]
+    fn decoder_cannot_cross_into_extensions_or_metadata() {
+        for keys in [
+            vec!["192.0.2.1"],
+            vec!["192.0.2.1", "literal.example", "*.malware.test"],
+        ] {
+            let bytes = build_database(&keys);
+            let header = MmdbHeader::from_file(&bytes).unwrap();
+            let (_, sections) = Database::detect_format_and_sections(&bytes).unwrap();
+            let data_start = header.tree_size + 16;
+            let data_end = sections.data_section_end().unwrap();
+            let first_invalid_offset = u32::try_from(data_end - data_start).unwrap();
+            let db = Database::from_bytes(bytes).unwrap();
+
+            assert!(
+                db.decode_at_offset(first_invalid_offset).is_err(),
+                "decoder accepted the first byte after the bounded data section"
+            );
+        }
+    }
+
+    #[test]
+    fn lookup_ref_rejects_mapping_offsets_outside_data_section() {
+        let mut bytes = build_database(&["*.malware.test"]);
+        let header = MmdbHeader::from_file(&bytes).unwrap();
+        let pattern_start =
+            usize::try_from(metadata_u32(&bytes, "pattern_section_offset")).unwrap();
+        let paraglob_size = usize::try_from(u32::from_le_bytes(
+            bytes[pattern_start + 4..pattern_start + 8]
+                .try_into()
+                .unwrap(),
+        ))
+        .unwrap();
+        let first_mapping = pattern_start + 8 + paraglob_size + 4;
+        let invalid_offset = u32::try_from(pattern_start - PATTERN_SECTION_MARKER.len())
+            .unwrap()
+            .checked_sub(u32::try_from(header.tree_size + 16).unwrap())
+            .unwrap();
+        bytes[first_mapping..first_mapping + 4].copy_from_slice(&invalid_offset.to_le_bytes());
+
+        let db = Database::from_bytes(bytes).unwrap();
+        assert!(db.lookup_ref("payload.malware.test").is_err());
+        assert!(db.lookup("payload.malware.test").is_err());
+    }
 
     #[test]
     fn test_detect_ip_database() {
@@ -2141,6 +3777,73 @@ mod tests {
     }
 
     #[test]
+    fn pattern_only_reload_uses_serialized_case_insensitive_mode() {
+        let paraglob =
+            Paraglob::build_from_patterns(&["*.MiXeD.Example"], MatchMode::CaseInsensitive)
+                .unwrap();
+        let db = Database::from_bytes(paraglob.buffer().to_vec()).unwrap();
+
+        assert_eq!(db.mode(), MatchMode::CaseInsensitive);
+        assert!(matches!(
+            db.lookup("PAYLOAD.mixed.EXAMPLE").unwrap(),
+            Some(QueryResult::Pattern { .. })
+        ));
+    }
+
+    #[test]
+    fn pattern_only_reload_rejects_invalid_serialized_match_mode() {
+        let paraglob =
+            Paraglob::build_from_patterns(&["*.example"], MatchMode::CaseSensitive).unwrap();
+        let mut bytes = paraglob.buffer().to_vec();
+        let match_mode_offset = std::mem::offset_of!(ParaglobHeader, match_mode);
+        bytes[match_mode_offset..match_mode_offset + 4].copy_from_slice(&2u32.to_le_bytes());
+
+        let error = Database::from_bytes(bytes)
+            .err()
+            .expect("unknown serialized match modes must be rejected");
+        assert!(
+            error.to_string().contains("expected 0 or 1"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn pattern_only_lookup_propagates_corrupt_matched_data() {
+        let pattern_data = [Some(DataValue::String("ok".to_string()))];
+        let paraglob = Paraglob::build_from_patterns_with_data(
+            &["*.corrupt.test"],
+            Some(&pattern_data),
+            MatchMode::CaseSensitive,
+        )
+        .unwrap();
+        let mut bytes = paraglob.buffer().to_vec();
+        let data_offset_field = std::mem::offset_of!(
+            matchy_paraglob::offset_format::ParaglobHeader,
+            data_section_offset
+        );
+        let data_start = usize::try_from(u32::from_le_bytes(
+            bytes[data_offset_field..data_offset_field + std::mem::size_of::<u32>()]
+                .try_into()
+                .unwrap(),
+        ))
+        .unwrap();
+
+        // Payload 31 requires three additional size bytes, but this data
+        // section contains only the original two-byte string payload.
+        bytes[data_start] = 0x5f;
+
+        let db = Database::from_bytes(bytes).unwrap();
+        let error = db
+            .lookup("payload.corrupt.test")
+            .expect_err("matched corrupt data must not be reported as absent");
+
+        assert!(matches!(
+            error,
+            DatabaseError::Format(MmdbError::DecodeError(_))
+        ));
+    }
+
+    #[test]
     fn test_lookup_ref_updates_query_stats() {
         let db = Database::from("tests/data/GeoLite2-Country.mmdb")
             .open()
@@ -2168,7 +3871,10 @@ mod tests {
         let mut encoder = DataEncoder::new();
         encoder.encode(&DataValue::Map(metadata));
 
-        let mut bytes = Vec::new();
+        // Supply the complete tree and separator envelope claimed by metadata,
+        // but no data value at offset zero.
+        let mut bytes = vec![0u8; 100 * 6];
+        bytes.extend_from_slice(&[0u8; 16]);
         bytes.extend_from_slice(b"\xAB\xCD\xEFMaxMind.com");
         bytes.extend_from_slice(&encoder.into_bytes());
 

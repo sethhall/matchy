@@ -7,7 +7,7 @@
 //! # Quick Start - Unified Database
 //!
 //! ```rust
-//! use matchy::{Database, DatabaseBuilder, MatchMode, DataValue};
+//! use matchy::{DataValue, Database, DatabaseBuilder, MatchMode, QueryResult};
 //! use std::collections::HashMap;
 //!
 //! // Build a database with both IP and pattern entries
@@ -38,12 +38,12 @@
 //! let db = Database::from("threats.db").open()?;
 //!
 //! // Automatic IP detection
-//! if let Some(result) = db.lookup("1.2.3.4")? {
+//! if let Some(result @ QueryResult::Ip { .. }) = db.lookup("1.2.3.4")? {
 //!     println!("Found: {:?}", result);
 //! }
 //!
 //! // Automatic pattern matching
-//! if let Some(result) = db.lookup("malware.evil.com")? {
+//! if let Some(result @ QueryResult::Pattern { .. }) = db.lookup("malware.evil.com")? {
 //!     println!("Matches pattern: {:?}", result);
 //! }
 //! # */
@@ -54,11 +54,12 @@
 //!
 //! - **Unified Queries**: Automatically detects IP addresses vs patterns
 //! - **Rich Data**: Store JSON-like structured data with each entry
-//! - **Zero-Copy Loading**: Memory-mapped files load instantly (~1ms)
-//! - **MMDB Compatible**: Drop-in replacement for libmaxminddb
+//! - **Memory-Mapped Opening**: Avoids whole-file deserialization
+//! - **MMDB Support**: Reads standard MMDB v2 types within documented resource limits
 //! - **Shared Memory**: Multiple processes share physical RAM
 //! - **C/C++ API**: Stable FFI for any language
-//! - **Fast Lookups**: O(log n) for IPs, O(n) for patterns
+//! - **Specialized Lookups**: Bounded-width IP tries, exact-string hashes, and
+//!   Aho-Corasick candidate discovery with glob verification
 //!
 //! # Architecture
 //!
@@ -74,10 +75,10 @@
 //! │  3. Pattern Matcher (Aho-Corasick)   │
 //! │  4. Metadata                         │
 //! └──────────────────────────────────────┘
-//!          ↓ mmap() syscall (~1ms)
+//!          ↓ mmap() plus bounded structural parsing
 //! ┌──────────────────────────────────────┐
 //! │  Memory (read-only, shared)          │
-//! │  Ready for queries immediately!      │
+//! │  Pages loaded on demand              │
 //! └──────────────────────────────────────┘
 //! ```
 
@@ -123,7 +124,7 @@ pub mod schemas;
 /// SIMD-accelerated utilities for pattern matching
 ///
 /// Provides optimized implementations of common operations using SIMD instructions:
-/// - ASCII lowercase conversion (4-8x faster than iterator chains)
+/// - ASCII lowercase conversion
 /// - Byte searching and comparison
 ///
 /// Re-exported from `matchy_paraglob` for convenience.
@@ -131,8 +132,8 @@ pub use matchy_paraglob::simd_utils;
 /// Database validation for untrusted files
 ///
 /// Provides comprehensive validation of `.mxy` database files including:
-/// - **Standard**: All offsets, UTF-8 validation, basic structure
-/// - **Strict**: Deep graph analysis, cycles, redundancy checks
+/// - **Standard**: Runtime-envelope checks plus sampled reachable MMDB data
+/// - **Strict**: Exhaustive reachable MMDB data plus deep component checks
 pub mod validation;
 
 /// Live database with automatic file watching and optional network updates (native only)
@@ -147,7 +148,8 @@ pub mod c_api;
 
 /// Unified database for IP and pattern lookups
 pub use crate::database::{
-    Database, DatabaseError, DatabaseOpener, DatabaseOptions, DatabaseStats, LookupRef, QueryResult,
+    Database, DatabaseError, DatabaseOpener, DatabaseOptions, DatabaseStats, DatabaseStatsSnapshot,
+    LookupRef, QueryResult,
 };
 
 #[cfg(not(target_family = "wasm"))]

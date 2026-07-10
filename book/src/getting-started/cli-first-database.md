@@ -94,10 +94,6 @@ Match mode: CaseInsensitive
 IP entries: 2
 String entries: 1
 Pattern entries: 1
-
-Performance estimate:
-  IP queries: ~7M/sec
-  Pattern queries: ~2M/sec
 ```
 
 ## Benchmark performance
@@ -106,11 +102,11 @@ Run a synthetic combined benchmark with `matchy bench`:
 
 ```console
 $ matchy bench combined
-
-IP lookups:     7,234,891 queries/sec (138ns avg)
-Pattern lookups: 2,156,892 queries/sec (463ns avg)
-String lookups:  8,932,441 queries/sec (112ns avg)
 ```
+
+The command prints measurements from the current machine and generated
+workload. Record its version, options, cache state, and concurrent system load
+when comparing runs.
 
 ## Input formats
 
@@ -133,8 +129,9 @@ You just:
 4. Inspected the database structure
 5. Benchmarked query performance
 
-The database loads in under 1ms using memory mapping, making it perfect for
-production use in high-throughput applications.
+The database opens through memory mapping without whole-file deserialization.
+Opening and query performance still depend on the deployment, so benchmark the
+representative database and workload before setting production targets.
 
 ## Going further
 

@@ -1,24 +1,28 @@
 # MMDB Compatibility
 
-Matchy can read standard [MaxMind MMDB][mmdb] files and extends the format to support
-string and pattern matching.
+Matchy reads version 2 [MaxMind MMDB][mmdb] files that use the standard data
+types and fit Matchy's documented decoder resource limits. It extends the
+format with string and pattern indexes and an optional nonstandard timestamp
+type.
 
 ## Reading MMDB Files
 
 MaxMind's GeoIP databases use the MMDB format. Matchy can read these files directly:
 
 ```rust
-use matchy::Database;
+use matchy::{Database, QueryResult};
 
 // Open a MaxMind GeoLite2 database
 let db = Database::from("GeoLite2-City.mmdb").open()?;
 
 // Query an IP address
 match db.lookup("8.8.8.8")? {
-    Some(result) => {
+    Some(result @ QueryResult::Ip { .. }) => {
         println!("Location data: {:?}", result);
     }
-    None => println!("IP not found"),
+    Some(QueryResult::NotFound) => println!("IP not found"),
+    Some(QueryResult::Pattern { .. }) => unreachable!("IP text routes to the IP tree"),
+    None => println!("This database has no IP index"),
 }
 ```
 
@@ -61,7 +65,7 @@ Matchy extends MMDB with additional sections:
 ┌─────────────────────────────────────────────────┐
 │  IP Tree                   │  IPv4 and IPv6 (MMDB compatible)
 ├─────────────────────────────────────────────────┤
-│  Data Section              │  Structured data (MMDB compatible)
+│  Data Section              │  MMDB values + optional Matchy type
 ├─────────────────────────────────────────────────┤
 │  Hash Table                │  Exact string matches (Matchy extension)
 ├─────────────────────────────────────────────────┤
@@ -71,19 +75,29 @@ Matchy extends MMDB with additional sections:
 └─────────────────────────────────────────────────┘
 ```
 
-The IP tree and data section remain fully compatible with standard MMDB readers.
+The IP tree and standard data types use the MMDB encoding. Matchy's extension
+sections are unreferenced by standard MMDB tree records and can be ignored by
+standard readers. A value containing Matchy's `Timestamp` type is different:
+it uses nonstandard extended type 128 and cannot be decoded by a standard MMDB
+reader.
 
 ## Compatibility Guarantees
 
 **Reading MMDB files**:
-- ✅ Matchy can read any standard MMDB file
-- ✅ IP lookups work exactly as expected
-- ✅ GeoIP, ASN, and other MaxMind databases supported
+- ✅ Standard MMDB v2 data types are supported
+- ✅ Current GeoIP, ASN, and similar databases are supported when they fit the decoder limits
+- ⚠️ Pointer depth, nesting, decoded work, and owned allocation are bounded to reject resource-exhaustion inputs
 
 **Writing Matchy databases**:
-- ✅ Standard MMDB readers can read the IP portion
+- ✅ Standard MMDB readers can read IP records whose values use only standard MMDB types
 - ⚠️ String and pattern extensions are ignored by standard readers
+- ⚠️ Matchy `Timestamp` values are not understood by standard MMDB readers
 - ✅ Matchy databases work with Matchy tools (CLI and APIs)
+
+When `DataValue` is deserialized from JSON, an RFC 3339 string is converted to
+Matchy's compact `Timestamp` type. If a database must remain readable by
+standard MMDB tools, construct `DataValue::String` explicitly for timestamp
+text instead of relying on generic `DataValue` deserialization.
 
 ## Practical Examples
 
@@ -101,7 +115,7 @@ From Rust:
 ```rust
 let db = Database::from("GeoLite2-City.mmdb").open()?;
 
-if let Some(result) = db.lookup("1.1.1.1")? {
+if let Some(result @ QueryResult::Ip { .. }) = db.lookup("1.1.1.1")? {
     // Access location data
     println!("Result: {:?}", result);
 }
@@ -109,8 +123,8 @@ if let Some(result) = db.lookup("1.1.1.1")? {
 
 ### Extending MMDB Files
 
-You can build a database that combines IP data (MMDB compatible) with patterns
-(Matchy extension):
+You can build a database that combines IP data using standard MMDB value types
+with patterns stored in Matchy extension sections:
 
 ```rust
 use matchy::{DatabaseBuilder, MatchMode, DataValue};
@@ -118,7 +132,7 @@ use std::collections::HashMap;
 
 let mut builder = DatabaseBuilder::new(MatchMode::CaseInsensitive);
 
-// Add IP data (MMDB compatible)
+// Add IP data using a standard MMDB string value
 let mut ip_data = HashMap::new();
 ip_data.insert("country".to_string(), DataValue::String("US".to_string()));
 builder.add_entry("8.8.8.8", ip_data)?;
@@ -132,7 +146,8 @@ let db_bytes = builder.build()?;
 std::fs::write("extended.mxy", &db_bytes)?;
 ```
 
-Standard MMDB readers will see the IP data. Matchy tools will see both IP and pattern data.
+Standard MMDB readers can decode this example's IP data because it uses only a
+standard string value. Matchy tools also see the pattern data.
 
 ## File Format Details
 
@@ -154,25 +169,23 @@ See [Binary Format Specification](../reference/binary-format.md) for complete de
 Matchy supports:
 - MMDB format version 2.x (current standard)
 - IPv4 and IPv6 address families
-- All MMDB data types (strings, integers, floats, maps, arrays)
+- All standard MMDB data types (strings, integers, floats, maps, arrays, bytes, and pointers)
+- Bounded decoding: pointer depth 32, total nesting 64, at most one million decoded values, and at most 64 MiB of estimated owned allocation per decode budget; database pattern queries share one budget across all matched values
+- Matchy extended type 128 (`Timestamp`) for Matchy-only data
 
 When building databases, Matchy uses MMDB format 2.0 for the IP tree and data section.
 
 ## Performance Comparison
 
-MMDB lookups in Matchy have similar performance to MaxMind's official libraries:
+MMDB lookup performance depends on the database, data values, hardware, and
+cache state. Matchy and standard MMDB readers share the same broad design:
 
-```
-MaxMind libmaxminddb:  ~5-10 million IP lookups/second
-Matchy IP lookups:     ~7 million IP lookups/second
-
-Both use:
 - Binary tree traversal (O(log n) worst case, O(32) for IPv4, O(128) for IPv6)
-- Memory mapping for instant loading
-- Zero-copy data access
-```
+- Memory mapping without whole-file deserialization
+- Direct tree access followed by decoding only the selected data value
 
-The extensions (hash table and pattern matching) add minimal overhead to IP lookups.
+Use the built-in benchmark command on the target workload instead of treating
+historical throughput numbers as a current guarantee.
 
 ## Migration from libmaxminddb
 

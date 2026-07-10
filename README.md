@@ -46,12 +46,12 @@ Start at the [Matchy product page](https://matchylabs.github.io/matchy/) or open
 ## Key Features
 
 - **Unified database**: IPs, CIDRs, exact strings, glob patterns in one file
-- **Fast loading**: <1ms regardless of database size (memory-mapped)
-- **Fast queries**: Sub-millisecond lookups on 100K+ indicators
+- **Efficient opening**: Memory-mapped files avoid whole-file deserialization and page data in on demand
+- **Fast queries**: Specialized indexes for IPs, exact strings, and glob candidates; verify latency with your database and workload
 - **Log scanning**: Auto-extracts IPs, domains, emails, hashes from unstructured logs
 - **Glob patterns**: `*.evil.com` matches subdomains automatically
 - **Rich metadata**: Attach threat level, category, source to each indicator
-- **MaxMind compatible**: Query GeoIP databases directly - no need for separate libmaxminddb
+- **MMDB reading**: Query supported MaxMind DB v2 data through Matchy's documented compatibility subset
 - **Build MMDB databases**: Create MaxMind-compatible databases from CSVs (libmaxminddb has no builder)
 - **Multiple formats**: Import from text, CSV, JSON, MISP, or read existing MaxMind MMDB files
 

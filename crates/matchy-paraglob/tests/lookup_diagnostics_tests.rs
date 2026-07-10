@@ -28,8 +28,10 @@ fn diagnostics_count_selected_anchor_and_glob_verification() {
     assert_eq!(matches, vec![0]);
     assert_eq!(diagnostics.query_bytes_scanned, "shared needle".len());
     assert_eq!(diagnostics.ac_literal_hits, 1);
+    assert_eq!(diagnostics.raw_candidate_pattern_ids, 1);
     assert_eq!(diagnostics.candidate_pattern_ids, 1);
     assert_eq!(diagnostics.pure_wildcard_checks, 0);
+    assert_eq!(diagnostics.literal_order_precheck_attempts, 1);
     assert_eq!(diagnostics.glob_verification_attempts, 1);
     assert_eq!(diagnostics.successful_glob_verifications, 1);
     assert!(diagnostics.serialized_glob_segment_steps > 0);
@@ -253,6 +255,24 @@ fn diagnostics_anchor_globs_on_longer_required_literals() {
     assert_eq!(diagnostics.candidate_pattern_ids, 1);
     assert_eq!(diagnostics.glob_verification_attempts, 1);
     assert_eq!(diagnostics.successful_glob_verifications, 1);
+}
+
+#[test]
+fn diagnostics_index_short_literals() {
+    let patterns = vec!["*a*bb"];
+    let pg = Paraglob::build_from_patterns(&patterns, MatchMode::CaseSensitive).unwrap();
+
+    let (matches, diagnostics) = pg.find_all_with_diagnostics("bb!");
+
+    assert!(matches.is_empty());
+    assert_eq!(diagnostics.ac_literal_hits, 1);
+    assert_eq!(
+        diagnostics.raw_candidate_pattern_ids, 1,
+        "a two-byte literal should remain eligible as the glob anchor"
+    );
+    assert_eq!(diagnostics.candidate_pattern_ids, 1);
+    assert_eq!(diagnostics.literal_order_precheck_attempts, 1);
+    assert_eq!(diagnostics.glob_verification_attempts, 0);
 }
 
 #[test]

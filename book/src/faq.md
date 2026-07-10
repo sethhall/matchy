@@ -22,24 +22,26 @@ binary format is versioned. Always test thoroughly in your specific environment.
 
 ### How fast is Matchy?
 
-Typical performance on modern hardware:
-- 7M+ IP address lookups per second
-- 1M+ pattern matches per second (with 50,000 patterns)
-- Sub-microsecond latency for individual queries
-- Sub-millisecond loading time via memory mapping
-
-Actual performance depends on your hardware, database size, and query patterns.
+IP traversal is bounded by the address width, exact strings use average-case
+O(1) hash probing, and glob cost depends on pattern shape and input. Opening
+avoids whole-file deserialization through memory mapping, but still performs
+structural checks. Measure with `matchy bench`; results depend on hardware,
+storage, page-cache state, database size, hit rate, cache settings, and query
+patterns.
 
 ### Does Matchy work with multiple processes?
 
-Yes. Matchy uses memory mapping, so the operating system automatically shares database pages
-across processes. 64 processes querying the same 100MB database will use approximately 100MB
-of RAM total, not 6,400MB.
+Yes. Matchy uses memory mapping, so the operating system can share clean
+read-only database pages across processes. Actual resident memory also includes
+private metadata, page tables, query caches, and the subset of pages each
+process touches; measure RSS/PSS under the intended workload.
 
 ### What's the maximum database size?
 
-Matchy can handle databases larger than available RAM thanks to memory mapping. The practical
-limit depends on your system's virtual address space (effectively unlimited on 64-bit systems).
+Memory mapping allows a database to exceed physical RAM when the working set
+fits the deployment. Serialized extension offsets are `u32`, builders and
+decoders impose additional limits, and virtual address space is not the only
+constraint. Test the intended size and enforce an application file-size limit.
 
 ## Compatibility
 

@@ -10,11 +10,16 @@ for a tutorial.
 ```rust path=null start=null
 use matchy::Database;
 
-// Simple - uses defaults (cache enabled, validation on)
+// Simple - uses defaults (cache enabled, runtime structural checks on open)
 let db = Database::from("database.mxy").open()?;
 ```
 
-The database is memory-mapped and loads in under 1 millisecond regardless of size.
+File-backed databases are memory-mapped, avoiding whole-file deserialization.
+Opening still performs bounded structural parsing; latency depends on storage,
+page-cache state, platform, optional sections, and legacy fallback scanning.
+Keep the mapped inode immutable until the database is dropped. Publish updates
+by writing a complete new file and atomically replacing the path; never truncate
+or rewrite an inode that an open database may still map.
 
 ### Builder API
 
@@ -43,17 +48,21 @@ let db = Database::from("database.mxy")
 
 | Method | Description |
 |--------|-------------|
-| `.cache_capacity(size)` | Set LRU cache size (default: 10,000) |
+| `.cache_capacity(size)` | Set the LRU entry ceiling (default: 10,000) |
 | `.no_cache()` | Disable caching entirely |
 | `.open()` | Load the database |
 
 **Cache Size Guidelines**:
 - `0` (via `.no_cache()`): No caching - best for diverse queries
 - `100-1000`: Good for moderate repetition
-- `10,000` (default): Optimal for typical workloads
-- `100,000+`: For very high repetition (80%+ hit rate)
+- `10,000` (default): Starting point for measurement
+- Larger values: Useful only when the measured hot set and hit rate justify them
 
-**Note**: Caching only benefits pattern lookups with high repetition. IP and literal lookups are already fast and don't benefit from caching.
+Caching applies to IP, literal, glob, and miss results. It is most useful when
+avoided traversal or decoding costs outweigh cache lookup and owned-result
+clone costs. In addition to the entry ceiling, Matchy caps estimated retained
+cache heap at 64 MiB per calling thread across at most 16 recent database
+generations.
 
 ### Error Handling
 
@@ -106,7 +115,7 @@ Efficient lookup for extracted patterns. Automatically uses the optimal lookup p
 **Usage:**
 
 ```rust
-use matchy::{Database, extractor::Extractor};
+use matchy::{Database, QueryResult, extractor::Extractor};
 
 let db = Database::from("threats.mxy").open()?;
 let extractor = Extractor::new()?;
@@ -114,7 +123,9 @@ let extractor = Extractor::new()?;
 let log_line = b"Connection from 192.168.1.1 to evil.com";
 
 for item in extractor.extract_from_line(log_line) {
-    if let Some(result) = db.lookup_extracted(&item, log_line)? {
+    if let Some(QueryResult::Ip { .. } | QueryResult::Pattern { .. }) =
+        db.lookup_extracted(&item, log_line)?
+    {
         println!("Match: {} (type: {})",
             item.as_str(log_line),
             item.item.type_name()
@@ -187,7 +198,16 @@ match db.lookup("mail.google.com")? {
 }
 ```
 
-**Note**: A query can match multiple patterns. All matching patterns are returned.
+**Note**: A query can match multiple patterns. All matching patterns are
+returned when the query remains within runtime resource limits. Database
+lookups reject more than 65,536 matches or one million units in any bounded
+matching-work dimension (query bytes, unique literal hits, or raw mapped
+candidates plus wildcard checks). They also apply one shared 64-million-unit
+CPU-work allowance across matching phases instead of permitting multiplicative
+work amplification.
+Data decoding for all literal and glob
+matches in one query shares the decoder's work and 64 MiB estimated-allocation
+budget.
 Literal string matches are returned through `QueryResult::Pattern`; exact
 strings and glob patterns share the same string lookup result type.
 
@@ -249,13 +269,13 @@ for handle in handles {
 
 ## Performance
 
-Query performance by entry type:
+Query cost differs by entry type: IP traversal is bounded by the address width,
+exact strings use average-case O(1) hash probing, and glob matching depends on
+the input and pattern shape. Throughput and latency are workload- and
+hardware-specific rather than API guarantees.
 
-- **IP addresses**: ~7 million queries/second (138ns avg)
-- **Exact strings**: ~8 million queries/second (112ns avg)
-- **Patterns**: ~1-2 million queries/second (500ns-1μs avg)
-
-See [Performance Considerations](../guide/performance.md) for details.
+See [Performance Considerations](../guide/performance.md) for measurement
+guidance.
 
 ## Database Statistics
 
@@ -283,10 +303,10 @@ println!("IP queries: {}", stats.ip_queries);
 println!("String queries: {}", stats.string_queries);
 ```
 
-### DatabaseStats Structure
+### DatabaseStatsSnapshot Structure
 
 ```rust path=null start=null
-pub struct DatabaseStats {
+pub struct DatabaseStatsSnapshot {
     pub total_queries: u64,
     pub queries_with_match: u64,
     pub queries_without_match: u64,
@@ -296,7 +316,7 @@ pub struct DatabaseStats {
     pub string_queries: u64,
 }
 
-impl DatabaseStats {
+impl DatabaseStatsSnapshot {
     pub fn cache_hit_rate(&self) -> f64
     pub fn match_rate(&self) -> f64
 }
@@ -308,14 +328,17 @@ impl DatabaseStats {
 
 ### Interpreting Statistics
 
-**Cache Performance:**
-- Hit rate < 50%: Consider disabling cache (`.no_cache()`)
-- Hit rate 50-80%: Cache is helping moderately
-- Hit rate > 80%: Cache is very effective
+**Cache Performance:** Compare hit rate together with end-to-end latency and
+retained memory under the production workload. A low hit rate can still help if
+misses are expensive; a high hit rate does not by itself prove that caching is
+worth its memory footprint.
 
 **Query Distribution:**
 - High `ip_queries`: Database is being used for IP lookups
 - High `string_queries`: Database is being used for domain/pattern matching
+
+The counters include `lookup`, typed `lookup_ip` / `lookup_string`, extracted
+lookups, and offset-only `lookup_ref` calls.
 
 ## Cache Management
 

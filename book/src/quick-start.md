@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 6. Open database (memory-mapped)
     let db = Database::from("threats.mxy").open()?;
-    println!("✅ Database loaded in <1ms");
+    println!("✅ Database opened");
 
     // 7. Query IP address
     match db.lookup("1.2.3.4")? {
@@ -166,8 +166,8 @@ LD_LIBRARY_PATH=./target/release ./example
 
 1. **Built a database** - Added IPs, CIDR ranges, and patterns with structured data
 2. **Saved to disk** - Wrote optimized binary format (`.mxy` file)
-3. **Loaded instantly** - Memory-mapped the file (<1ms load time)
-4. **Queried efficiently** - Looked up IPs and patterns in microseconds
+3. **Opened efficiently** - Memory-mapped the file and validated its structural envelopes
+4. **Queried through specialized indexes** - Used the IP trie, exact hash, or pattern candidate engine as appropriate
 
 ## Key Concepts
 
@@ -196,7 +196,7 @@ This ensures readers always see consistent state.
 ### Memory Mapping
 
 Databases use `mmap()` for:
-- **Instant loading** - No deserialization overhead
+- **Demand-paged opening** - Avoids whole-file deserialization while retaining bounded structural checks
 - **Memory efficiency** - OS shares pages across processes
 - **Large databases** - Work with databases larger than RAM
 

@@ -1,7 +1,7 @@
 //! Data section encoding and decoding for Paraglob v2
 //!
-//! Provides full MMDB-compatible data encoding for storing pattern-associated data.
-//! Implements the complete MaxMind DB data type specification.
+//! Provides encoding and bounded decoding for the standard MMDB data types used
+//! by Matchy. It also supports Matchy's nonstandard timestamp extension.
 //!
 //! # Supported Types
 //!
@@ -19,6 +19,21 @@
 //! - **Array**: Ordered lists of values
 //! - **Bool**: Boolean values
 //! - **Float**: 32-bit floating point (IEEE 754)
+//! - **Timestamp**: Signed Unix epoch seconds (Matchy extension, type 128)
+//!
+//! # Compatibility and Limits
+//!
+//! Standard MMDB types use the MaxMind DB encoding. `Timestamp` is a Matchy
+//! extension and is not understood by standard MMDB readers. Deserializing an
+//! RFC 3339 JSON string into [`DataValue`] converts it to `Timestamp`; construct
+//! [`DataValue::String`] explicitly when standard-reader interoperability is
+//! required.
+//!
+//! Decoding is intentionally resource-bounded. Pointer depth is limited to 32,
+//! total nesting to 64, decoded work to at most one million values, and estimated
+//! owned allocation to at most 64 MiB per decode budget. Smaller sections
+//! receive proportional budgets with floors. A caller can share a budget across
+//! related values. These are Matchy safety limits, not MMDB format limits.
 //!
 //! # Format
 //!
@@ -57,8 +72,9 @@ pub use validation::{
 
 /// Data value that can be stored in the data section
 ///
-/// This enum represents all MMDB data types and can be used
-/// for both standalone .pgb files and MMDB-embedded data.
+/// This enum represents all standard MMDB data types plus Matchy's timestamp
+/// extension and can be used for both standalone `.pgb` files and
+/// MMDB-embedded data.
 ///
 /// Note: `Pointer` is excluded from JSON serialization/deserialization as it's
 /// an internal MMDB format detail (data section offset), not a user-facing type.
@@ -93,7 +109,7 @@ pub enum DataValue {
     Float(f32),
     /// Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
     ///
-    /// Stored compactly as a variable-length i64 using Matchy extended type 128.
+    /// Stored as a fixed eight-byte signed integer using Matchy extended type 128.
     /// Serializes to/from ISO 8601 strings (e.g., "2025-10-02T18:44:31Z") in JSON,
     /// making the optimization transparent to API consumers.
     ///
@@ -687,11 +703,101 @@ impl Default for DataEncoder {
 
 /// Data section decoder
 ///
-/// Decodes values from an encoded data section buffer.
-/// Fully compatible with MMDB format.
+/// Decodes standard MMDB values and Matchy's timestamp extension from a data
+/// section buffer.
+///
+/// The decoder enforces the resource limits described in the crate-level
+/// documentation, so format support does not imply unbounded input acceptance.
 pub struct DataDecoder<'a> {
     buffer: &'a [u8],
     base_offset: usize,
+}
+
+// Pointer reuse can legitimately expand a record, but decoded output must stay
+// proportional to the section that backs it and have an absolute ceiling. The
+// floors preserve moderate sharing in small records while the ceilings prevent
+// a corrupt record inside a large section from reserving unbounded resources.
+const MIN_DECODE_WORK: usize = 64 * 1024;
+const MAX_DECODE_WORK: usize = 1_000_000;
+const DECODE_WORK_PER_INPUT_BYTE: usize = 8;
+const MIN_DECODE_ALLOCATION: usize = 1024 * 1024;
+const MAX_DECODE_ALLOCATION: usize = 64 * 1024 * 1024;
+const DECODE_ALLOCATION_PER_INPUT_BYTE: usize = 64;
+const HASH_MAP_ALLOCATION_FACTOR: usize = 2;
+
+/// Opaque resource budget for one or more related data decodes.
+///
+/// Create a budget with [`DataDecoder::new_budget`] and pass it to
+/// [`DataDecoder::decode_with_budget`] for every value that belongs to the same
+/// logical query. Work and estimated owned allocation are charged cumulatively,
+/// including work performed by a decode that ultimately returns an error.
+///
+/// The fields are intentionally private so callers cannot mutate an existing
+/// budget. Callers are responsible for reusing one budget across every decode
+/// that belongs to the same logical operation.
+pub struct DecodeBudget {
+    remaining_work: usize,
+    remaining_allocation: usize,
+    input_len: usize,
+}
+
+impl DecodeBudget {
+    fn new(input_len: usize) -> Self {
+        Self {
+            remaining_work: input_len
+                .saturating_mul(DECODE_WORK_PER_INPUT_BYTE)
+                .clamp(MIN_DECODE_WORK, MAX_DECODE_WORK),
+            remaining_allocation: input_len
+                .saturating_mul(DECODE_ALLOCATION_PER_INPUT_BYTE)
+                .clamp(MIN_DECODE_ALLOCATION, MAX_DECODE_ALLOCATION),
+            input_len,
+        }
+    }
+
+    fn enter_value(&mut self, depth: usize) -> Result<(), &'static str> {
+        if depth > MAX_TOTAL_DEPTH {
+            return Err("Data nesting depth exceeded");
+        }
+        if self.remaining_work == 0 {
+            return Err("Decoded value exceeds work limit");
+        }
+
+        self.remaining_work -= 1;
+        Ok(())
+    }
+
+    fn ensure_work(&self, values: usize) -> Result<(), &'static str> {
+        if values > self.remaining_work {
+            return Err("Decoded value exceeds work limit");
+        }
+        Ok(())
+    }
+
+    fn charge_allocation(&mut self, bytes: usize) -> Result<(), &'static str> {
+        self.remaining_allocation = self
+            .remaining_allocation
+            .checked_sub(bytes)
+            .ok_or("Decoded value exceeds allocation limit")?;
+        Ok(())
+    }
+}
+
+struct ActiveValue<'a> {
+    offset: usize,
+    parent: Option<&'a Self>,
+}
+
+impl ActiveValue<'_> {
+    fn contains(&self, offset: usize) -> bool {
+        let mut current = Some(self);
+        while let Some(value) = current {
+            if value.offset == offset {
+                return true;
+            }
+            current = value.parent;
+        }
+        false
+    }
 }
 
 impl<'a> DataDecoder<'a> {
@@ -708,38 +814,91 @@ impl<'a> DataDecoder<'a> {
         }
     }
 
-    /// Decode a value at the given offset
+    /// Decode a value at the given offset.
+    ///
+    /// Cyclic, excessively nested, or disproportionately expanding values are
+    /// rejected so malformed data cannot exhaust the call stack or heap.
     pub fn decode(&self, offset: u32) -> Result<DataValue, &'static str> {
-        let mut cursor = offset as usize;
-        if cursor < self.base_offset {
-            return Err("Offset before base");
-        }
-        cursor -= self.base_offset;
-        let value = self.decode_at(&mut cursor)?;
-        // Recursively resolve pointers in the returned value
-        self.resolve_pointers(value)
+        let mut budget = self.new_budget();
+        self.decode_with_budget(offset, &mut budget)
     }
 
-    fn decode_at(&self, cursor: &mut usize) -> Result<DataValue, &'static str> {
-        if *cursor >= self.buffer.len() {
+    /// Create a fresh resource budget sized for this decoder's data section.
+    ///
+    /// Reuse the returned budget with [`Self::decode_with_budget`] when several
+    /// decoded values belong to one logical query and should share aggregate
+    /// work and allocation limits.
+    #[must_use]
+    pub fn new_budget(&self) -> DecodeBudget {
+        DecodeBudget::new(self.buffer.len())
+    }
+
+    /// Decode a value while charging a caller-provided aggregate budget.
+    ///
+    /// The budget must have been created by [`Self::new_budget`] for a decoder
+    /// over a data section of the same length. Reusing one budget across calls
+    /// prevents a query from multiplying the per-value work and allocation
+    /// ceilings by requesting many independently valid values.
+    ///
+    /// Budget consumed before an error remains consumed.
+    pub fn decode_with_budget(
+        &self,
+        offset: u32,
+        budget: &mut DecodeBudget,
+    ) -> Result<DataValue, &'static str> {
+        if budget.input_len != self.buffer.len() {
+            return Err("Decode budget does not match data section");
+        }
+        let offset = usize::try_from(offset).map_err(|_| "Offset is not addressable")?;
+        let mut cursor = offset
+            .checked_sub(self.base_offset)
+            .ok_or("Offset before base")?;
+        self.decode_at(&mut cursor, budget, 0, 0, None)
+    }
+
+    fn decode_at<'active>(
+        &self,
+        cursor: &mut usize,
+        context: &mut DecodeBudget,
+        depth: usize,
+        pointer_depth: usize,
+        parent: Option<&'active ActiveValue<'active>>,
+    ) -> Result<DataValue, &'static str> {
+        let value_offset = *cursor;
+        if value_offset >= self.buffer.len() {
             return Err("Cursor out of bounds");
         }
 
-        let ctrl = self.buffer[*cursor];
-        *cursor += 1;
+        context.enter_value(depth)?;
+        let active = ActiveValue {
+            offset: value_offset,
+            parent,
+        };
+        self.decode_at_inner(cursor, context, depth, pointer_depth, &active)
+    }
+
+    fn decode_at_inner(
+        &self,
+        cursor: &mut usize,
+        context: &mut DecodeBudget,
+        depth: usize,
+        pointer_depth: usize,
+        active: &ActiveValue<'_>,
+    ) -> Result<DataValue, &'static str> {
+        let ctrl = self.read_byte(cursor, "Cursor out of bounds")?;
 
         let type_id = ctrl >> 5;
         let payload = ctrl & 0x1F;
 
         match type_id {
-            0 => self.decode_extended(cursor, payload),
-            1 => self.decode_pointer(cursor, payload),
-            2 => self.decode_string(cursor, payload),
-            3 => self.decode_double(cursor),
-            4 => self.decode_bytes(cursor, payload),
+            0 => self.decode_extended(cursor, payload, context, depth, pointer_depth, active),
+            1 => self.decode_pointer(cursor, payload, context, depth, pointer_depth, active),
+            2 => self.decode_string(cursor, payload, context),
+            3 => self.decode_double(cursor, payload),
+            4 => self.decode_bytes(cursor, payload, context),
             5 => self.decode_uint16(cursor, payload),
             6 => self.decode_uint32(cursor, payload),
-            7 => self.decode_map(cursor, payload),
+            7 => self.decode_map(cursor, payload, context, depth, pointer_depth, active),
             _ => Err("Invalid type"),
         }
     }
@@ -748,124 +907,144 @@ impl<'a> DataDecoder<'a> {
         &self,
         cursor: &mut usize,
         size_from_ctrl: u8,
+        context: &mut DecodeBudget,
+        depth: usize,
+        pointer_depth: usize,
+        active: &ActiveValue<'_>,
     ) -> Result<DataValue, &'static str> {
-        if *cursor >= self.buffer.len() {
-            return Err("Extended type truncated");
-        }
-
         // The next byte contains the raw extended type number
         // Actual type = 7 + raw_ext_type (per libmaxminddb)
-        let raw_ext_type = self.buffer[*cursor];
-        let type_id = 7 + raw_ext_type;
-        *cursor += 1;
+        let raw_ext_type = self.read_byte(cursor, "Extended type truncated")?;
+        let type_id = u16::from(raw_ext_type) + 7;
 
         match type_id {
             8 => self.decode_int32(cursor, size_from_ctrl), // Extended type 1
             9 => self.decode_uint64(cursor, size_from_ctrl), // Extended type 2
             10 => self.decode_uint128(cursor, size_from_ctrl), // Extended type 3
-            11 => self.decode_array(cursor, size_from_ctrl), // Extended type 4
-            14 => Ok(DataValue::Bool(size_from_ctrl != 0)), // Extended type 7
+            11 => self.decode_array(
+                cursor,
+                size_from_ctrl,
+                context,
+                depth,
+                pointer_depth,
+                active,
+            ), // Extended type 4
+            14 => self.decode_bool(cursor, size_from_ctrl), // Extended type 7
             15 => self.decode_float(cursor, size_from_ctrl), // Extended type 8
             128 => self.decode_timestamp(cursor, size_from_ctrl), // Matchy extension
-            _ => {
-                eprintln!(
-                    "Unknown extended type: raw_ext_type={}, type_id={}, size_from_ctrl={}, offset={}",
-                    raw_ext_type, type_id, size_from_ctrl, *cursor - 1
-                );
-                Err("Unknown extended type")
-            }
+            _ => Err("Unknown extended type"),
         }
     }
 
-    fn decode_pointer(&self, cursor: &mut usize, payload: u8) -> Result<DataValue, &'static str> {
+    fn decode_pointer(
+        &self,
+        cursor: &mut usize,
+        payload: u8,
+        context: &mut DecodeBudget,
+        depth: usize,
+        pointer_depth: usize,
+        active: &ActiveValue<'_>,
+    ) -> Result<DataValue, &'static str> {
+        if pointer_depth >= MAX_POINTER_DEPTH {
+            return Err("Pointer depth exceeded");
+        }
+
         let size_bits = (payload >> 3) & 0x3; // Extract bits 3-4
         let offset = match size_bits {
             0 => {
                 // 11 bits: 3 bits from payload + 8 bits from next byte
-                if *cursor >= self.buffer.len() {
-                    return Err("Pointer data truncated");
-                }
                 let low_3_bits = u32::from(payload & 0x7);
-                let next_byte = u32::from(self.buffer[*cursor]);
-                *cursor += 1;
+                let next_byte = u32::from(self.read_byte(cursor, "Pointer data truncated")?);
                 (low_3_bits << 8) | next_byte
             }
             1 => {
                 // 19 bits: 3 bits from payload + 16 bits from next 2 bytes, offset by 2048
-                if *cursor + 1 >= self.buffer.len() {
-                    return Err("Pointer data truncated");
-                }
                 let low_3_bits = u32::from(payload & 0x7);
-                let b0 = u32::from(self.buffer[*cursor]);
-                let b1 = u32::from(self.buffer[*cursor + 1]);
-                *cursor += 2;
+                let bytes = self.read_bytes(cursor, 2, "Pointer data truncated")?;
+                let b0 = u32::from(bytes[0]);
+                let b1 = u32::from(bytes[1]);
                 2048 + ((low_3_bits << 16) | (b0 << 8) | b1)
             }
             2 => {
                 // 27 bits: 3 bits from payload + 24 bits from next 3 bytes, offset by 526336
-                if *cursor + 2 >= self.buffer.len() {
-                    return Err("Pointer data truncated");
-                }
                 let low_3_bits = u32::from(payload & 0x7);
-                let b0 = u32::from(self.buffer[*cursor]);
-                let b1 = u32::from(self.buffer[*cursor + 1]);
-                let b2 = u32::from(self.buffer[*cursor + 2]);
-                *cursor += 3;
+                let bytes = self.read_bytes(cursor, 3, "Pointer data truncated")?;
+                let b0 = u32::from(bytes[0]);
+                let b1 = u32::from(bytes[1]);
+                let b2 = u32::from(bytes[2]);
                 526336 + ((low_3_bits << 24) | (b0 << 16) | (b1 << 8) | b2)
             }
             3 => {
                 // 32 bits: payload bits ignored, full 32 bits from next 4 bytes
-                if *cursor + 3 >= self.buffer.len() {
-                    return Err("Pointer data truncated");
-                }
-                let mut bytes = [0u8; 4];
-                bytes.copy_from_slice(&self.buffer[*cursor..*cursor + 4]);
-                *cursor += 4;
-                u32::from_be_bytes(bytes)
+                let bytes = self.read_bytes(cursor, 4, "Pointer data truncated")?;
+                u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
             }
             _ => return Err("Invalid pointer size"),
         };
 
-        Ok(DataValue::Pointer(offset))
+        let offset = usize::try_from(offset).map_err(|_| "Pointer offset is not addressable")?;
+        let mut target_cursor = offset
+            .checked_sub(self.base_offset)
+            .ok_or("Pointer offset before base")?;
+        if active.contains(target_cursor) {
+            return Err("Pointer cycle detected");
+        }
+        self.decode_at(
+            &mut target_cursor,
+            context,
+            depth + 1,
+            pointer_depth + 1,
+            Some(active),
+        )
     }
 
-    fn decode_string(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+    fn decode_string(
+        &self,
+        cursor: &mut usize,
+        size_bits: u8,
+        context: &mut DecodeBudget,
+    ) -> Result<DataValue, &'static str> {
         let len = self.decode_size(cursor, size_bits)?;
+        let bytes = self.read_bytes(cursor, len, "String data out of bounds")?;
+        let s = std::str::from_utf8(bytes).map_err(|_| "Invalid UTF-8")?;
+        context.charge_allocation(len)?;
 
-        if *cursor + len > self.buffer.len() {
-            return Err("String data out of bounds");
-        }
+        let mut string = String::new();
+        string
+            .try_reserve_exact(len)
+            .map_err(|_| "String allocation failed")?;
+        string.push_str(s);
 
-        let s = std::str::from_utf8(&self.buffer[*cursor..*cursor + len])
-            .map_err(|_| "Invalid UTF-8")?;
-        *cursor += len;
-
-        Ok(DataValue::String(s.to_string()))
+        Ok(DataValue::String(string))
     }
 
-    fn decode_double(&self, cursor: &mut usize) -> Result<DataValue, &'static str> {
-        if *cursor + 8 > self.buffer.len() {
-            return Err("Double data out of bounds");
+    fn decode_double(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+        let size = self.decode_size(cursor, size_bits)?;
+        if size != 8 {
+            return Err("Double must be 8 bytes");
         }
-
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&self.buffer[*cursor..*cursor + 8]);
-        *cursor += 8;
-
-        Ok(DataValue::Double(f64::from_be_bytes(bytes)))
+        let bytes = self.read_bytes(cursor, size, "Double data out of bounds")?;
+        Ok(DataValue::Double(f64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ])))
     }
 
-    fn decode_bytes(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+    fn decode_bytes(
+        &self,
+        cursor: &mut usize,
+        size_bits: u8,
+        context: &mut DecodeBudget,
+    ) -> Result<DataValue, &'static str> {
         let len = self.decode_size(cursor, size_bits)?;
+        let bytes = self.read_bytes(cursor, len, "Bytes data out of bounds")?;
+        context.charge_allocation(len)?;
 
-        if *cursor + len > self.buffer.len() {
-            return Err("Bytes data out of bounds");
-        }
-
-        let bytes = self.buffer[*cursor..*cursor + len].to_vec();
-        *cursor += len;
-
-        Ok(DataValue::Bytes(bytes))
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(len)
+            .map_err(|_| "Bytes allocation failed")?;
+        owned.extend_from_slice(bytes);
+        Ok(DataValue::Bytes(owned))
     }
 
     fn decode_uint16(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
@@ -874,17 +1053,13 @@ impl<'a> DataDecoder<'a> {
         if size > 2 {
             return Err("Uint16 size too large");
         }
-
-        if *cursor + size > self.buffer.len() {
-            return Err("Uint16 data out of bounds");
-        }
+        let bytes = self.read_bytes(cursor, size, "Uint16 data out of bounds")?;
 
         // Read variable number of bytes and convert to u16
         let mut value = 0u16;
-        for i in 0..size {
-            value = (value << 8) | u16::from(self.buffer[*cursor + i]);
+        for &byte in bytes {
+            value = (value << 8) | u16::from(byte);
         }
-        *cursor += size;
 
         Ok(DataValue::Uint16(value))
     }
@@ -895,41 +1070,62 @@ impl<'a> DataDecoder<'a> {
         if size > 4 {
             return Err("Uint32 size too large");
         }
-
-        if *cursor + size > self.buffer.len() {
-            return Err("Uint32 data out of bounds");
-        }
+        let bytes = self.read_bytes(cursor, size, "Uint32 data out of bounds")?;
 
         // Read variable number of bytes and convert to u32
         let mut value = 0u32;
-        for i in 0..size {
-            value = (value << 8) | u32::from(self.buffer[*cursor + i]);
+        for &byte in bytes {
+            value = (value << 8) | u32::from(byte);
         }
-        *cursor += size;
 
         Ok(DataValue::Uint32(value))
     }
 
-    fn decode_map(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+    fn decode_map(
+        &self,
+        cursor: &mut usize,
+        size_bits: u8,
+        context: &mut DecodeBudget,
+        depth: usize,
+        pointer_depth: usize,
+        active: &ActiveValue<'_>,
+    ) -> Result<DataValue, &'static str> {
         let count = self.decode_size(cursor, size_bits)?;
+        let remaining = self
+            .buffer
+            .len()
+            .checked_sub(*cursor)
+            .ok_or("Map cursor out of bounds")?;
+        let minimum_bytes = count.checked_mul(2).ok_or("Map entry count too large")?;
+        if minimum_bytes > remaining {
+            return Err("Map entry count exceeds remaining data");
+        }
+        let entry_size = std::mem::size_of::<String>()
+            .checked_add(std::mem::size_of::<DataValue>())
+            .and_then(|size| size.checked_add(std::mem::size_of::<usize>()))
+            .ok_or("Map allocation size overflow")?;
+        let allocation = count
+            .checked_mul(entry_size)
+            .and_then(|bytes| bytes.checked_mul(HASH_MAP_ALLOCATION_FACTOR))
+            .ok_or("Map allocation size overflow")?;
+        let child_work = count.checked_mul(2).ok_or("Map work size overflow")?;
+        context.ensure_work(child_work)?;
+        context.charge_allocation(allocation)?;
+
         let mut map = HashMap::new();
+        map.try_reserve(count)
+            .map_err(|_| "Map allocation failed")?;
 
         for _ in 0..count {
             // Decode key - can be String or Pointer (MMDB uses pointers for deduplication)
-            let key_value = self.decode_at(cursor)?;
+            let key_value =
+                self.decode_at(cursor, context, depth + 1, pointer_depth, Some(active))?;
             let key = match key_value {
                 DataValue::String(s) => s,
-                DataValue::Pointer(offset) => {
-                    // Follow pointer to get the actual key string
-                    match self.decode(offset)? {
-                        DataValue::String(s) => s,
-                        _ => return Err("Pointer in map key must point to string"),
-                    }
-                }
                 _ => return Err("Map key must be string or pointer to string"),
             };
 
-            let value = self.decode_at(cursor)?;
+            let value = self.decode_at(cursor, context, depth + 1, pointer_depth, Some(active))?;
             map.insert(key, value);
         }
 
@@ -942,29 +1138,10 @@ impl<'a> DataDecoder<'a> {
         if size > 4 {
             return Err("Int32 size too large");
         }
-
-        if *cursor + size > self.buffer.len() {
-            return Err("Int32 data out of bounds");
-        }
-
-        // Read variable number of bytes and convert to i32 with sign extension
-        let mut value = 0i32;
-        if size > 0 {
-            // Check if the high bit is set (negative number)
-            let is_negative = (self.buffer[*cursor] & 0x80) != 0;
-
-            if is_negative {
-                // Start with all 1s for sign extension
-                value = -1;
-            }
-
-            for i in 0..size {
-                value = (value << 8) | i32::from(self.buffer[*cursor + i]);
-            }
-        }
-        *cursor += size;
-
-        Ok(DataValue::Int32(value))
+        let bytes = self.read_bytes(cursor, size, "Int32 data out of bounds")?;
+        let mut padded = [0u8; 4];
+        padded[4 - size..].copy_from_slice(bytes);
+        Ok(DataValue::Int32(i32::from_be_bytes(padded)))
     }
 
     fn decode_uint64(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
@@ -973,17 +1150,13 @@ impl<'a> DataDecoder<'a> {
         if size > 8 {
             return Err("Uint64 size too large");
         }
-
-        if *cursor + size > self.buffer.len() {
-            return Err("Uint64 data out of bounds");
-        }
+        let bytes = self.read_bytes(cursor, size, "Uint64 data out of bounds")?;
 
         // Read variable number of bytes and convert to u64
         let mut value = 0u64;
-        for i in 0..size {
-            value = (value << 8) | u64::from(self.buffer[*cursor + i]);
+        for &byte in bytes {
+            value = (value << 8) | u64::from(byte);
         }
-        *cursor += size;
 
         Ok(DataValue::Uint64(value))
     }
@@ -994,47 +1167,71 @@ impl<'a> DataDecoder<'a> {
         if size > 16 {
             return Err("Uint128 size too large");
         }
-
-        if *cursor + size > self.buffer.len() {
-            return Err("Uint128 data out of bounds");
-        }
+        let bytes = self.read_bytes(cursor, size, "Uint128 data out of bounds")?;
 
         // Read variable number of bytes and convert to u128
         let mut value = 0u128;
-        for i in 0..size {
-            value = (value << 8) | u128::from(self.buffer[*cursor + i]);
+        for &byte in bytes {
+            value = (value << 8) | u128::from(byte);
         }
-        *cursor += size;
 
         Ok(DataValue::Uint128(value))
     }
 
-    fn decode_array(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+    fn decode_array(
+        &self,
+        cursor: &mut usize,
+        size_bits: u8,
+        context: &mut DecodeBudget,
+        depth: usize,
+        pointer_depth: usize,
+        active: &ActiveValue<'_>,
+    ) -> Result<DataValue, &'static str> {
         let count = self.decode_size(cursor, size_bits)?;
-        let mut array = Vec::with_capacity(count);
+        let remaining = self
+            .buffer
+            .len()
+            .checked_sub(*cursor)
+            .ok_or("Array cursor out of bounds")?;
+        if count > remaining {
+            return Err("Array element count exceeds remaining data");
+        }
+        let allocation = count
+            .checked_mul(std::mem::size_of::<DataValue>())
+            .ok_or("Array allocation size overflow")?;
+        context.ensure_work(count)?;
+        context.charge_allocation(allocation)?;
+
+        let mut array = Vec::new();
+        array
+            .try_reserve_exact(count)
+            .map_err(|_| "Array allocation failed")?;
 
         for _ in 0..count {
-            array.push(self.decode_at(cursor)?);
+            array.push(self.decode_at(cursor, context, depth + 1, pointer_depth, Some(active))?);
         }
 
         Ok(DataValue::Array(array))
     }
 
+    fn decode_bool(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
+        match self.decode_size(cursor, size_bits)? {
+            0 => Ok(DataValue::Bool(false)),
+            1 => Ok(DataValue::Bool(true)),
+            _ => Err("Bool size must be 0 or 1"),
+        }
+    }
+
     fn decode_float(&self, cursor: &mut usize, size_bits: u8) -> Result<DataValue, &'static str> {
         // Float should always be 4 bytes
-        if size_bits != 4 {
+        let size = self.decode_size(cursor, size_bits)?;
+        if size != 4 {
             return Err("Float must be 4 bytes");
         }
-
-        if *cursor + 4 > self.buffer.len() {
-            return Err("Float data out of bounds");
-        }
-
-        let mut bytes = [0u8; 4];
-        bytes.copy_from_slice(&self.buffer[*cursor..*cursor + 4]);
-        *cursor += 4;
-
-        Ok(DataValue::Float(f32::from_be_bytes(bytes)))
+        let bytes = self.read_bytes(cursor, size, "Float data out of bounds")?;
+        Ok(DataValue::Float(f32::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+        ])))
     }
 
     fn decode_timestamp(
@@ -1042,87 +1239,58 @@ impl<'a> DataDecoder<'a> {
         cursor: &mut usize,
         size_bits: u8,
     ) -> Result<DataValue, &'static str> {
-        if size_bits != 8 {
+        let size = self.decode_size(cursor, size_bits)?;
+        if size != 8 {
             return Err("Timestamp must be 8 bytes");
         }
-
-        if *cursor + 8 > self.buffer.len() {
-            return Err("Timestamp data out of bounds");
-        }
-
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&self.buffer[*cursor..*cursor + 8]);
-        *cursor += 8;
-
-        Ok(DataValue::Timestamp(i64::from_be_bytes(bytes)))
+        let bytes = self.read_bytes(cursor, size, "Timestamp data out of bounds")?;
+        Ok(DataValue::Timestamp(i64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ])))
     }
 
     fn decode_size(&self, cursor: &mut usize, size_bits: u8) -> Result<usize, &'static str> {
         match size_bits {
             0..=28 => Ok(size_bits as usize),
             29 => {
-                if *cursor >= self.buffer.len() {
-                    return Err("Size byte out of bounds");
-                }
-                let size = self.buffer[*cursor] as usize;
-                *cursor += 1;
-                Ok(29 + size)
+                let size = usize::from(self.read_byte(cursor, "Size byte out of bounds")?);
+                29usize.checked_add(size).ok_or("Decoded size overflow")
             }
             30 => {
-                if *cursor + 2 > self.buffer.len() {
-                    return Err("Size bytes out of bounds");
-                }
-                let mut bytes = [0u8; 2];
-                bytes.copy_from_slice(&self.buffer[*cursor..*cursor + 2]);
-                *cursor += 2;
-                Ok(29 + 256 + u16::from_be_bytes(bytes) as usize)
+                let bytes = self.read_bytes(cursor, 2, "Size bytes out of bounds")?;
+                285usize
+                    .checked_add(usize::from(u16::from_be_bytes([bytes[0], bytes[1]])))
+                    .ok_or("Decoded size overflow")
             }
             31 => {
-                if *cursor + 3 > self.buffer.len() {
-                    return Err("Size bytes out of bounds");
-                }
-                let b0 = self.buffer[*cursor] as usize;
-                let b1 = self.buffer[*cursor + 1] as usize;
-                let b2 = self.buffer[*cursor + 2] as usize;
-                *cursor += 3;
-                Ok(29 + 256 + 65536 + ((b0 << 16) | (b1 << 8) | b2))
+                let bytes = self.read_bytes(cursor, 3, "Size bytes out of bounds")?;
+                let encoded = (usize::from(bytes[0]) << 16)
+                    | (usize::from(bytes[1]) << 8)
+                    | usize::from(bytes[2]);
+                65_821usize
+                    .checked_add(encoded)
+                    .ok_or("Decoded size overflow")
             }
             _ => Err("Invalid size encoding"),
         }
     }
 
-    /// Recursively resolve all pointers in a decoded value
-    fn resolve_pointers(&self, value: DataValue) -> Result<DataValue, &'static str> {
-        match value {
-            DataValue::Pointer(offset) => {
-                // Follow the pointer and recursively resolve
-                let mut cursor = offset as usize;
-                if cursor < self.base_offset {
-                    return Err("Pointer offset before base");
-                }
-                cursor -= self.base_offset;
-                let pointed_value = self.decode_at(&mut cursor)?;
-                self.resolve_pointers(pointed_value)
-            }
-            DataValue::Map(entries) => {
-                // Recursively resolve pointers in map values
-                let mut resolved_map = HashMap::new();
-                for (key, val) in entries {
-                    resolved_map.insert(key, self.resolve_pointers(val)?);
-                }
-                Ok(DataValue::Map(resolved_map))
-            }
-            DataValue::Array(items) => {
-                // Recursively resolve pointers in array elements
-                let mut resolved_array = Vec::new();
-                for item in items {
-                    resolved_array.push(self.resolve_pointers(item)?);
-                }
-                Ok(DataValue::Array(resolved_array))
-            }
-            // All other types have no pointers to resolve
-            other => Ok(other),
-        }
+    fn read_byte(&self, cursor: &mut usize, error: &'static str) -> Result<u8, &'static str> {
+        let byte = *self.buffer.get(*cursor).ok_or(error)?;
+        *cursor = cursor.checked_add(1).ok_or("Cursor overflow")?;
+        Ok(byte)
+    }
+
+    fn read_bytes<'b>(
+        &'b self,
+        cursor: &mut usize,
+        len: usize,
+        error: &'static str,
+    ) -> Result<&'b [u8], &'static str> {
+        let end = cursor.checked_add(len).ok_or("Cursor overflow")?;
+        let bytes = self.buffer.get(*cursor..end).ok_or(error)?;
+        *cursor = end;
+        Ok(bytes)
     }
 }
 

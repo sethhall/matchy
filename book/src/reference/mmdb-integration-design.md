@@ -1,17 +1,24 @@
 # Matchy Database Format (.mxy)
 
-One of Matchy's key innovations is its hybrid database format that extends the proven MaxMind DB (MMDB) format while maintaining full backward compatibility. This means you can use Matchy as a drop-in replacement for libmaxminddb, but you also get the ability to query string literals and glob patterns in the same database—without sacrificing performance or compatibility.
+Matchy's hybrid database format uses the MaxMind DB (MMDB) tree and standard
+data encodings, then adds optional indexes for literals and glob patterns.
+Matchy reads standard MMDB v2 types within documented decoder resource limits.
+Standard MMDB readers can decode Matchy IP values when those values use only
+standard types.
 
-If you're familiar with MMDB files (like GeoIP databases), you already know how to use Matchy. If you need more than just IP lookups, Matchy seamlessly extends the format without breaking existing tools. It's the best of both worlds: compatibility with the MMDB ecosystem and powerful new query capabilities.
+The native and compatibility APIs make common GeoIP-style workflows familiar,
+but Matchy is not an unlimited or byte-for-byte replacement for every
+libmaxminddb behavior. In particular, Matchy's extended `Timestamp` type 128 is
+not understood by standard MMDB readers.
 
 The Matchy database format (`.mxy`) achieves this by extending the standard MMDB format to support IP addresses, string literals, and glob patterns in a single unified, memory-mappable database file.
 
 ## Design Goals
 
-1. **Backward compatibility** - Read standard MMDB files without modification
-2. **Forward compatibility** - IP-only `.mxy` files work with existing MMDB tools
-3. **Seamless extension** - Add string/pattern support without breaking compatibility
-4. **Performance** - Zero overhead for standard MMDB IP lookups
+1. **Standard-type compatibility** - Read MMDB v2 files within bounded decoder limits
+2. **Interoperable output** - Standard MMDB tools can read IP values that use standard types
+3. **Separate extensions** - Add string/pattern indexes outside tree-referenced data
+4. **Predictable query routing** - Keep IP traversal independent of optional text indexes
 5. **Single file** - All query types in one memory-mappable database
 
 ## File Structure
@@ -78,6 +85,7 @@ graph LR
 ```
 
 This means:
+
 - ✅ No data duplication regardless of query type
 - ✅ Memory-efficient for databases with mixed query types
 - ✅ Single source of truth for all metadata
@@ -87,22 +95,25 @@ This means:
 
 | Database Type | Matchy | libmaxminddb | Notes |
 |---------------|--------|--------------|-------|
-| Standard MMDB (`.mmdb`) | ✅ Full | ✅ Full | Complete compatibility |
-| IP-only `.mxy` | ✅ Full | ✅ IP lookups | Extended section absent |
-| Full `.mxy` with strings/patterns | ✅ Full | ✅ IP lookups only | Extended section ignored by libmaxminddb |
+| Standard MMDB v2 (`.mmdb`) | ✅ Standard types within limits | ✅ | Matchy enforces decoder resource limits |
+| IP-only `.mxy`, standard value types | ✅ | ✅ IP lookups | No Matchy-only value types |
+| Full `.mxy`, standard IP value types | ✅ | ✅ IP lookups | Text indexes are ignored by libmaxminddb |
+| `.mxy` with Matchy `Timestamp` values | ✅ | ⚠️ | Extended type 128 is Matchy-specific |
 
 ### Reading Standard MMDB Files
 
-Matchy is a drop-in replacement for libmaxminddb:
+Matchy's native API can open common standard MMDB databases:
 ```rust
-// Works with any standard MMDB file
+use std::net::IpAddr;
+
 let db = Database::from("GeoLite2-City.mmdb").open()?;
-let result = db.lookup_ip("8.8.8.8")?;
+let result = db.lookup_ip("8.8.8.8".parse::<IpAddr>()?)?;
 ```
 
 ### Writing IP-Compatible Databases
 
-IP-only `.mxy` databases work with existing MMDB tools:
+IP-only `.mxy` databases whose values use standard types work with existing
+MMDB tools:
 ```bash
 # Build database with Matchy
 matchy build ips.csv --input-format csv --output geoip.mxy
@@ -116,7 +127,8 @@ matchy query geoip.mxy 8.8.8.8
 
 ### Extended Databases
 
-Databases with strings and patterns maintain IP compatibility:
+Databases with strings and patterns retain standard-reader IP interoperability
+when their IP values use only standard MMDB types:
 ```bash
 # Build database with all query types
 matchy build ips.csv domains.csv patterns.csv \
@@ -172,26 +184,26 @@ let glob_result = db.lookup("*.example.com")?;  // Pattern lookup
 
 ### Memory Mapping
 
-Both sections are memory-mapped for zero-copy access:
-- MMDB section uses standard offsets
-- Extended section uses internal offsets
-- All offsets validated on database open
-- No runtime bounds checking overhead
+The file is memory-mapped so Matchy can read its indexes in place without deserializing the entire database:
+
+- MMDB references use the bases defined by the MMDB format
+- Extension references use the base defined by each extension structure
+- Database open validates metadata and top-level section envelopes
+- Nested serialized references receive deliberate bounds checks when they are accessed
+
+Those access-time checks are part of the runtime safety model; memory mapping avoids whole-file decoding, not the need to validate each nested reference before use.
 
 ## Performance Impact
 
-| Operation | IP-only `.mxy` | Full `.mxy` | Standard `.mmdb` |
-|-----------|----------------|-------------|------------------|
-| IP Lookup | Identical | Identical | Baseline |
-| String Lookup | N/A | ~30-50ns | N/A |
-| Pattern Lookup | N/A | ~200-500ns | N/A |
-| Memory Overhead | 0% | Extended section only | Baseline |
-
-The extended section adds **zero overhead** to IP lookups.
+IP lookup uses the MMDB tree regardless of whether text indexes are present.
+Opening a combined file also validates the optional extension envelopes and
+retains their runtime views, so “zero overhead” is not an appropriate blanket
+claim. Measure open and query behavior with `matchy bench` on the target data,
+hardware, storage, and page-cache state.
 
 ## See Also
 
 - [Binary Format Details](binary-format.md) - Low-level format specification
-- [MMDB Quick Start](mmdb-quickstart.md) - Getting started with MMDB compatibility
+- [MMDB Integration](mmdb-integration.md) - Getting started with MMDB compatibility
 - [System Architecture](architecture.md) - Overall system design
 - [Performance Benchmarks](benchmarks.md) - Detailed performance analysis

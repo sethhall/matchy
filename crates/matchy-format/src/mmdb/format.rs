@@ -80,7 +80,32 @@ impl MmdbHeader {
             .map_err(|_| MmdbError::InvalidMetadata("node_count exceeds u32::MAX".to_string()))?;
         let tree_size = usize::try_from(node_count)
             .map_err(|_| MmdbError::InvalidMetadata("node_count exceeds usize".to_string()))?
-            * record_size.node_bytes();
+            .checked_mul(record_size.node_bytes())
+            .ok_or_else(|| {
+                MmdbError::InvalidFormat("Search tree size overflows address space".to_string())
+            })?;
+
+        // An MMDB file stores a 16-byte zero separator immediately after the
+        // search tree. Both must end before the metadata marker. Checking this
+        // envelope at load time keeps later tree reads from trusting a
+        // metadata-provided size that the actual file cannot satisfy.
+        let data_section_start = tree_size.checked_add(16).ok_or_else(|| {
+            MmdbError::InvalidFormat("Data section offset overflows address space".to_string())
+        })?;
+        if data_section_start > marker_offset {
+            return Err(MmdbError::InvalidFormat(format!(
+                "Search tree ({tree_size} bytes) and separator extend past metadata marker at {marker_offset}"
+            )));
+        }
+
+        let separator = data.get(tree_size..data_section_start).ok_or_else(|| {
+            MmdbError::InvalidFormat("MMDB data section separator is truncated".to_string())
+        })?;
+        if separator.iter().any(|&byte| byte != 0) {
+            return Err(MmdbError::InvalidFormat(
+                "MMDB data section separator must contain 16 zero bytes".to_string(),
+            ));
+        }
 
         Ok(Self {
             node_count: node_count_u32,
@@ -175,6 +200,31 @@ fn extract_uint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use matchy_data_format::DataEncoder;
+    use std::collections::HashMap;
+
+    fn synthetic_mmdb(
+        node_count: u32,
+        record_size: u16,
+        ip_version: u16,
+        tree: &[u8],
+        separator: &[u8],
+    ) -> Vec<u8> {
+        let mut metadata = HashMap::new();
+        metadata.insert("node_count".to_string(), DataValue::Uint32(node_count));
+        metadata.insert("record_size".to_string(), DataValue::Uint16(record_size));
+        metadata.insert("ip_version".to_string(), DataValue::Uint16(ip_version));
+
+        let mut encoder = DataEncoder::new();
+        encoder.encode(&DataValue::Map(metadata));
+
+        let mut data = Vec::new();
+        data.extend_from_slice(tree);
+        data.extend_from_slice(separator);
+        data.extend_from_slice(METADATA_MARKER);
+        data.extend_from_slice(&encoder.into_bytes());
+        data
+    }
 
     #[test]
     fn test_find_metadata_marker() {
@@ -281,5 +331,58 @@ mod tests {
         let result = find_metadata_marker(data);
         assert!(result.is_err());
         assert!(matches!(result, Err(MmdbError::MetadataNotFound)));
+    }
+
+    #[test]
+    fn test_parse_header_accepts_valid_synthetic_tree_and_separator() {
+        let tree = [0, 0, 1, 0, 0, 1];
+        let data = synthetic_mmdb(1, 24, 4, &tree, &[0; 16]);
+
+        let header = MmdbHeader::from_file(&data).unwrap();
+
+        assert_eq!(header.node_count, 1);
+        assert_eq!(header.record_size, RecordSize::Bits24);
+        assert_eq!(header.ip_version, IpVersion::V4);
+        assert_eq!(header.tree_size, tree.len());
+    }
+
+    #[test]
+    fn test_parse_header_rejects_tree_truncated_before_metadata() {
+        for (record_size, node_bytes) in [(24, 6), (28, 7), (32, 8)] {
+            // Metadata claims two nodes, but only one node is present before
+            // the separator and metadata marker.
+            let tree = vec![0; node_bytes];
+            let data = synthetic_mmdb(2, record_size, 4, &tree, &[0; 16]);
+
+            let result = MmdbHeader::from_file(&data);
+            assert!(
+                matches!(result, Err(MmdbError::InvalidFormat(_))),
+                "record size {record_size} unexpectedly accepted: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_header_rejects_truncated_separator() {
+        let tree = [0, 0, 1, 0, 0, 1];
+        let data = synthetic_mmdb(1, 24, 4, &tree, &[0; 15]);
+
+        assert!(matches!(
+            MmdbHeader::from_file(&data),
+            Err(MmdbError::InvalidFormat(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_header_rejects_nonzero_separator() {
+        let tree = [0, 0, 1, 0, 0, 1];
+        let mut separator = [0; 16];
+        separator[7] = 1;
+        let data = synthetic_mmdb(1, 24, 4, &tree, &separator);
+
+        assert!(matches!(
+            MmdbHeader::from_file(&data),
+            Err(MmdbError::InvalidFormat(_))
+        ));
     }
 }

@@ -7,12 +7,31 @@ use crate::{ACEdge, ACNodeHot, StateKind};
 use std::mem;
 use zerocopy::FromBytes;
 
+const MAX_VALIDATION_ERRORS: usize = 256;
+const MAX_VALIDATION_WARNINGS: usize = 256;
+const ERRORS_SUPPRESSED: &str =
+    "Additional validation errors suppressed after reaching the limit of 256";
+const WARNINGS_SUPPRESSED: &str =
+    "Additional validation warnings suppressed after reaching the limit of 256";
+
+fn push_capped(messages: &mut Vec<String>, message: String, limit: usize, sentinel: &str) {
+    let already_has_sentinel = messages.iter().any(|existing| existing == sentinel);
+    if message == sentinel && already_has_sentinel {
+        return;
+    }
+    if messages.len() < limit {
+        messages.push(message);
+    } else if !already_has_sentinel {
+        messages[limit - 1] = sentinel.to_string();
+    }
+}
+
 /// Validation result for AC automaton structures
 #[derive(Debug, Clone)]
 pub struct ACValidationResult {
-    /// Critical errors that make the structure unusable
+    /// Critical errors, capped at 256 retained messages including a suppression sentinel.
     pub errors: Vec<String>,
-    /// Warnings about potential issues (non-fatal)
+    /// Non-fatal warnings, capped at 256 retained messages including a suppression sentinel.
     pub warnings: Vec<String>,
     /// Statistics gathered during validation
     pub stats: ACStats,
@@ -46,6 +65,24 @@ impl ACValidationResult {
     #[must_use]
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
+    }
+
+    fn error(&mut self, message: impl Into<String>) {
+        push_capped(
+            &mut self.errors,
+            message.into(),
+            MAX_VALIDATION_ERRORS,
+            ERRORS_SUPPRESSED,
+        );
+    }
+
+    fn warning(&mut self, message: impl Into<String>) {
+        push_capped(
+            &mut self.warnings,
+            message.into(),
+            MAX_VALIDATION_WARNINGS,
+            WARNINGS_SUPPRESSED,
+        );
     }
 }
 
@@ -94,14 +131,14 @@ pub fn validate_ac_structure(
         let node_offset = nodes_offset + i * mem::size_of::<ACNodeHot>();
 
         if node_offset + mem::size_of::<ACNodeHot>() > buffer.len() {
-            result.errors.push(format!("AC node {i} out of bounds"));
+            result.error(format!("AC node {i} out of bounds"));
             continue;
         }
 
         let node = match ACNodeHot::read_from_prefix(&buffer[node_offset..]) {
             Ok((n, _)) => n,
             Err(_) => {
-                result.errors.push(format!("Failed to read AC node {i}"));
+                result.error(format!("Failed to read AC node {i}"));
                 continue;
             }
         };
@@ -113,7 +150,7 @@ pub fn validate_ac_structure(
             2 => StateKind::Sparse,
             3 => StateKind::Dense,
             _ => {
-                result.errors.push(format!(
+                result.error(format!(
                     "AC node {} has invalid state kind: {}",
                     i, node.state_kind
                 ));
@@ -129,7 +166,7 @@ pub fn validate_ac_structure(
                 || failure_node_offset >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
                 || !(failure_node_offset - nodes_offset).is_multiple_of(mem::size_of::<ACNodeHot>())
             {
-                result.errors.push(format!(
+                result.error(format!(
                     "AC node {} has invalid failure link offset: {}",
                     i, node.failure_offset
                 ));
@@ -137,9 +174,7 @@ pub fn validate_ac_structure(
 
             // Check for self-loop (root is at offset nodes_offset)
             if failure_node_offset == node_offset && node_offset != nodes_offset {
-                result
-                    .errors
-                    .push(format!("AC node {i} has self-referencing failure link"));
+                result.error(format!("AC node {i} has self-referencing failure link"));
             }
         }
 
@@ -147,7 +182,7 @@ pub fn validate_ac_structure(
         match state_kind {
             StateKind::Empty => {
                 if node.edge_count != 0 {
-                    result.errors.push(format!(
+                    result.error(format!(
                         "AC node {} is Empty but has edge_count={}",
                         i, node.edge_count
                     ));
@@ -156,7 +191,7 @@ pub fn validate_ac_structure(
             StateKind::One => {
                 // Single edge stored inline
                 if node.edge_count != 0 {
-                    result.warnings.push(format!(
+                    result.warning(format!(
                         "AC node {} is One but has edge_count={} (should be 0)",
                         i, node.edge_count
                     ));
@@ -169,7 +204,7 @@ pub fn validate_ac_structure(
                         || !(target_offset - nodes_offset)
                             .is_multiple_of(mem::size_of::<ACNodeHot>()))
                 {
-                    result.errors.push(format!(
+                    result.error(format!(
                         "AC node {i} (One) has invalid target offset: {target_offset}"
                     ));
                 }
@@ -181,11 +216,9 @@ pub fn validate_ac_structure(
                 let edges_size = edge_count * mem::size_of::<ACEdge>();
 
                 if edge_count == 0 {
-                    result
-                        .errors
-                        .push(format!("AC node {i} is Sparse but has no edges"));
+                    result.error(format!("AC node {i} is Sparse but has no edges"));
                 } else if !validate_range(edges_offset, edges_size, buffer.len()) {
-                    result.errors.push(format!(
+                    result.error(format!(
                         "AC node {i} edge array out of bounds: offset={edges_offset}, count={edge_count}"
                     ));
                 } else if strict {
@@ -200,7 +233,7 @@ pub fn validate_ac_structure(
                                 || !(target_offset - nodes_offset)
                                     .is_multiple_of(mem::size_of::<ACNodeHot>())
                             {
-                                result.errors.push(format!(
+                                result.error(format!(
                                     "AC node {i} edge {j} has invalid target: {target_offset}"
                                 ));
                             }
@@ -214,7 +247,7 @@ pub fn validate_ac_structure(
                 let lookup_size = 1024;
 
                 if !validate_range(lookup_offset, lookup_size, buffer.len()) {
-                    result.errors.push(format!(
+                    result.error(format!(
                         "AC node {i} dense lookup out of bounds: offset={lookup_offset}"
                     ));
                 }
@@ -247,7 +280,7 @@ pub fn validate_ac_structure(
                                     || !(target_offset - nodes_offset)
                                         .is_multiple_of(mem::size_of::<ACNodeHot>()))
                             {
-                                result.errors.push(format!(
+                                result.error(format!(
                                     "AC node {i} dense entry [{j}] has invalid target: {target_offset}"
                                 ));
                             }
@@ -275,14 +308,14 @@ pub fn validate_ac_structure(
                         ]);
 
                         if pattern_id >= pattern_count {
-                            result.errors.push(format!(
+                            result.error(format!(
                                 "AC node {i} pattern ID {j} out of range: {pattern_id} (max={pattern_count})"
                             ));
                         }
                     }
                 }
             } else {
-                result.errors.push(format!(
+                result.error(format!(
                     "AC node {} pattern IDs out of bounds: offset={}, count={}",
                     i, patterns_offset, node.pattern_count
                 ));
@@ -441,7 +474,7 @@ pub fn validate_ac_reachability(
     result.stats.orphaned_count = u32::try_from(orphaned_count).unwrap_or(u32::MAX);
 
     if orphaned_count > 0 {
-        result.warnings.push(format!(
+        result.warning(format!(
             "Found {orphaned_count} orphaned AC nodes (not reachable from root)"
         ));
     }
@@ -512,7 +545,7 @@ pub fn validate_pattern_references(
                         ]);
 
                         if pattern_id >= pattern_count {
-                            result.errors.push(format!(
+                            result.error(format!(
                                 "AC node {i} references invalid pattern ID: {pattern_id} (max={pattern_count})"
                             ));
                         } else {
@@ -536,7 +569,7 @@ pub fn validate_pattern_references(
         }
 
         if unreferenced_literals > 0 {
-            result.warnings.push(format!(
+            result.warning(format!(
                 "Found {unreferenced_literals} literal patterns not referenced by any AC node"
             ));
         }
@@ -548,6 +581,37 @@ pub fn validate_pattern_references(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_result_caps_retained_findings() {
+        let mut result = ACValidationResult::new(0);
+        for i in 0..MAX_VALIDATION_ERRORS + 10 {
+            result.error(format!("error {i}"));
+        }
+        for i in 0..MAX_VALIDATION_WARNINGS + 10 {
+            result.warning(format!("warning {i}"));
+        }
+
+        assert_eq!(result.errors.len(), MAX_VALIDATION_ERRORS);
+        assert_eq!(result.warnings.len(), MAX_VALIDATION_WARNINGS);
+        assert_eq!(
+            result
+                .errors
+                .iter()
+                .filter(|message| message.as_str() == ERRORS_SUPPRESSED)
+                .count(),
+            1
+        );
+        assert_eq!(
+            result
+                .warnings
+                .iter()
+                .filter(|message| message.as_str() == WARNINGS_SUPPRESSED)
+                .count(),
+            1
+        );
+        assert!(!result.is_valid());
+    }
 
     #[test]
     fn test_validate_range() {

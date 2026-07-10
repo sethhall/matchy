@@ -107,17 +107,16 @@ The viewer shows:
 
 ### Why This Matters
 
-Query performance is critical. Matchy achieves:
-- **~7M queries/second** for IP lookups
-- **~2M queries/second** for pattern matching
-
-This is only possible through careful allocation management:
+Query performance is sensitive to allocation behavior, but current throughput
+must be measured on a specified revision and workload. Important techniques
+include:
 
 1. **Buffer reuse**: Internal buffers are reused across queries
 2. **Zero-copy patterns**: Data is read directly from mmap'd memory
 3. **Minimal cloning**: Only the final result Vec is allocated
 
-Each allocation costs ~100ns, so avoiding them matters.
+Allocation cost varies by allocator, size, contention, and platform. Measure
+allocation counts and end-to-end latency instead of assigning a fixed cost.
 
 ### Allocation Optimization History
 

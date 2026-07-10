@@ -121,6 +121,13 @@ matchy_free_result(&result);
 matchy_close(db);
 ```
 
+For compatibility, `matchy_query()` and `matchy_query_into()` expose only a
+`found` flag. `found == false` can mean no match, malformed matched data, or a
+runtime query-resource limit. The current C query API does not provide a
+per-query error channel; applications that must distinguish those cases need a
+future result-bearing C API rather than inferring that every false result is a
+clean miss.
+
 Use `matchy_query_into()` when a language binding cannot safely receive C
 structs by value:
 
@@ -172,7 +179,9 @@ matchy_get_stats(db, &stats);
 printf("total queries: %llu\n", (unsigned long long)stats.total_queries);
 ```
 
-Set `opts.cache_capacity = 0` to disable query caching.
+Set `opts.cache_capacity = 0` to disable query caching. Positive values set an
+entry ceiling; estimated retained result heap is separately capped at 64 MiB
+per thread across at most 16 recent database generations.
 
 ## Extractor Example
 

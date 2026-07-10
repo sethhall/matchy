@@ -178,12 +178,15 @@ namespace matchy {
 #define MATCHY_ERROR_DATA_PARSE -11
 
 /*
- Standard validation level - all offsets, UTF-8, basic structure
+ Standard validation level - runtime envelope checks plus sampled reachable MMDB data.
+
+ For a known `database_type`, schema validation still checks every referenced
+ entry at this level.
  */
 #define MATCHY_VALIDATION_STANDARD 0
 
 /*
- Strict validation level - standard plus deep graph analysis and consistency checks (default)
+ Strict validation level - exhaustive MMDB records plus deep component checks.
  */
 #define MATCHY_VALIDATION_STRICT 1
 
@@ -366,7 +369,9 @@ typedef void (*matchy_reload_callback_t)(const struct matchy_reload_event_t *eve
 typedef struct matchy_open_options_t {
   /*
    LRU cache capacity
-   0 = disable cache, >0 = cache this many entries
+   0 = disable cache, >0 = cache at most this many entries.
+   Estimated retained result heap is also capped at 64 MiB per thread
+   across at most 16 recent database generations.
    Default: 10000
    */
   uint32_t cache_capacity;
@@ -459,7 +464,7 @@ typedef struct matchy_stats_t {
 } matchy_stats_t;
 
 /*
- Query result (zero-allocation)
+ Query result with offset-only data ownership
  */
 typedef struct matchy_result_t {
   /*
@@ -475,7 +480,7 @@ typedef struct matchy_result_t {
    */
   uint8_t _result_type;
   /*
-   Data offset into mmap'd data section (use matchy_aget_value to decode)
+   Internal format-specific data token (use matchy_aget_value to decode)
    */
   uint32_t _data_offset;
   /*
@@ -493,7 +498,7 @@ typedef struct matchy_entry_s {
    */
   const struct matchy_t *db;
   /*
-   Data offset into MMDB data section
+   Internal format-specific data token
    */
   uint32_t _data_offset;
 } matchy_entry_s;
@@ -836,6 +841,9 @@ void matchy_init_open_options(struct matchy_open_options_t *options);
  Open database with custom options
 
  Opens a database file with configurable cache size, auto-reload, and auto-update settings.
+ The mapped inode must remain immutable while the handle is open. For reloads,
+ write a complete replacement file and atomically rename it over the watched
+ path; do not rewrite or truncate the existing file in place.
 
  # Parameters
  * `filename` - Path to database file (null-terminated C string, must not be NULL)
@@ -875,6 +883,10 @@ struct matchy_t *matchy_open_with_options(const char *filename, const struct mat
 
  Opens a database file using memory mapping for optimal performance.
  The file is not loaded into memory - it's accessed on-demand.
+
+ Keep the mapped file's inode immutable until `matchy_close()`. Publish an
+ update by writing a complete new file and atomically replacing the path;
+ never truncate or rewrite the mapped inode in place.
 
  This validates UTF-8 on pattern string reads. Use for untrusted databases.
 
@@ -1001,9 +1013,11 @@ void matchy_close(struct matchy_t *db);
  Queries the database with an IP address or pattern. The function automatically
  detects the query type and uses the appropriate lookup method.
 
- Returns structured data as DataValue (cached internally).
- Use matchy_result_get_entry() to access structured data,
- or matchy_result_to_json() to convert to JSON.
+ Returns an offset/token-only result. Use matchy_result_get_entry() to access
+ structured data on demand, or matchy_result_to_json() to convert it to JSON.
+ With auto-reload enabled, this token is not bound to the database generation;
+ a reload between query and data navigation can invalidate its meaning. Use a
+ non-watching handle when snapshot-stable deferred data access is required.
 
  # Parameters
  * `db` - Database handle (must not be NULL)
@@ -1011,7 +1025,9 @@ void matchy_close(struct matchy_t *db);
 
  # Returns
  * matchy_result_t with found=true if match found
- * matchy_result_t with found=false if no match
+ * matchy_result_t with found=false if there is no match or if lookup data is
+   malformed or exceeds a runtime resource limit; this compatibility API has
+   no per-query error channel
  * Caller must free result with matchy_free_result
 
  # Safety
@@ -1068,7 +1084,7 @@ struct matchy_result_t matchy_query(const struct matchy_t *db, const char *query
 void matchy_query_into(const struct matchy_t *db, const char *query, struct matchy_result_t *result);
 
 /*
- Free query result (no-op in zero-allocation API)
+ Free query result (no-op for the offset-only result struct)
 
  This function exists for ABI compatibility but does nothing since
  matchy_result_t now uses offsets instead of heap-allocated data.
@@ -1291,6 +1307,13 @@ int32_t matchy_result_get_entry(const struct matchy_result_t *result, struct mat
 
  # Returns
  * Same as matchy_get_value
+ * String and byte pointers written to `entry_data` remain valid until the
+   database handle is closed. To preserve that lifetime, each such value is
+   retained by the handle and is never evicted.
+ * MATCHY_ERROR_OUT_OF_MEMORY if the handle's 64 MiB retained-value budget
+   is exhausted. Previously returned pointers remain valid after this error.
+ * MATCHY_ERROR_INVALID_PARAM if the path exceeds the decoder's nesting
+   limit or contains invalid UTF-8.
 
  # Safety
  * Same as matchy_get_value
@@ -1308,7 +1331,9 @@ int32_t matchy_aget_value(const struct matchy_entry_s *entry, struct matchy_entr
  Get full entry data as linked list (tree traversal)
 
  This function traverses the entire data structure and returns it as
- a flattened linked list. Maps and arrays are expanded recursively.
+ a flattened linked list. Arrays contain their recursively expanded values.
+ Maps contain each UTF-8 key immediately followed by its recursively
+ expanded value, matching libmaxminddb's list ordering.
 
  # Parameters
  * `entry` - Entry handle
@@ -1316,7 +1341,10 @@ int32_t matchy_aget_value(const struct matchy_entry_s *entry, struct matchy_entr
 
  # Returns
  * MATCHY_SUCCESS on success
- * Error code on failure
+ * MATCHY_ERROR_OUT_OF_MEMORY if the list's 64 MiB estimated storage budget
+   is exceeded or an allocation fails
+ * MATCHY_ERROR_DATA_PARSE if a retained value is malformed
+ * Other error codes on failure
 
  # Safety
  * `entry` must be valid
@@ -1433,8 +1461,14 @@ char *matchy_result_to_json(const struct matchy_result_t *result);
 /*
  Validate a database file
 
- Validates a .mxy database file to ensure it's safe to use.
- Returns MATCHY_SUCCESS if the database is valid, or an error code if invalid.
+ Checks a `.mxy` database file at the requested coverage level.
+ Returns `MATCHY_SUCCESS` when the bytes read passed those checks, or an error
+ code when validation failed. Standard validation is sampled; use Strict for
+ untrusted input and impose deployment-appropriate resource limits.
+
+ A successful result applies only to the bytes read by this call. If the path
+ can be replaced before it is opened, validate a protected immutable snapshot
+ or bind the result to a content digest.
 
  # Parameters
  * `filename` - Path to database file (null-terminated C string, must not be NULL)
@@ -1459,7 +1493,7 @@ char *matchy_result_to_json(const struct matchy_result_t *result);
      if (error) matchy_free_string(error);
      return 1;
  }
- printf("Database is valid and safe to use!\n");
+ printf("The bytes read passed strict validation.\n");
  ```
  */
 int32_t matchy_validate(const char *filename, int32_t level, char **error_message);

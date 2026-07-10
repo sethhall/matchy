@@ -97,7 +97,7 @@ println!("✅ Database built: {} bytes", database_bytes.len());
 ```rust
 use matchy::{Database, QueryResult};
 
-// Open the database (memory-mapped, loads in <1ms)
+// Open the database (memory-mapped; avoids whole-file deserialization)
 let db = Database::from("threats.mxy").open()?;
 
 // Query IP address
@@ -136,10 +136,10 @@ Matchy automatically detects entry types:
 
 ## Performance Tips
 
-1. **Build once, query many** - Building is one-time, queries are microseconds
-2. **Use CIDR ranges** - More efficient than individual IPs
-3. **Prefer suffix patterns** - `*.evil.com` is faster than `evil-*`
-4. **Exact strings are fastest** - O(1) hash lookup
+1. **Build once, query many** - Reuse the serialized index and an open handle
+2. **Use CIDR ranges when they express the rule** - They can reduce redundant entries
+3. **Prefer selective literal anchors** - Broad globs create more candidates
+4. **Use exact strings for exact rules** - They use average-case O(1) hash probing
 
 ## Next Steps
 

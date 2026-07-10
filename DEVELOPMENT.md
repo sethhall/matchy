@@ -4,15 +4,15 @@ This document covers architecture, implementation details, and performance chara
 
 ## What Matchy Does
 
-Matchy is a unified database for IP address and pattern matching. Single file format, single query API. You build a database with IPs (including CIDRs), exact strings, and glob patterns, then query it with anything—IP addresses, domain names, file paths, whatever. The system figures out what you're looking for and returns results in microseconds.
+Matchy is a unified database for IP address and pattern matching. Single file format, single query API. You build a database with IPs (including CIDRs), exact strings, and glob patterns, then query it with anything—IP addresses, domain names, file paths, whatever. The system detects the query type and routes it to the appropriate index.
 
 Key capabilities:
-- **IP lookups**: Binary trie, sub-microsecond queries
+- **IP lookups**: Binary trie with at most 32 IPv4 or 128 IPv6 tree steps
 - **Exact string matching**: Hash table, O(1) lookups
 - **Glob pattern matching**: Aho-Corasick + glob engine, performance varies by pattern complexity
-- **Zero-copy mmap**: Database loads in ~1ms regardless of size, shared across processes
+- **Memory-mapped opening**: Avoids whole-file deserialization and allows read-only pages to be shared across processes; observed startup time depends on storage, page-cache state, platform, extensions, and whether legacy section scanning is needed
 - **Rich metadata**: JSON-like structured data attached to each entry
-- **MMDB compatibility**: Extended MaxMind format, works with existing tooling
+- **MMDB compatibility**: Extended MaxMind format with a documented subset of standard MMDB types and APIs
 
 ## Architecture Overview
 
@@ -58,7 +58,7 @@ When you call `db.lookup("something")`:
    - For each AC match, verify with glob engine
    - Return all matching globs
 
-4. **Cache**: Results cached in LRU (optional, enabled via `DatabaseOpener::cache_capacity()`)
+4. **Cache**: Optional per-thread LRU, constrained by both entry count and a 64 MiB estimated retained-heap budget
 
 ### Workspace Structure
 
@@ -166,7 +166,9 @@ matchy (main crate)
 
 ### Data Structure Design
 
-**Offset-based, not pointer-based**: Everything uses file offsets (u32/u64) instead of pointers. This is critical for mmap:
+**Offset-based, not pointer-based**: Serialized references use integer offsets
+(`u32`/`u64`) instead of process pointers. Each field has a documented base;
+this is critical for mmap:
 
 ```rust
 // ❌ Won't work with mmap (pointers invalid after load)
@@ -181,9 +183,16 @@ struct Node {
 }
 ```
 
-At query time, we add the offset to the base address of the mapped region. Validated at load time to prevent out-of-bounds access.
+Each offset has a documented base (for example, the file, the MMDB data
+section, the PARAGLOB buffer, or the AC buffer). Opening validates the fixed
+set of top-level section envelopes and component topology. Nested records are
+bounds-checked before access; strict validation performs deeper exhaustive
+checks over referenced records.
 
-**Why `#[repr(C)]`**: Guarantees stable field layout across Rust versions and platforms. Required for binary format compatibility.
+**Why `#[repr(C)]`**: Gives the supported little-endian targets a predictable
+field order and padding for serialized extension structs. Fixed-width fields,
+explicit format versions, and checked decoding are still required for binary
+compatibility; `#[repr(C)]` alone is not a cross-platform wire-format guarantee.
 
 ## Performance Characteristics
 
@@ -193,18 +202,20 @@ Performance varies significantly based on query type, database size, and glob pa
 
 **Algorithm**: Binary trie traversal, depth = address bit length (max 128 bits for IPv6).
 
-**Scaling**: Near-constant time regardless of database size. Adding 10× more IPs has minimal impact on query latency.
+**Scaling**: Tree depth is bounded by address width rather than entry count.
+Database size can still affect cache locality and page-fault behavior.
 
-**Database size**: Compact. ~6 bytes per IP for just the tree structure, plus data storage.
+**Database size**: Depends on prefix sharing, selected 24/28/32-bit record width,
+and associated data.
 
-**Build time**: Fast and scales linearly. Databases with 100K+ IPs build in milliseconds.
+**Build time**: Depends on entry distribution, metadata encoding, record-width selection, and hardware; benchmark representative inputs.
 
 **Notes**:
 - IPv4-only databases use 32-bit address space for efficiency
-- IPv6 databases use 128-bit address space (can include IPv4-mapped addresses)
+- IPv6 databases use a 128-bit tree and can place IPv4 entries beneath the conventional 96-bit IPv4 subtree
 - Tree depth auto-selected based on addresses present in database
 - CIDR ranges supported via prefix matching
-- Load time ~1ms via mmap regardless of DB size
+- Opening uses mmap and bounded structural parsing for current files; actual latency depends on storage, cache state, platform, extensions, and legacy fallback scanning
 
 ### Exact String Matching
 
@@ -249,29 +260,34 @@ Performance varies **dramatically** based on glob complexity. Not all globs are 
    - Performance depends on literal uniqueness
 
 4. **Complex patterns** (`*[0-9][0-9]*.evil.*`)
-   - Slow: Multiple wildcards trigger extensive backtracking
-   - Performance degrades severely with scale (10-100× slower than suffix)
-   - Each AC match requires expensive glob verification
+   - Multiple wildcards and character classes require more verification work
+   - Performance depends on candidate selectivity, text length, and pattern shape
+   - Bounded query APIs cap aggregate candidate and verification work
 
 **Why the huge difference?** 
 
 Suffix pattern `*.evil.com`: The literal "evil.com" uniquely identifies the glob. After AC matches, one suffix check and we're done. Simple, fast, scales.
 
-Complex pattern `*[0-9][0-9]*.evil.*`: Might extract 10+ literals. Each AC match triggers recursive backtracking through the glob engine. At high scale, you're doing thousands of expensive glob matches per query.
+Complex pattern `*[0-9][0-9]*.evil.*`: Candidate discovery can emit patterns that still require character-class and wildcard verification. The matcher is iterative and stack-safe, but a broad literal can make many candidates expensive.
 
-**Recommendation**: Keep globs simple. If you have `*[0-9][0-9].evil.com`, consider exploding it to 100 concrete globs (`*00.evil.com` through `*99.evil.com`). Build time increases slightly, query time drops 10-100×.
+**Recommendation**: Prefer selective literal anchors and simple globs where they express the same rule. Benchmark before expanding one rule into many concrete patterns: expansion trades verification complexity for a larger index and candidate set.
 
 ### Build & Load Times
 
-**Build**: Fast and scales linearly with entry count. Databases with 100K entries typically build in tens of milliseconds. Complex globs take longer to build than simple globs due to literal extraction overhead.
+**Build**: Work generally grows with entries and serialized metadata. Complex globs add parsing, literal extraction, and automaton construction; measure current code on the target feed.
 
-**Load**: Memory-mapped via single `mmap()` syscall, typically <1ms regardless of database size. No deserialization, no copies. OS pages in data on-demand.
+**Load**: The main database bytes are memory-mapped, so opening avoids
+whole-file deserialization and the OS pages data in on demand. Matchy still
+performs bounded structural parsing and retains small component metadata; the
+observed latency depends on storage, page-cache state, platform, extensions,
+and whether a legacy marker scan is required.
 
 **Memory efficiency in multi-process setups**:
 
-Traditional approach (heap deserialization): Each process loads its own copy. 50 workers × 100 MB database = 5,000 MB RAM.
-
-Matchy approach (mmap): OS shares physical pages across processes. 50 workers reading same file = 100 MB RAM total. **98% savings**.
+Unlike whole-file heap deserialization, clean file-backed pages can be shared
+across processes. Actual RSS/PSS also includes touched pages, page tables,
+validated runtime views, scratch buffers, and optional query caches; measure the
+production access pattern rather than multiplying only the file size.
 
 ## Implementation Details
 
@@ -284,7 +300,10 @@ Supports standard glob syntax:
 - `[!abc]` or `[^abc]` - negated character class
 - `[a-z]` - range syntax
 
-**Implementation** (`matchy-paraglob/src/glob.rs`): Recursive backtracking matcher with step limit to prevent pathological cases. Fast for simple globs where wildcards have few choices. Slow for complex globs with multiple wildcards that generate many backtracking paths. This is why suffix/prefix globs outperform complex globs by 100×+.
+**Implementation** (`matchy-paraglob/src/paraglob_offset.rs`): Iterative,
+stack-safe matching keeps the most recent `*` backtracking point. Public bounded
+methods share an aggregate work budget across automaton traversal, candidate
+mapping, sorting, and verification; compatibility methods remain unbounded.
 
 ### Aho-Corasick Automaton
 
@@ -299,13 +318,13 @@ Classic AC implementation with failure links (`matchy-ac/src/lib.rs`):
 
 The data section deduplicates identical metadata across entries (`matchy-data-format/`). If 1000 IPs all have `{"threat_level": "high"}`, we store it once and reference it 1000 times. Implemented via content-addressed storage (hash the data, check for existing entry).
 
-Typical compression: 50-80% for threat feeds with similar metadata.
+Deduplication benefit depends on how often complete encoded values repeat in the feed.
 
 ### FFI Design
 
 Two C APIs provided (`matchy/src/c_api/`):
 1. **Native API** (`matchy_*` functions) - Full Matchy functionality
-2. **MaxMind-compatible API** (`MMDB_*` functions) - Drop-in replacement for libmaxminddb
+2. **MaxMind-compatible API** (`MMDB_*` functions) - Source-level compatibility subset for commonly used libmaxminddb operations; see the documented limitations
 
 Both use opaque handles and C-compatible return values. String inputs are
 null-terminated `const char*` unless a function explicitly takes a byte length.
@@ -324,7 +343,9 @@ The `matchy-extractor` crate finds structured data in unstructured text: IPs, do
 - **File hashes**: MD5, SHA1, SHA256, SHA384, SHA512 (hex, length-based detection)
 - **Crypto addresses**: Bitcoin (Base58Check + Bech32), Ethereum (EIP-55), Monero (Keccak256)
 
-**Performance**: ~450 MB/s single-threaded. Uses SIMD via `memchr` for anchor detection (dots, @, 0x prefix). Expands boundaries, validates checksums where applicable.
+**Performance**: Uses `memchr`-style anchor detection (dots, `@`, `0x`
+prefix), then expands boundaries and validates checksums where applicable.
+Measure throughput with representative input and enabled extractor types.
 
 **Usage**:
 ```rust
@@ -370,13 +391,13 @@ for batch in reader.batches() {
 For untrusted databases, use validation before loading. Validation logic is distributed across crates, with each crate validating its own structures.
 
 **Two levels**:
-1. **Standard**: All offsets, UTF-8, and structure integrity
-2. **Strict**: Standard checks plus deeper graph analysis, cycle detection, and efficiency warnings
+1. **Standard**: Runtime-equivalent header and section-envelope checks, plus sampled decoding of reachable MMDB data (up to 20 tree nodes)
+2. **Strict**: Exhaustive MMDB tree-record and reachable-data checks, plus deep graph and component consistency analysis
 
 **What's checked**:
 - Binary format integrity
-- Offset bounds (prevent out-of-bounds reads)
-- UTF-8 validity of all strings
+- Top-level section bounds in both levels; referenced nested offsets are checked before access
+- UTF-8 validity in sampled reachable values for Standard and exhaustive reachable values for Strict
 - AC automaton structure (no cycles in failure links)
 - Data section consistency
 
@@ -407,7 +428,9 @@ Current performance is good for most use cases. If you need more:
 
 ### 1. Glob-Specific Data Structures
 
-**Problem**: All globs go through AC + glob verification, even simple ones.
+**Problem**: AC candidate discovery is shared, while some pattern shapes still
+pay serialized verification costs after selection. Current fixed-window fast
+paths already specialize common prefix, suffix, and contains shapes.
 
 **Solution**: Detect glob types at build time, route to specialized structures:
 - **Suffix globs** (`*.evil.com`) → reverse suffix trie
@@ -415,7 +438,8 @@ Current performance is good for most use cases. If you need more:
 - **Exact strings** already use hash table (fast)
 - **Complex globs** → keep using AC + glob engine (no better alternative)
 
-**Impact**: Potentially 2-3× speedup for workloads dominated by suffix/prefix globs.
+**Impact**: Unknown until prototyped and measured on representative pattern
+sets. Any new serialized sections require an explicit compatibility decision.
 
 **Effort**: Medium. Would require new binary format sections.
 
@@ -423,17 +447,19 @@ Current performance is good for most use cases. If you need more:
 
 **Already implemented**: `DatabaseOpener::cache_capacity(n)` enables LRU cache.
 
-**Impact**: 2-10× speedup for high-traffic scenarios with query repetition (web servers, DNS filtering).
-
-**No code changes needed** - just use the API.
+**Impact**: Workload-dependent. Cache hits avoid matcher traversal and decoding,
+but owned results can still be cloned. Measure hit rate, throughput, and memory;
+disable caching for mostly unique queries.
 
 ### 3. Glob Simplification
 
-**Problem**: Complex globs (`*[0-9][0-9].evil.com`) are slow due to recursive backtracking in glob engine.
+**Problem**: Complex globs (`*[0-9][0-9].evil.com`) can require more candidate
+verification and bounded backtracking than simple fixed-window patterns.
 
 **Solution**: Explode to concrete globs (`*00.evil.com`, `*01.evil.com`, ..., `*99.evil.com`).
 
-**Impact**: Build time increases slightly, query time can drop 10-100×.
+**Impact**: Expansion increases pattern count and database size, sometimes
+substantially. Benchmark both build and query costs before adopting it.
 
 **When to do this**: If you have complex globs and query performance matters more than build time.
 

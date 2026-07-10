@@ -1,4 +1,4 @@
-# Performance
+# Archived Performance Results
 
 <style>
 table {
@@ -10,7 +10,12 @@ table {
 > **Generated for version 0.5.2**  
 > **Last updated:** 2025-10-12
 
-Matchy is designed for high-performance lookups with minimal memory overhead.
+> These measurements predate the current v2 workspace and version 3 literal
+> hash format. They are retained as historical context only, not as current
+> claims or regression thresholds.
+
+Current results must be generated from the target revision and workload using
+the commands shown below.
 
 ## Benchmark Results
 
@@ -100,49 +105,48 @@ matchy bench combined -n 20000 --query-count 50000 --hit-rate 1 --pattern-style 
 ```
 </details>
 
-## Performance Characteristics
+## Historical Implementation Characteristics
 
 ### IP Address Lookups
 
 - **Binary trie traversal**: O(32) for IPv4, O(128) for IPv6
-- **Memory-mapped**: Zero-copy access to compressed data
+- **Memory-mapped**: Direct access to offset-based index data
 - **Cache-friendly**: Sequential memory access pattern
 
 ### String Literal Matching
 
 - **Hash table lookup**: O(1) average case
-- **FxHash**: Fast non-cryptographic hashing optimized for small keys
-- **Zero allocations**: Direct memory-mapped buffer access
+- **Historical hash implementation**: These v0.5.2 numbers predate the current sharded 96-bit XXH3 table
+- **Do not transplant results**: Current literal performance requires a new run
 
 ### Pattern Matching
 
-- **Aho-Corasick**: O(n + m) where n = text length, m = total pattern length
-- **Parallel matching**: All patterns checked simultaneously
+- **Aho-Corasick candidate discovery**: Scans the query once and emits literal hits
+- **Selective verification**: Only candidate globs and pure-wildcard patterns are verified
 - **Glob support**: Wildcards (`*`, `?`) and character classes (`[a-z]`)
 
 ## Memory Usage
 
 Matchy uses memory-mapped files for zero-copy access:
 
-- **No parsing overhead**: Direct binary format access
+- **Bounded startup parsing**: Direct binary access without whole-file deserialization
 - **Shared pages**: Multiple processes share read-only memory
 - **Lazy loading**: OS pages in data on demand
-- **Minimal heap**: ~200 bytes overhead per database handle
+- **Owned runtime state**: Section metadata, validated index views, and optional query caches use heap memory
 
 ### Example: 1GB Database
 
-With 10 processes using the same database:
-
-- **Traditional approach**: 10 × 1GB = 10GB RAM
-- **Matchy (mmap)**: ~1GB RAM (shared pages)
+Processes mapping the same file can share clean read-only pages. Actual
+resident memory depends on which pages each process touches and also includes
+private metadata, page tables, and query caches. Use RSS/PSS measurements under
+the production access pattern rather than multiplying only the file size.
 
 ## Hot Reload
 
-Database reloads are fast (<1ms) due to:
+Database reloads avoid whole-file deserialization through:
 
 - Memory-mapped file reopening
-- No parsing or deserialization
+- Bounded structural parsing rather than rebuilding every serialized structure
 - Immediate availability after atomic file rename
 
 This enables live updates without service restarts or query interruptions.
-

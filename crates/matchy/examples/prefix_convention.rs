@@ -3,7 +3,7 @@
 //! This example shows how to use `literal:`, `glob:`, and `ip:` prefixes to
 //! override auto-detection and explicitly control how entries are classified.
 
-use matchy::{DataValue, Database, DatabaseBuilder, MatchMode};
+use matchy::{DataValue, Database, DatabaseBuilder, MatchMode, QueryResult};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -106,7 +106,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // This won't match because "*.actually-in-domain.com" is stored as literal
-    if db.lookup("subdomain.actually-in-domain.com")?.is_none() {
+    if matches!(
+        db.lookup("subdomain.actually-in-domain.com")?,
+        None | Some(QueryResult::NotFound)
+    ) {
         println!("   ✗ No match for 'subdomain.actually-in-domain.com'");
         println!("     (*.actually-in-domain.com is stored as literal, not glob)");
     }

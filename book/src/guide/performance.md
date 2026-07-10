@@ -8,67 +8,44 @@ Different entry types have different performance characteristics:
 
 ### IP Address Lookups
 
-**Speed**: ~7 million queries/second
 **Algorithm**: Binary tree traversal
 **Complexity**: O(32) for IPv4, O(128) for IPv6 (address bit length)
-
-```console
-$ matchy bench ip
-IP address lookups:  7,234,891 queries/sec (138ns avg)
-```
 
 IP lookups traverse a binary trie, checking one bit at a time. The depth is fixed
 at 32 bits (IPv4) or 128 bits (IPv6), making performance predictable.
 
 ### Exact String Lookups
 
-**Speed**: ~8 million queries/second  
 **Algorithm**: Hash table lookup
-**Complexity**: O(1) constant time
-
-```console
-$ matchy bench literal
-Exact string lookups: 8,932,441 queries/sec (112ns avg)
-```
+**Complexity**: O(1) average case
 
 Exact strings use hash table lookups, making them the fastest entry type.
 
 ### Pattern Matching
 
-**Speed**: ~1-2 million queries/second (with thousands of patterns)
-**Algorithm**: Aho-Corasick automaton
-**Complexity**: O(n + m) where n = query length, m = number of matches
-
-```console
-$ matchy bench pattern
-Pattern lookups: 2,156,892 queries/sec (463ns avg)
-  (50,000 patterns in database)
-```
+**Algorithm**: Aho-Corasick candidate discovery plus glob verification
+**Complexity**: Candidate discovery is linear in the input plus matches;
+verification depends on the selected patterns and their wildcard structure
 
 Pattern matching searches all patterns simultaneously. Performance depends on:
 - Number of patterns
 - Pattern complexity
 - Query string length
 
-With thousands of patterns, expect 1-2 microseconds per query.
+Use `matchy bench` with the production pattern distribution, query lengths, and
+hit rate. Historical per-query figures are not current guarantees.
 
 ## Loading Performance
 
 ### Memory Mapping
 
-Databases load via memory mapping, which is nearly instantaneous:
+File-backed databases open via memory mapping:
 
-```console
-$ time matchy query large-database.mxy 1.2.3.4
-real    0m0.003s  # 3 milliseconds total (includes query)
-```
-
-Loading time is independent of database size:
-- 1MB database: <1ms
-- 100MB database: <1ms
-- 1GB database: <1ms
-
-The operating system maps the file into virtual memory without reading it entirely.
+The operating system maps the file into virtual memory without reading it
+entirely. Current-format files require only bounded structural parsing in
+addition to the mapping; legacy extension discovery can require a bounded
+marker scan. Measure opening with the page-cache state and storage medium that
+match production, because those conditions materially affect the result.
 
 ### Traditional Loading (for comparison)
 
@@ -164,7 +141,8 @@ builder.add_entry("exact-domain.com", data)?;
 builder.add_entry("exact-domain.*", data)?;
 ```
 
-Exact strings are 4-8x faster than pattern matching.
+Exact strings avoid AC candidate discovery and glob verification, but the
+measured difference depends on pattern shape, hit rate, and result decoding.
 
 ### Pattern Efficiency
 
@@ -249,30 +227,17 @@ For a specific database, time representative `matchy query` calls or run
 
 ### By Database Size
 
-```
-Entries       DB Size     IP Query    Pattern Query
-──────────    ────────    ────────    ─────────────
-1,000         ~50KB       ~10M/s      ~5M/s
-10,000        ~500KB      ~8M/s       ~3M/s
-100,000       ~5MB        ~7M/s       ~2M/s
-1,000,000     ~50MB       ~6M/s       ~1M/s
-```
-
-Performance degrades gracefully as databases grow.
+Larger trees and tables increase the working set and can change cache behavior.
+File size also depends heavily on value size, prefix sharing, and pattern shape,
+so entry count alone does not predict throughput or storage. Benchmark several
+representative sizes and report the resulting database bytes.
 
 ### By Pattern Count
 
-```
-Patterns      Pattern Query Time
-────────      ──────────────────
-100           ~200ns
-1,000         ~300ns
-10,000        ~500ns
-50,000        ~1-2μs
-100,000       ~3-5μs
-```
-
-Aho-Corasick scales well, but very large pattern counts impact performance.
+Aho-Corasick candidate discovery is affected by automaton size and query text;
+glob verification additionally depends on anchors, wildcard structure, and hit
+rate. Pattern count alone is not a latency model. Test the actual pattern-style
+distribution with multiple query lengths and hit rates.
 
 ## Production Considerations
 
@@ -316,7 +281,7 @@ Existing processes keep reading the old file until they reopen.
 For zero-downtime updates with automatic reloading:
 
 ```rust
-// Rust API - automatic reload with ~1-2ns overhead per query
+// Rust API - automatic reload with an atomic generation check
 let db = Database::from("threats.mxy")
     .watch()  // Enable automatic reloading
     .open()?;
@@ -339,11 +304,11 @@ let result = db.lookup("192.168.1.1")?;
 ```
 
 **Performance characteristics:**
-- Per-query overhead: ~1-2ns (atomic generation counter check)
-- Zero locks on query path after thread-local Arc is cached
+- Per-query snapshot selection uses an atomic generation check and thread-local Arc
+- No global mutex is taken on the steady-state query path
 - Old database stays alive until all threads finish with it
 - 200ms debounce prevents rapid reload cycles
-- Scales to 160+ cores without contention
+- Measure reload-enabled versus static lookup on the target workload
 
 **C API:**
 
@@ -382,9 +347,9 @@ int main() {
 1. File watcher monitors database file using OS notifications
 2. On file change, new database is loaded in background thread
 3. New database is atomically swapped using lock-free Arc pointer
-4. Each query thread checks generation counter (~1ns atomic load)
+4. Each query thread checks a generation counter
 5. If changed, thread updates its local Arc cache and clears query cache
-6. All subsequent queries use thread-local Arc (zero overhead!)
+6. Subsequent queries reuse the thread-local `Arc`; generation and cache checks still have a cost
 
 **When to use:**
 - Production systems requiring zero downtime

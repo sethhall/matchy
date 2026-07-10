@@ -70,25 +70,26 @@ When auto-reload is enabled:
 
 ## Performance
 
-Auto-reload has minimal overhead:
+Auto-reload uses a generation check and thread-local snapshot cache:
 
-- **Per-query cost**: ~1-2 nanoseconds (atomic generation counter check)
-- **After first check**: Zero overhead (thread-local Arc caching)
-- **No locks**: Pure lock-free atomic operations
-- **Scalability**: No contention even with 160+ cores
+- **Per-query path**: Atomic generation check plus thread-local snapshot access
+- **After a reload**: The first query on each thread refreshes its snapshot
+- **Synchronization**: Query-side selection uses atomics rather than a global mutex
+- **Measurement**: Include reload-enabled and static runs on the target workload
 
 ### Performance Breakdown
 
 ```rust
-// First query after reload (~1-2ns overhead)
+// First query after reload refreshes generation-dependent state
 let result = db.lookup("192.168.1.1")?;  // Check generation + cache Arc
 
-// Subsequent queries (zero overhead)
+// Subsequent queries reuse thread-local state but still perform normal checks
 let result = db.lookup("192.168.1.2")?;  // Pure thread-local access
 let result = db.lookup("192.168.1.3")?;  // Pure thread-local access
 ```
 
-The generation check is a single atomic load operation, comparable to checking a boolean flag.
+The generation check uses an atomic load. Measure its effect as part of the full
+query path on the target workload rather than assigning a fixed nanosecond cost.
 
 ## Reload Callbacks
 
@@ -194,7 +195,9 @@ let db = Database::from("/data/threats.mxy")
 
 // Queries automatically use latest threat data
 for log_entry in log_stream {
-    if let Some(threat) = db.lookup(&log_entry.ip)? {
+    if let Some(threat @ (QueryResult::Ip { .. } | QueryResult::Pattern { .. })) =
+        db.lookup(&log_entry.ip)?
+    {
         alert_security_team(log_entry, threat);
     }
 }
@@ -358,18 +361,18 @@ println!("Database has been reloaded {} times", reloads);
 
 ### Debouncing
 
-File changes are debounced for 200ms to avoid rapid reload cycles. If your build process writes the file in multiple stages, only the final change triggers reload.
+File changes are debounced for 200ms to avoid rapid reload cycles. Debouncing
+does **not** make in-place multi-stage writes safe for an existing memory map.
+Write a complete new database to a temporary file, `fsync` as required by your
+durability policy, and atomically replace the watched path. Never truncate or
+rewrite the mapped inode in place.
 
 ### Memory Usage
 
-During reload, both old and new databases are in memory briefly:
-
-```
-Normal:  1x database size
-Reload:  2x database size (temporary)
-```
-
-Old database is freed once all query threads release their references (typically <1 second).
+During reload, old and new mappings can coexist until query threads release the
+old snapshot. Peak resident memory depends on the pages touched in each mapping,
+private runtime state, and how long callers retain snapshots; it is not a fixed
+multiple of file size.
 
 ## Troubleshooting
 
@@ -419,10 +422,9 @@ for i in 0..1_000_000 {
 println!("Time: {:?}", start.elapsed());
 ```
 
-Expected: <1-2ns per query overhead. If higher, check for:
-- Very high query rate (>100M QPS per thread)
-- NUMA architecture with poor cache affinity
-- Excessive reloads (reduce update frequency)
+Compare this result with a static database under the same CPU affinity, cache
+state, query mix, and reload frequency. Investigate snapshot refreshes, NUMA
+placement, and excessive update frequency when the measured difference matters.
 
 ## Next Steps
 

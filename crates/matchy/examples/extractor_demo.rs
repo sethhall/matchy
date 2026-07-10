@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Performance characteristics
     println!("=== Performance Characteristics ===");
-    println!("✓ SIMD-accelerated using memchr (2-3 GB/sec on typical logs)");
+    println!("✓ Byte-oriented scanning; throughput depends on input and hardware");
     println!("✓ Zero-copy extraction (no string allocation until match)");
     println!("✓ Unicode-aware (validates UTF-8 only for matched patterns)");
     println!("✓ Binary log support (extracts ASCII from non-UTF-8 data)");

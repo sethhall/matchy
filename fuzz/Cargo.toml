@@ -11,7 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 
 [dependencies.matchy]
-path = ".."
+path = "../crates/matchy"
 
 [[bin]]
 name = "fuzz_target_1"

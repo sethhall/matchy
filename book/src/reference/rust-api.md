@@ -67,21 +67,22 @@ matchy
 ├── MatchMode         // Case sensitivity enum
 ├── DataValue         // Data type enum
 ├── QueryResult       // Query result enum
-└── MatchyError       // Error type
+├── FormatError       // Builder/serialization errors
+└── DatabaseError     // Opening/query errors
 ```
 
 ## Error Handling
 
-Builder operations return `Result<T, MatchyError>`, while database opening and
+The re-exported builder returns `Result<T, FormatError>`, while database opening and
 querying return `Result<T, DatabaseError>`:
 
 ```rust
-use matchy::{Database, DatabaseError, MatchyError};
+use matchy::{Database, DatabaseError, FormatError};
 
 match builder.build() {
     Ok(db_bytes) => { /* success */ }
-    Err(MatchyError::Io(e)) => { /* I/O error */ }
-    Err(MatchyError::Format(e)) => { /* builder or format error */ }
+    Err(FormatError::IoError(msg)) => { /* I/O error */ }
+    Err(FormatError::InvalidPattern(msg)) => { /* invalid pattern */ }
     Err(e) => { /* other error */ }
 }
 
@@ -94,11 +95,13 @@ match Database::from("database.mxy").open() {
 ```
 
 Common error types:
-- `MatchyError::Io` - File I/O failures from builder workflows
-- `MatchyError::Format` - Format or entry validation failures during build
-- `MatchyError::Paraglob` - Pattern compilation failures
+- `FormatError::IoError` - File I/O failures from builder workflows
+- `FormatError::InvalidPattern` / `PatternError` - Pattern build failures
+- `FormatError::ValidationError` - Entry or schema validation failures
 - `DatabaseError::Io` - File or mmap failures while opening
-- `DatabaseError::Format` - Corrupt or unsupported database data while opening or querying
+- `DatabaseError::Format` - Corrupt database data while opening or querying
+- `DatabaseError::Unsupported` - Unsupported operation or format feature
+- `DatabaseError::Config` - Configuration or runtime resource-policy limit
 
 ## Type Conversion
 
@@ -122,7 +125,8 @@ println!("{}", serde_json::to_string_pretty(&json)?);
 ## Thread Safety
 
 - `Database` is `Send + Sync` - safe to share across threads
-- `DatabaseBuilder` is `!Send + !Sync` - use one per thread
+- `DatabaseBuilder` is mutable; do not mutate one builder concurrently without
+  external synchronization
 - Query operations are thread-safe and lock-free
 
 ```rust
@@ -139,18 +143,18 @@ std::thread::spawn(move || {
 
 ## Memory Mapping
 
-Databases use memory mapping (`mmap`) for instant loading:
+File-backed databases use memory mapping (`mmap`) to avoid whole-file deserialization:
 
 ```rust
-// Opens instantly regardless of database size
+// Memory-mapped: avoids whole-file deserialization
 let db = Database::from("large-database.mxy").open()?;
 // Database is memory-mapped, not loaded into heap
 ```
 
 Benefits:
-- Sub-millisecond loading
+- No up-front whole-file deserialization
 - Shared pages across processes
-- Work with databases larger than RAM
+- The operating system can page untouched regions on demand
 
 ## Detailed Documentation
 

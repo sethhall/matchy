@@ -40,8 +40,9 @@ Flexible matching: `malware-*`, `*-[0-9][0-9][0-9]`
 
 ## Performance
 
-Patterns use Aho-Corasick algorithm - all patterns searched simultaneously.
-Typical: 1-2 microseconds for 50,000 patterns.
+Patterns use Aho-Corasick for candidate discovery, followed by glob verification.
+Latency depends on text length, literal selectivity, pure-wildcard count, pattern
+shape, match count, and hardware; benchmark the current revision and feed.
 
 See [Entry Types](entry-types.md) and [Performance Considerations](performance.md) for more details.
 

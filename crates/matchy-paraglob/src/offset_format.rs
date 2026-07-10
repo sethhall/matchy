@@ -6,14 +6,18 @@
 //!
 //! # Format Overview
 //!
-//! The format consists of C-compatible packed structs that can be cast directly
-//! from bytes. All references use byte offsets from the start of the buffer.
+//! The format consists of fixed-width `#[repr(C)]` records read from checked byte
+//! ranges. Records are not `#[repr(packed)]`, and readers must not create
+//! unaligned references by casting arbitrary bytes. Most header and pattern
+//! offsets are relative to the PARAGLOB buffer; AC-local references are relative
+//! to the serialized AC buffer, and [`PatternDataMapping::data_offset`] is
+//! relative to the inline data section.
 //!
 //! # Layout
 //!
 //! ```text
 //! [Header: ParaglobHeader (v5: 112 bytes)]
-//! [AC Nodes: ACNode array]
+//! [AC Nodes: ACNodeHot array]
 //! [AC Edges: ACEdge arrays (variable, referenced by nodes)]
 //! [AC Pattern IDs: u32 arrays (variable, referenced by nodes)]
 //! [Pattern Entries: PatternEntry array]
@@ -29,10 +33,10 @@
 //!
 //! # Design Principles
 //!
-//! 1. **Alignment**: All structs are properly aligned for direct casting
-//! 2. **Offsets**: All references use u32 byte offsets (4GB limit)
-//! 3. **Zero-copy**: Can read directly from mmap without parsing
-//! 4. **Portability**: Little-endian u32/u8 only (standard on x86/ARM)
+//! 1. **Alignment**: Typed tables begin at their documented alignment
+//! 2. **Offsets**: Serialized references use documented `u32` offset bases (4GB limit)
+//! 3. **Zero-copy**: Checked views can read serialized data directly from an mmap
+//! 4. **Portability**: The format is little-endian; current readers do not byte-swap
 
 use std::mem;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -124,10 +128,10 @@ pub struct ParaglobHeader {
     /// Total size of the entire serialized buffer (bytes)
     pub total_buffer_size: u32,
 
-    /// Endianness marker: 0x01=little-endian, 0x02=big-endian, 0x00=legacy (assume little-endian)
-    /// Database is always stored in little-endian format.
-    /// This field indicates the endianness of the system that created the file.
-    /// On big-endian systems, all multi-byte values are byte-swapped on read.
+    /// Endianness marker: 0x01=little-endian, 0x00=legacy little-endian.
+    ///
+    /// The format stores multi-byte values in little-endian order. `0x02` is
+    /// reserved; current readers do not implement big-endian byte swapping.
     pub endianness: u8,
 
     /// Reserved for future use
@@ -142,7 +146,8 @@ pub struct ParaglobHeader {
     pub data_section_size: u32,
 
     /// Offset to pattern→data mapping table (0 = no mappings)
-    /// Each mapping is a PatternDataMapping struct
+    /// Each mapping is a [`PatternDataMapping`] whose data offset is relative
+    /// to the start of the data section.
     pub mapping_table_offset: u32,
 
     /// Number of pattern→data mappings
@@ -150,7 +155,7 @@ pub struct ParaglobHeader {
     pub mapping_count: u32,
 
     /// Data type flags:
-    /// - Bit 0: inline data (1) vs external references (0)
+    /// - Bit 0: inline data (1); the external-reference value (0) is reserved
     /// - Bit 1-31: reserved
     pub data_flags: u32,
 
@@ -159,7 +164,7 @@ pub struct ParaglobHeader {
 
     // ===== v3 ADDITIONS (8 bytes) =====
     /// Offset to AC literal→pattern mapping table (0 = no mapping, requires reconstruction)
-    /// Points to serialized `HashMap<u32, Vec<u32>>` for instant loading
+    /// Points to a serialized `HashMap<u32, Vec<u32>>` representation for direct loading
     /// Format: `[entry_count: u32]` followed by entries of:
     ///   `[literal_id: u32][pattern_count: u32][pattern_id: u32, ...]`
     pub ac_literal_map_offset: u32,
@@ -218,7 +223,7 @@ pub use matchy_ac::ACNodeHot;
 /// AC Automaton node (32 bytes, 8-byte aligned) - DEPRECATED
 ///
 /// Legacy 32-byte node structure. Kept for backward compatibility with old file formats.
-/// New code should use ACNodeHot (16 bytes) for better cache performance.
+/// New code should use ACNodeHot (20 bytes) for better cache performance.
 ///
 /// Represents a single node in the Aho-Corasick trie with state-specific encoding.
 /// All child references are stored as offsets to allow zero-copy loading.
@@ -372,20 +377,18 @@ pub struct SingleWildcard {
 
 /// Pattern-to-data mapping entry (12 bytes, 4-byte aligned)
 ///
-/// Maps a pattern ID to associated data. Used in v2 format.
-/// The data can be inline (stored in data section) or external
-/// (reference to MMDB data section).
+/// Maps a pattern ID to associated inline data. Introduced in v2; current v5
+/// readers do not interpret the reserved external-reference encoding.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct PatternDataMapping {
     /// Pattern ID this mapping applies to
     pub pattern_id: u32,
 
-    /// Offset to data in data section (or external offset)
-    /// Interpretation depends on data_flags in header
+    /// Byte offset relative to the start of the header's data section
     pub data_offset: u32,
 
-    /// Size of data in bytes (0 = use data section's size encoding)
+    /// Encoded data span in bytes, or zero for the legacy self-delimiting encoding
     pub data_size: u32,
 }
 
@@ -495,7 +498,7 @@ impl PatternDataMapping {
 }
 
 impl ParaglobHeader {
-    /// Create a new v3 header with magic and version
+    /// Create a new header using the current v5 magic and version
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -544,68 +547,124 @@ impl ParaglobHeader {
         Ok(())
     }
 
-    /// Validate that all header offsets are within buffer bounds
-    #[allow(dead_code)] // Reserved for validation feature
+    /// Validate that every top-level section fits in the declared buffer.
+    ///
+    /// This is intentionally an O(section-count) envelope check. Query paths
+    /// still validate node- and entry-level offsets before using them.
     pub fn validate_offsets(&self, buffer_len: usize) -> Result<(), &'static str> {
-        // Validate AC literal mapping offset if present
-        if self.has_ac_literal_mapping() {
-            let offset = self.ac_literal_map_offset as usize;
-            if offset >= buffer_len {
-                return Err("AC literal map offset out of bounds");
+        let header_size = mem::size_of::<Self>();
+        let declared_len = usize::try_from(self.total_buffer_size)
+            .map_err(|_| "Declared buffer size is not addressable")?;
+        if declared_len < header_size {
+            return Err("Declared buffer is smaller than the Paraglob header");
+        }
+        if declared_len > buffer_len {
+            return Err("Declared buffer size exceeds available bytes");
+        }
+
+        let section_fits = |start: u32, size: usize| -> bool {
+            if size == 0 {
+                return true;
+            }
+            let Ok(start) = usize::try_from(start) else {
+                return false;
+            };
+            start >= header_size
+                && start
+                    .checked_add(size)
+                    .is_some_and(|end| end <= declared_len)
+        };
+        let array_size = |count: u32, item_size: usize| -> Option<usize> {
+            usize::try_from(count).ok()?.checked_mul(item_size)
+        };
+
+        let ac_size = usize::try_from(self.ac_edges_size)
+            .map_err(|_| "AC automaton size is not addressable")?;
+        if self.ac_node_count == 0 {
+            if ac_size != 0 {
+                return Err("AC automaton has bytes but no nodes");
+            }
+        } else {
+            let nodes_size = array_size(self.ac_node_count, mem::size_of::<ACNodeHot>())
+                .ok_or("AC node array size overflows address space")?;
+            if ac_size < nodes_size {
+                return Err("AC automaton is smaller than its declared node array");
+            }
+            if !section_fits(self.ac_nodes_offset, ac_size) {
+                return Err("AC automaton section out of bounds");
             }
         }
 
-        // Validate data section if present
-        if self.has_data_section() {
-            let start = self.data_section_offset as usize;
-            let size = self.data_section_size as usize;
-            if start.checked_add(size).is_none_or(|end| end > buffer_len) {
-                return Err("Data section out of bounds");
-            }
+        let patterns_size = array_size(self.pattern_count, mem::size_of::<PatternEntry>())
+            .ok_or("Pattern entry array size overflows address space")?;
+        if !section_fits(self.patterns_offset, patterns_size) {
+            return Err("Pattern entries section out of bounds");
         }
 
-        // Validate mapping table if present
-        if self.mapping_count > 0 {
-            let offset = self.mapping_table_offset as usize;
-            if offset >= buffer_len {
-                return Err("Mapping table offset out of bounds");
-            }
+        let pattern_strings_size = usize::try_from(self.pattern_strings_size)
+            .map_err(|_| "Pattern strings size is not addressable")?;
+        if !section_fits(self.pattern_strings_offset, pattern_strings_size) {
+            return Err("Pattern strings section out of bounds");
         }
 
-        // Validate AC nodes section
-        if self.ac_node_count > 0 {
-            let offset = self.ac_nodes_offset as usize;
-            let size = (self.ac_node_count as usize) * mem::size_of::<ACNode>();
-            if offset.checked_add(size).is_none_or(|end| end > buffer_len) {
-                return Err("AC nodes section out of bounds");
-            }
+        let pattern_strings_end = usize::try_from(self.pattern_strings_offset)
+            .ok()
+            .and_then(|start| start.checked_add(pattern_strings_size))
+            .ok_or("Pattern strings range overflows address space")?;
+        let wildcard_start = pattern_strings_end
+            .checked_add(7)
+            .map(|end| end & !7)
+            .ok_or("Wildcard section alignment overflows address space")?;
+        let wildcard_size = array_size(self.wildcard_count, mem::size_of::<SingleWildcard>())
+            .ok_or("Wildcard entry array size overflows address space")?;
+        if wildcard_size > 0
+            && (wildcard_start < header_size
+                || wildcard_start
+                    .checked_add(wildcard_size)
+                    .is_none_or(|end| end > declared_len))
+        {
+            return Err("Wildcard section out of bounds");
         }
 
-        // Validate patterns section
-        if self.pattern_count > 0 {
-            let offset = self.patterns_offset as usize;
-            let size = (self.pattern_count as usize) * mem::size_of::<PatternEntry>();
-            if offset.checked_add(size).is_none_or(|end| end > buffer_len) {
-                return Err("Patterns section out of bounds");
-            }
+        let meta_word_mappings_size = array_size(
+            self.meta_word_mapping_count,
+            mem::size_of::<MetaWordMapping>(),
+        )
+        .ok_or("Meta-word mapping array size overflows address space")?;
+        if !section_fits(self.meta_word_mappings_offset, meta_word_mappings_size) {
+            return Err("Meta-word mappings section out of bounds");
         }
 
-        // Validate pattern strings section
-        if self.pattern_strings_size > 0 {
-            let start = self.pattern_strings_offset as usize;
-            let size = self.pattern_strings_size as usize;
-            if start.checked_add(size).is_none_or(|end| end > buffer_len) {
-                return Err("Pattern strings section out of bounds");
-            }
+        let data_size = usize::try_from(self.data_section_size)
+            .map_err(|_| "Data section size is not addressable")?;
+        if !section_fits(self.data_section_offset, data_size) {
+            return Err("Data section out of bounds");
         }
 
-        // Validate meta-word mappings
-        if self.meta_word_mapping_count > 0 {
-            let offset = self.meta_word_mappings_offset as usize;
-            let size = (self.meta_word_mapping_count as usize) * mem::size_of::<MetaWordMapping>();
-            if offset.checked_add(size).is_none_or(|end| end > buffer_len) {
-                return Err("Meta-word mappings section out of bounds");
-            }
+        let mapping_size = array_size(self.mapping_count, mem::size_of::<PatternDataMapping>())
+            .ok_or("Pattern data mapping array size overflows address space")?;
+        if !section_fits(self.mapping_table_offset, mapping_size) {
+            return Err("Pattern data mapping section out of bounds");
+        }
+
+        if self.has_ac_literal_mapping()
+            && !section_fits(
+                self.ac_literal_map_offset,
+                mem::size_of::<crate::literal_hash::ACLiteralHashHeader>(),
+            )
+        {
+            return Err("AC literal map header out of bounds");
+        }
+
+        let glob_segments_size = usize::try_from(self.glob_segments_size)
+            .map_err(|_| "Glob segments size is not addressable")?;
+        let glob_index_size = array_size(self.pattern_count, mem::size_of::<GlobSegmentIndex>())
+            .ok_or("Glob segment index size overflows address space")?;
+        if glob_segments_size < glob_index_size {
+            return Err("Glob segment section is smaller than its pattern index");
+        }
+        if !section_fits(self.glob_segments_offset, glob_segments_size) {
+            return Err("Glob segments section out of bounds");
         }
 
         Ok(())
@@ -870,6 +929,26 @@ mod tests {
     }
 
     #[test]
+    fn test_wildcard_section_cannot_overlap_header() {
+        let header_size = mem::size_of::<ParaglobHeader>();
+        let wildcard_size = mem::size_of::<SingleWildcard>();
+        let mut header = ParaglobHeader::new();
+        header.total_buffer_size = u32::try_from(header_size + wildcard_size).unwrap();
+        header.wildcard_count = 1;
+
+        // An empty string section used to make the derived wildcard offset zero,
+        // allowing the file header to be interpreted as wildcard records.
+        header.pattern_strings_offset = 0;
+        assert_eq!(
+            header.validate_offsets(header_size + wildcard_size),
+            Err("Wildcard section out of bounds")
+        );
+
+        header.pattern_strings_offset = u32::try_from(header_size).unwrap();
+        assert!(header.validate_offsets(header_size + wildcard_size).is_ok());
+    }
+
+    #[test]
     fn test_v3_features() {
         let mut header = ParaglobHeader::new();
         assert_eq!(header.version, MATCHY_FORMAT_VERSION);
@@ -896,16 +975,12 @@ mod tests {
         let mut buffer = vec![0u8; 112]; // v5 header size
         let header = ParaglobHeader::new();
 
-        // Write header to buffer
-        // SAFETY: buffer is exactly 112 bytes (v5 header size), properly allocated,
-        // and ParaglobHeader is #[repr(C)] with size 112.
-        unsafe {
-            let ptr = buffer.as_mut_ptr().cast::<ParaglobHeader>();
-            ptr.write(header);
-        }
+        // Serialize as bytes because Vec<u8> does not guarantee the alignment
+        // required for writing a ParaglobHeader through a typed pointer.
+        buffer.copy_from_slice(header.as_bytes());
 
         // Read it back
-        // SAFETY: buffer contains valid ParaglobHeader bytes written above, offset 0 is aligned.
+        // SAFETY: `read_struct` performs an unaligned read from a complete header.
         let read_header: ParaglobHeader = unsafe { read_struct(&buffer, 0) };
         assert_eq!(read_header.magic, *MAGIC);
         assert_eq!(read_header.version, MATCHY_FORMAT_VERSION);

@@ -18,6 +18,10 @@ pub fn cmd_validate(
             anyhow::bail!("Invalid validation level: '{level_str}'. Must be: standard or strict");
         }
     };
+    let level_name = match level {
+        ValidationLevel::Standard => "standard",
+        ValidationLevel::Strict => "strict",
+    };
 
     // Validate the database
     let start = Instant::now();
@@ -100,11 +104,14 @@ pub fn cmd_validate(
         // Final verdict
         if report.is_valid() {
             println!("✅ VALIDATION PASSED");
-            println!("   Database is safe to use.");
+            println!("   The bytes read passed {level_name} validation.");
         } else {
             println!("❌ VALIDATION FAILED");
-            println!("   Database has {} critical error(s).", report.errors.len());
-            println!("   DO NOT use this database without fixing the errors.");
+            println!(
+                "   Validation found {} critical error(s) in the bytes read.",
+                report.errors.len()
+            );
+            println!("   Do not load this file until the errors are fixed.");
         }
     }
 

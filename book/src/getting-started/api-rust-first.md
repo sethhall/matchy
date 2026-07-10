@@ -148,9 +148,11 @@ let db = Database::from("threats.mxy").open()?;
 let result = db.lookup("192.0.2.1")?;
 ```
 
-`Database::from(...).open()` memory-maps the file, loading it in under 1ms. The `lookup()` method
-returns an `Option<QueryResult>` that indicates whether a match was found and what type
-of match it was.
+`Database::from(...).open()` memory-maps the file and performs bounded
+structural parsing instead of deserializing the whole database. Opening time
+depends on storage, page-cache state, extensions, and platform. The `lookup()`
+method returns an `Option<QueryResult>` that indicates whether a match was found
+and what type of match it was.
 
 ## Data types
 
@@ -174,12 +176,19 @@ See [Data Types and Values](../guide/data-types.md) for complete details.
 
 ## Error handling
 
-All Matchy operations return `Result<T, MatchyError>`:
+Builder methods return `FormatError`; database opening and queries return
+`DatabaseError`. A query distinguishes a match, a clean miss, and the absence
+of an applicable index:
 
 ```rust
+use matchy::QueryResult;
+
 match db.lookup("192.0.2.1") {
-    Ok(Some(result)) => println!("Found: {:?}", result),
-    Ok(None) => println!("Not found"),
+    Ok(Some(result @ (QueryResult::Ip { .. } | QueryResult::Pattern { .. }))) => {
+        println!("Found: {:?}", result)
+    }
+    Ok(Some(QueryResult::NotFound)) => println!("No matching entry"),
+    Ok(None) => println!("This database has no applicable index"),
     Err(e) => eprintln!("Error: {}", e),
 }
 ```

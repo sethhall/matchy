@@ -4,7 +4,9 @@ Matchy includes a high-performance pattern extractor for finding domains, IP add
 
 ## Overview
 
-The `Extractor` uses SIMD-accelerated algorithms to scan text and extract patterns at 200-500 MB/sec. This is useful for:
+The `Extractor` uses byte-oriented and SIMD-friendly algorithms to scan text.
+Throughput depends on input length, candidate density, enabled extractors, CPU,
+and whether lookup work is included, so benchmark representative logs.
 
 - **Log scanning**: Find domains/IPs in access logs, firewall logs, etc.
 - **Threat detection**: Extract indicators from security logs
@@ -150,7 +152,7 @@ for match_item in extractor.extract_from_line(line) {
 - **SIMD hex validation**: Auto-vectorized lookup table for blazing speed
 - **Case insensitive**: Accepts both lowercase and uppercase hex
 - **Zero false positives**: Rejects UUIDs (with dashes) and non-hex strings
-- **High throughput**: ~1-2 GB/sec processing speed
+- **Throughput-oriented implementation**: byte scanning and candidate validation avoid regex backtracking
 
 **Supported hash types:**
 - **MD5**: 32 hex characters (e.g., `5d41402abc4b2a76b9719d911017c592`)
@@ -239,7 +241,7 @@ This is useful for scanning:
 
 The extractor is highly optimized:
 
-- **Throughput**: 200-500 MB/sec on typical log files
+- **Throughput**: workload- and hardware-dependent; measure extraction separately from database lookup
 - **SIMD acceleration**: Uses `memchr` for byte scanning
 - **Zero-copy**: No string allocation until match
 - **Lazy UTF-8 validation**: Only validates matched patterns
@@ -280,7 +282,7 @@ The extractor is highly optimized:
 After extracting patterns, you typically want to look them up in a database. Use `lookup_extracted()` for a clean, efficient API:
 
 ```rust
-use matchy::{Database, extractor::Extractor};
+use matchy::{Database, QueryResult, extractor::Extractor};
 
 let db = Database::from("threats.mxy").open()?;
 let extractor = Extractor::new()?;
@@ -288,7 +290,9 @@ let extractor = Extractor::new()?;
 let log_line = b"Traffic from 192.168.1.100 to evil.com";
 
 for item in extractor.extract_from_line(log_line) {
-    if let Some(result) = db.lookup_extracted(&item, log_line)? {
+    if let Some(QueryResult::Ip { .. } | QueryResult::Pattern { .. }) =
+        db.lookup_extracted(&item, log_line)?
+    {
         println!("⚠️  Match: {} ({})",
             item.as_str(log_line),
             item.item.type_name()
@@ -337,7 +341,7 @@ cargo run --release --example extractor_demo
 
 ## Summary
 
-- **High performance**: 200-500 MB/sec throughput
+- **Performance-focused**: benchmark with the enabled extractors and representative input
 - **SIMD-accelerated**: Fast pattern finding
 - **Unicode support**: Handles international domains
 - **Binary logs**: Extracts ASCII from non-UTF-8

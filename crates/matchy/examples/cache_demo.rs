@@ -109,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n=== Key Takeaways ===");
-    println!("✓ Caching provides 2-10x speedup at high hit rates (80%+)");
+    println!("✓ Cache benefit is workload-dependent; use the measurements above");
     println!("✓ Zero overhead when disabled (.no_cache())");
     println!("✓ Thread-safe and memory-efficient (LRU eviction)");
     println!("✓ Best for: web APIs, firewalls, real-time threat detection");

@@ -3,7 +3,7 @@
 //! This module provides a modern, clean C API for building and querying databases
 //! containing IP addresses and patterns. This is the primary public API.
 
-use crate::database::{Database, ReloadEvent};
+use crate::database::{Database, DatabaseError, ReloadEvent};
 use crate::schema_validation::SchemaValidator;
 use crate::schemas::{get_schema_info, is_known_database_type};
 use crate::DatabaseBuilder;
@@ -12,6 +12,8 @@ use matchy_data_format::DataValue;
 use matchy_match_mode::MatchMode;
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
+use std::fmt::Write;
+use std::mem;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
@@ -94,7 +96,7 @@ pub struct matchy_t {
     _private: [u8; 0],
 }
 
-/// Query result (zero-allocation)
+/// Query result with offset-only data ownership
 #[repr(C)]
 pub struct matchy_result_t {
     /// Whether a match was found
@@ -103,7 +105,7 @@ pub struct matchy_result_t {
     pub prefix_len: u8,
     /// Result type: 0=not found, 1=ip, 2=pattern
     pub _result_type: u8,
-    /// Data offset into mmap'd data section (use matchy_aget_value to decode)
+    /// Internal format-specific data token (use matchy_aget_value to decode)
     pub _data_offset: u32,
     /// Internal database reference (for decoding)
     pub _db_ref: *const matchy_t,
@@ -133,6 +135,14 @@ struct MatchyInternal {
     database: Database,
     value_cache: Mutex<EntryDataStorage>,
 }
+
+/// Maximum estimated storage retained for C string and byte results on one
+/// database handle. Cached values cannot be evicted because their pointers are
+/// promised to remain valid until the handle is closed.
+const ENTRY_DATA_STORAGE_LIMIT: usize = 64 * 1024 * 1024;
+
+/// A lookup path cannot be deeper than a value accepted by the data decoder.
+const MAX_LOOKUP_PATH_COMPONENTS: usize = matchy_data_format::MAX_TOTAL_DEPTH;
 
 impl MatchyInternal {
     fn new(database: Database) -> Self {
@@ -691,7 +701,9 @@ pub type matchy_reload_callback_t =
 #[repr(C)]
 pub struct matchy_open_options_t {
     /// LRU cache capacity
-    /// 0 = disable cache, >0 = cache this many entries
+    /// 0 = disable cache, >0 = cache at most this many entries.
+    /// Estimated retained result heap is also capped at 64 MiB per thread
+    /// across at most 16 recent database generations.
     /// Default: 10000
     pub cache_capacity: u32,
 
@@ -782,6 +794,9 @@ pub unsafe extern "C" fn matchy_init_open_options(options: *mut matchy_open_opti
 /// Open database with custom options
 ///
 /// Opens a database file with configurable cache size, auto-reload, and auto-update settings.
+/// The mapped inode must remain immutable while the handle is open. For reloads,
+/// write a complete replacement file and atomically rename it over the watched
+/// path; do not rewrite or truncate the existing file in place.
 ///
 /// # Parameters
 /// * `filename` - Path to database file (null-terminated C string, must not be NULL)
@@ -881,6 +896,10 @@ pub unsafe extern "C" fn matchy_open_with_options(
 ///
 /// Opens a database file using memory mapping for optimal performance.
 /// The file is not loaded into memory - it's accessed on-demand.
+///
+/// Keep the mapped file's inode immutable until `matchy_close()`. Publish an
+/// update by writing a complete new file and atomically replacing the path;
+/// never truncate or rewrite the mapped inode in place.
 ///
 /// This validates UTF-8 on pattern string reads. Use for untrusted databases.
 ///
@@ -1077,9 +1096,11 @@ pub unsafe extern "C" fn matchy_close(db: *mut matchy_t) {
 /// Queries the database with an IP address or pattern. The function automatically
 /// detects the query type and uses the appropriate lookup method.
 ///
-/// Returns structured data as DataValue (cached internally).
-/// Use matchy_result_get_entry() to access structured data,
-/// or matchy_result_to_json() to convert to JSON.
+/// Returns an offset/token-only result. Use matchy_result_get_entry() to access
+/// structured data on demand, or matchy_result_to_json() to convert it to JSON.
+/// With auto-reload enabled, this token is not bound to the database generation;
+/// a reload between query and data navigation can invalidate its meaning. Use a
+/// non-watching handle when snapshot-stable deferred data access is required.
 ///
 /// # Parameters
 /// * `db` - Database handle (must not be NULL)
@@ -1087,7 +1108,9 @@ pub unsafe extern "C" fn matchy_close(db: *mut matchy_t) {
 ///
 /// # Returns
 /// * matchy_result_t with found=true if match found
-/// * matchy_result_t with found=false if no match
+/// * matchy_result_t with found=false if there is no match or if lookup data is
+///   malformed or exceeds a runtime resource limit; this compatibility API has
+///   no per-query error channel
 /// * Caller must free result with matchy_free_result
 ///
 /// # Safety
@@ -1179,7 +1202,7 @@ pub unsafe extern "C" fn matchy_query_into(
     });
 }
 
-/// Free query result (no-op in zero-allocation API)
+/// Free query result (no-op for the offset-only result struct)
 ///
 /// This function exists for ABI compatibility but does nothing since
 /// matchy_result_t now uses offsets instead of heap-allocated data.
@@ -1566,7 +1589,7 @@ pub struct matchy_entry_data_t {
 pub struct matchy_entry_s {
     /// Database handle
     pub db: *const matchy_t,
-    /// Data offset into MMDB data section
+    /// Internal format-specific data token
     pub _data_offset: u32,
 }
 
@@ -1579,16 +1602,169 @@ pub struct matchy_entry_data_list_t {
     pub next: *mut Self,
 }
 
-#[derive(Default)]
 struct EntryDataStorage {
     strings: Vec<CString>,
     bytes: Vec<Vec<u8>>,
+    retained_bytes: usize,
+    retained_bytes_limit: usize,
+}
+
+/// Private backing node large enough for both the native Matchy prefix and
+/// libmaxminddb's trailing `pool` field. Public layouts remain unchanged;
+/// compatibility callers may safely read `pool`, which is always NULL.
+#[repr(C)]
+struct CompatEntryDataListNode {
+    node: matchy_entry_data_list_t,
+    pool: *mut c_void,
+}
+
+impl CompatEntryDataListNode {
+    fn new(entry_data: matchy_entry_data_t) -> Self {
+        Self {
+            node: matchy_entry_data_list_t {
+                entry_data,
+                next: ptr::null_mut(),
+            },
+            pool: ptr::null_mut(),
+        }
+    }
 }
 
 #[repr(C)]
-struct OwnedEntryDataListNode {
-    node: matchy_entry_data_list_t,
+struct OwnedEntryDataList {
+    node: CompatEntryDataListNode,
+    remaining_nodes: Vec<CompatEntryDataListNode>,
     _storage: EntryDataStorage,
+    allocation_capacity: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EntryDataConversionError {
+    InvalidData,
+    ResourceExhausted,
+}
+
+/// Return the exact additional capacity for exponential, fallible Vec growth
+/// and its estimated allocation size. Growing to 1, 2, 4, ... preserves
+/// amortized O(1) appends without relying on infallible `Vec::push` growth.
+fn amortized_vec_growth<T>(values: &Vec<T>) -> Result<(usize, usize), EntryDataConversionError> {
+    if values.len() < values.capacity() {
+        return Ok((0, 0));
+    }
+    let target_capacity = if values.capacity() == 0 {
+        1
+    } else {
+        values
+            .capacity()
+            .checked_mul(2)
+            .ok_or(EntryDataConversionError::ResourceExhausted)?
+    };
+    let additional_capacity = target_capacity
+        .checked_sub(values.len())
+        .ok_or(EntryDataConversionError::ResourceExhausted)?;
+    let estimated_bytes = target_capacity
+        .checked_sub(values.capacity())
+        .and_then(|count| count.checked_mul(mem::size_of::<T>()))
+        .ok_or(EntryDataConversionError::ResourceExhausted)?;
+    Ok((additional_capacity, estimated_bytes))
+}
+
+impl Default for EntryDataStorage {
+    fn default() -> Self {
+        Self::with_limit(ENTRY_DATA_STORAGE_LIMIT)
+    }
+}
+
+impl EntryDataStorage {
+    fn with_limit(retained_bytes_limit: usize) -> Self {
+        Self {
+            strings: Vec::new(),
+            bytes: Vec::new(),
+            retained_bytes: 0,
+            retained_bytes_limit,
+        }
+    }
+
+    /// Conservatively reserve part of the lifetime budget. Reservations are
+    /// not rolled back after an allocation failure: doing so keeps repeated
+    /// failed calls bounded as well.
+    fn reserve_estimated_bytes(
+        &mut self,
+        additional: usize,
+    ) -> Result<(), EntryDataConversionError> {
+        let retained_bytes = self
+            .retained_bytes
+            .checked_add(additional)
+            .ok_or(EntryDataConversionError::ResourceExhausted)?;
+        if retained_bytes > self.retained_bytes_limit {
+            return Err(EntryDataConversionError::ResourceExhausted);
+        }
+        self.retained_bytes = retained_bytes;
+        Ok(())
+    }
+
+    fn retain_string(
+        &mut self,
+        string: &[u8],
+    ) -> Result<(*const c_char, u32), EntryDataConversionError> {
+        if string.contains(&0) {
+            return Err(EntryDataConversionError::InvalidData);
+        }
+
+        let data_size =
+            u32::try_from(string.len()).map_err(|_| EntryDataConversionError::ResourceExhausted)?;
+        let allocation_size = string
+            .len()
+            .checked_add(1)
+            .ok_or(EntryDataConversionError::ResourceExhausted)?;
+        let (additional_capacity, storage_growth) = amortized_vec_growth(&self.strings)?;
+        let estimated_size = storage_growth
+            .checked_add(allocation_size)
+            .ok_or(EntryDataConversionError::ResourceExhausted)?;
+        self.reserve_estimated_bytes(estimated_size)?;
+
+        if additional_capacity != 0 {
+            self.strings
+                .try_reserve_exact(additional_capacity)
+                .map_err(|_| EntryDataConversionError::ResourceExhausted)?;
+        }
+        let mut nul_terminated = Vec::new();
+        nul_terminated
+            .try_reserve_exact(allocation_size)
+            .map_err(|_| EntryDataConversionError::ResourceExhausted)?;
+        nul_terminated.extend_from_slice(string);
+        nul_terminated.push(0);
+
+        let string = CString::from_vec_with_nul(nul_terminated)
+            .map_err(|_| EntryDataConversionError::InvalidData)?;
+        let pointer = string.as_ptr();
+        self.strings.push(string);
+        Ok((pointer, data_size))
+    }
+
+    fn retain_bytes(&mut self, bytes: &[u8]) -> Result<(*const u8, u32), EntryDataConversionError> {
+        let data_size =
+            u32::try_from(bytes.len()).map_err(|_| EntryDataConversionError::ResourceExhausted)?;
+        let (additional_capacity, storage_growth) = amortized_vec_growth(&self.bytes)?;
+        let estimated_size = storage_growth
+            .checked_add(bytes.len())
+            .ok_or(EntryDataConversionError::ResourceExhausted)?;
+        self.reserve_estimated_bytes(estimated_size)?;
+
+        if additional_capacity != 0 {
+            self.bytes
+                .try_reserve_exact(additional_capacity)
+                .map_err(|_| EntryDataConversionError::ResourceExhausted)?;
+        }
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| EntryDataConversionError::ResourceExhausted)?;
+        retained.extend_from_slice(bytes);
+        let pointer = retained.as_ptr();
+        self.bytes.push(retained);
+        Ok((pointer, data_size))
+    }
 }
 
 impl matchy_entry_data_t {
@@ -1605,7 +1781,10 @@ impl matchy_entry_data_t {
 
     /// Convert DataValue to entry_data_t
     /// Strings and byte arrays are stored in the cache to keep pointers alive.
-    fn from_data_value(value: &DataValue, storage: &mut EntryDataStorage) -> Option<Self> {
+    fn from_data_value(
+        value: &DataValue,
+        storage: &mut EntryDataStorage,
+    ) -> Result<Self, EntryDataConversionError> {
         let (type_, data_value, data_size) = match value {
             DataValue::Pointer(offset) => (
                 MATCHY_DATA_TYPE_POINTER,
@@ -1613,13 +1792,13 @@ impl matchy_entry_data_t {
                 0,
             ),
             DataValue::String(s) => {
-                let c_str = CString::new(s.as_str()).ok()?;
-                let ptr = c_str.as_ptr();
-                storage.strings.push(c_str);
+                let (pointer, data_size) = storage.retain_string(s.as_bytes())?;
                 (
                     MATCHY_DATA_TYPE_UTF8_STRING,
-                    matchy_entry_data_value_u { utf8_string: ptr },
-                    u32::try_from(s.len()).unwrap_or(u32::MAX),
+                    matchy_entry_data_value_u {
+                        utf8_string: pointer,
+                    },
+                    data_size,
                 )
             }
             DataValue::Double(d) => (
@@ -1628,12 +1807,11 @@ impl matchy_entry_data_t {
                 8,
             ),
             DataValue::Bytes(b) => {
-                storage.bytes.push(b.clone());
-                let ptr = storage.bytes.last()?.as_ptr();
+                let (pointer, data_size) = storage.retain_bytes(b)?;
                 (
                     MATCHY_DATA_TYPE_BYTES,
-                    matchy_entry_data_value_u { bytes: ptr },
-                    u32::try_from(b.len()).unwrap_or(u32::MAX),
+                    matchy_entry_data_value_u { bytes: pointer },
+                    data_size,
                 )
             }
             DataValue::Uint16(n) => (
@@ -1649,7 +1827,7 @@ impl matchy_entry_data_t {
             DataValue::Map(m) => (
                 MATCHY_DATA_TYPE_MAP,
                 matchy_entry_data_value_u { uint32: 0 },
-                u32::try_from(m.len()).unwrap_or(u32::MAX),
+                u32::try_from(m.len()).map_err(|_| EntryDataConversionError::InvalidData)?,
             ),
             DataValue::Int32(n) => (
                 MATCHY_DATA_TYPE_INT32,
@@ -1672,7 +1850,7 @@ impl matchy_entry_data_t {
             DataValue::Array(a) => (
                 MATCHY_DATA_TYPE_ARRAY,
                 matchy_entry_data_value_u { uint32: 0 },
-                u32::try_from(a.len()).unwrap_or(u32::MAX),
+                u32::try_from(a.len()).map_err(|_| EntryDataConversionError::InvalidData)?,
             ),
             DataValue::Bool(b) => (
                 MATCHY_DATA_TYPE_BOOLEAN,
@@ -1685,27 +1863,69 @@ impl matchy_entry_data_t {
                 4,
             ),
             DataValue::Timestamp(epoch) => {
-                let iso = chrono::Utc
-                    .timestamp_opt(*epoch, 0)
-                    .single()
-                    .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-                    .unwrap_or_else(|| format!("{epoch}"));
-                let c_str = CString::new(iso.as_str()).ok()?;
-                let ptr = c_str.as_ptr();
-                let len = iso.len();
-                storage.strings.push(c_str);
+                // The largest chrono timestamp and an i64 decimal both fit in
+                // this stack buffer. Formatting therefore performs no heap
+                // allocation before the lifetime-cache budget is checked.
+                struct TimestampBuffer {
+                    bytes: [u8; 64],
+                    len: usize,
+                }
+
+                impl Write for TimestampBuffer {
+                    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+                        let end = self.len.checked_add(value.len()).ok_or(std::fmt::Error)?;
+                        let target = self.bytes.get_mut(self.len..end).ok_or(std::fmt::Error)?;
+                        target.copy_from_slice(value.as_bytes());
+                        self.len = end;
+                        Ok(())
+                    }
+                }
+
+                let mut formatted = TimestampBuffer {
+                    bytes: [0; 64],
+                    len: 0,
+                };
+                if let Some(timestamp) = chrono::Utc.timestamp_opt(*epoch, 0).single() {
+                    write!(&mut formatted, "{}", timestamp.format("%Y-%m-%dT%H:%M:%SZ"))
+                        .map_err(|_| EntryDataConversionError::InvalidData)?;
+                } else {
+                    write!(&mut formatted, "{epoch}")
+                        .map_err(|_| EntryDataConversionError::InvalidData)?;
+                }
+                let (pointer, data_size) =
+                    storage.retain_string(&formatted.bytes[..formatted.len])?;
                 (
                     MATCHY_DATA_TYPE_UTF8_STRING,
-                    matchy_entry_data_value_u { utf8_string: ptr },
-                    u32::try_from(len).unwrap_or(u32::MAX),
+                    matchy_entry_data_value_u {
+                        utf8_string: pointer,
+                    },
+                    data_size,
                 )
             }
         };
 
-        Some(Self {
+        Ok(Self {
             has_data: true,
             type_,
             value: data_value,
+            data_size,
+            offset: 0,
+        })
+    }
+
+    /// Convert a map key to the UTF-8 node expected by MMDB-style flattened
+    /// maps without allocating an intermediate owned `DataValue::String`.
+    fn from_map_key(
+        key: &str,
+        storage: &mut EntryDataStorage,
+    ) -> Result<Self, EntryDataConversionError> {
+        let (pointer, data_size) = storage.retain_string(key.as_bytes())?;
+        Ok(Self {
+            has_data: true,
+            type_: MATCHY_DATA_TYPE_UTF8_STRING,
+            value: matchy_entry_data_value_u {
+                utf8_string: pointer,
+            },
             data_size,
             offset: 0,
         })
@@ -1793,6 +2013,13 @@ pub unsafe extern "C" fn matchy_result_get_entry(
 ///
 /// # Returns
 /// * Same as matchy_get_value
+/// * String and byte pointers written to `entry_data` remain valid until the
+///   database handle is closed. To preserve that lifetime, each such value is
+///   retained by the handle and is never evicted.
+/// * MATCHY_ERROR_OUT_OF_MEMORY if the handle's 64 MiB retained-value budget
+///   is exhausted. Previously returned pointers remain valid after this error.
+/// * MATCHY_ERROR_INVALID_PARAM if the path exceeds the decoder's nesting
+///   limit or contains invalid UTF-8.
 ///
 /// # Safety
 /// * Same as matchy_get_value
@@ -1815,17 +2042,29 @@ pub unsafe extern "C" fn matchy_aget_value(
         }
 
         let mut path_vec = Vec::new();
-        let mut i = 0;
-        loop {
-            let ptr = *path.offset(i);
-            if ptr.is_null() {
+        if path_vec
+            .try_reserve_exact(MAX_LOOKUP_PATH_COMPONENTS)
+            .is_err()
+        {
+            (*entry_data) = matchy_entry_data_t::empty();
+            return MATCHY_ERROR_OUT_OF_MEMORY;
+        }
+        for index in 0..=MAX_LOOKUP_PATH_COMPONENTS {
+            let component = *path.add(index);
+            if component.is_null() {
                 break;
             }
-            match CStr::from_ptr(ptr).to_str() {
-                Ok(s) => path_vec.push(s),
-                Err(_) => return MATCHY_ERROR_INVALID_PARAM,
+            if index == MAX_LOOKUP_PATH_COMPONENTS {
+                (*entry_data) = matchy_entry_data_t::empty();
+                return MATCHY_ERROR_INVALID_PARAM;
             }
-            i += 1;
+            match CStr::from_ptr(component).to_str() {
+                Ok(s) => path_vec.push(s),
+                Err(_) => {
+                    (*entry_data) = matchy_entry_data_t::empty();
+                    return MATCHY_ERROR_INVALID_PARAM;
+                }
+            }
         }
 
         let db = (*entry).db;
@@ -1837,9 +2076,13 @@ pub unsafe extern "C" fn matchy_aget_value(
         let internal = matchy_t::as_internal(db);
         let data = match internal.database.decode_at_offset((*entry)._data_offset) {
             Ok(d) => d,
-            Err(_) => {
+            Err(error) => {
                 (*entry_data) = matchy_entry_data_t::empty();
-                return MATCHY_ERROR_DATA_PARSE;
+                return if matches!(error, DatabaseError::Unsupported(_)) {
+                    MATCHY_ERROR_NO_DATA
+                } else {
+                    MATCHY_ERROR_DATA_PARSE
+                };
             }
         };
 
@@ -1860,22 +2103,142 @@ pub unsafe extern "C" fn matchy_aget_value(
         };
 
         match matchy_entry_data_t::from_data_value(target, &mut value_cache) {
-            Some(d) => {
+            Ok(d) => {
                 (*entry_data) = d;
                 MATCHY_SUCCESS
             }
-            None => {
+            Err(EntryDataConversionError::InvalidData) => {
                 (*entry_data) = matchy_entry_data_t::empty();
                 MATCHY_ERROR_DATA_PARSE
+            }
+            Err(EntryDataConversionError::ResourceExhausted) => {
+                (*entry_data) = matchy_entry_data_t::empty();
+                MATCHY_ERROR_OUT_OF_MEMORY
             }
         }
     })
 }
 
+fn build_entry_data_list(
+    value: &DataValue,
+    retained_bytes_limit: usize,
+) -> Result<*mut matchy_entry_data_list_t, EntryDataConversionError> {
+    let mut storage = EntryDataStorage::with_limit(retained_bytes_limit);
+    // Account for the owner fields which are not already represented by the
+    // first compatibility-sized list node. The remaining nodes and retained
+    // values are charged as they are appended below.
+    storage.reserve_estimated_bytes(
+        mem::size_of::<OwnedEntryDataList>()
+            .saturating_sub(mem::size_of::<CompatEntryDataListNode>()),
+    )?;
+
+    let mut first_node = None;
+    let mut remaining_nodes = Vec::new();
+
+    fn flatten_data(
+        value: &DataValue,
+        first_node: &mut Option<CompatEntryDataListNode>,
+        remaining_nodes: &mut Vec<CompatEntryDataListNode>,
+        storage: &mut EntryDataStorage,
+    ) -> Result<(), EntryDataConversionError> {
+        fn reserve_node(
+            first_node: &Option<CompatEntryDataListNode>,
+            remaining_nodes: &mut Vec<CompatEntryDataListNode>,
+            storage: &mut EntryDataStorage,
+        ) -> Result<(), EntryDataConversionError> {
+            if first_node.is_none() {
+                storage.reserve_estimated_bytes(mem::size_of::<CompatEntryDataListNode>())?;
+            } else {
+                let (additional_capacity, storage_growth) = amortized_vec_growth(remaining_nodes)?;
+                storage.reserve_estimated_bytes(storage_growth)?;
+                if additional_capacity != 0 {
+                    remaining_nodes
+                        .try_reserve_exact(additional_capacity)
+                        .map_err(|_| EntryDataConversionError::ResourceExhausted)?;
+                }
+            }
+            Ok(())
+        }
+
+        fn append_node(
+            entry_data: matchy_entry_data_t,
+            first_node: &mut Option<CompatEntryDataListNode>,
+            remaining_nodes: &mut Vec<CompatEntryDataListNode>,
+        ) {
+            let node = CompatEntryDataListNode::new(entry_data);
+            if first_node.is_none() {
+                *first_node = Some(node);
+            } else {
+                remaining_nodes.push(node);
+            }
+        }
+
+        reserve_node(first_node, remaining_nodes, storage)?;
+        let entry_data = matchy_entry_data_t::from_data_value(value, storage)?;
+        append_node(entry_data, first_node, remaining_nodes);
+
+        match value {
+            DataValue::Map(map) => {
+                for (key, child) in map {
+                    reserve_node(first_node, remaining_nodes, storage)?;
+                    let key_entry = matchy_entry_data_t::from_map_key(key, storage)?;
+                    append_node(key_entry, first_node, remaining_nodes);
+                    flatten_data(child, first_node, remaining_nodes, storage)?;
+                }
+            }
+            DataValue::Array(array) => {
+                for child in array {
+                    flatten_data(child, first_node, remaining_nodes, storage)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    flatten_data(value, &mut first_node, &mut remaining_nodes, &mut storage)?;
+    let mut first_node = first_node.ok_or(EntryDataConversionError::InvalidData)?;
+
+    let remaining_base = remaining_nodes.as_mut_ptr();
+    let remaining_len = remaining_nodes.len();
+    for (index, node) in remaining_nodes.iter_mut().enumerate() {
+        node.node.next = if index + 1 < remaining_len {
+            remaining_base
+                .wrapping_add(index + 1)
+                .cast::<matchy_entry_data_list_t>()
+        } else {
+            ptr::null_mut()
+        };
+    }
+    if !remaining_nodes.is_empty() {
+        first_node.node.next = remaining_base.cast::<matchy_entry_data_list_t>();
+    }
+
+    // Stable Rust has no fallible Box allocation. A one-element Vec provides
+    // equivalent stable ownership while allowing allocation failure to be
+    // returned to C instead of aborting or leaking a partially-built list.
+    let mut allocation = Vec::new();
+    allocation
+        .try_reserve_exact(1)
+        .map_err(|_| EntryDataConversionError::ResourceExhausted)?;
+    let allocation_capacity = allocation.capacity();
+    allocation.push(OwnedEntryDataList {
+        node: first_node,
+        remaining_nodes,
+        _storage: storage,
+        allocation_capacity,
+    });
+    let list = allocation.as_mut_ptr().cast::<matchy_entry_data_list_t>();
+    mem::forget(allocation);
+    Ok(list)
+}
+
 /// Get full entry data as linked list (tree traversal)
 ///
 /// This function traverses the entire data structure and returns it as
-/// a flattened linked list. Maps and arrays are expanded recursively.
+/// a flattened linked list. Arrays contain their recursively expanded values.
+/// Maps contain each UTF-8 key immediately followed by its recursively
+/// expanded value, matching libmaxminddb's list ordering.
 ///
 /// # Parameters
 /// * `entry` - Entry handle
@@ -1883,7 +2246,10 @@ pub unsafe extern "C" fn matchy_aget_value(
 ///
 /// # Returns
 /// * MATCHY_SUCCESS on success
-/// * Error code on failure
+/// * MATCHY_ERROR_OUT_OF_MEMORY if the list's 64 MiB estimated storage budget
+///   is exceeded or an allocation fails
+/// * MATCHY_ERROR_DATA_PARSE if a retained value is malformed
+/// * Other error codes on failure
 ///
 /// # Safety
 /// * `entry` must be valid
@@ -1920,61 +2286,17 @@ pub unsafe extern "C" fn matchy_get_entry_data_list(
         let internal = matchy_t::as_internal(db);
         let data = match internal.database.decode_at_offset((*entry)._data_offset) {
             Ok(d) => d,
+            Err(DatabaseError::Unsupported(_)) => return MATCHY_ERROR_NO_DATA,
             Err(_) => return MATCHY_ERROR_DATA_PARSE,
         };
-        let mut list_head: *mut matchy_entry_data_list_t = ptr::null_mut();
-        let mut list_tail: *mut matchy_entry_data_list_t = ptr::null_mut();
-
-        // Helper to add a node to the list
-        let mut add_node = |value: &DataValue| {
-            let mut storage = EntryDataStorage::default();
-            let Some(entry_data) = matchy_entry_data_t::from_data_value(value, &mut storage) else {
-                return;
-            };
-
-            let mut node = Box::new(OwnedEntryDataListNode {
-                node: matchy_entry_data_list_t {
-                    entry_data,
-                    next: ptr::null_mut(),
-                },
-                _storage: storage,
-            });
-            let node_ptr = &mut node.node as *mut matchy_entry_data_list_t;
-            let _ = Box::into_raw(node);
-
-            if list_head.is_null() {
-                list_head = node_ptr;
-                list_tail = node_ptr;
-            } else {
-                (*list_tail).next = node_ptr;
-                list_tail = node_ptr;
+        match build_entry_data_list(&data, ENTRY_DATA_STORAGE_LIMIT) {
+            Ok(list) => {
+                *entry_data_list = list;
+                MATCHY_SUCCESS
             }
-        };
-
-        // Flatten the data structure recursively
-        fn flatten_data(value: &DataValue, add_node: &mut impl FnMut(&DataValue)) {
-            add_node(value);
-
-            // Recursively add children
-            match value {
-                DataValue::Map(m) => {
-                    for (_key, val) in m.iter() {
-                        flatten_data(val, add_node);
-                    }
-                }
-                DataValue::Array(a) => {
-                    for val in a.iter() {
-                        flatten_data(val, add_node);
-                    }
-                }
-                _ => {}
-            }
+            Err(EntryDataConversionError::InvalidData) => MATCHY_ERROR_DATA_PARSE,
+            Err(EntryDataConversionError::ResourceExhausted) => MATCHY_ERROR_OUT_OF_MEMORY,
         }
-
-        flatten_data(&data, &mut add_node);
-
-        *entry_data_list = list_head;
-        MATCHY_SUCCESS
     })
 }
 
@@ -1995,12 +2317,9 @@ pub unsafe extern "C" fn matchy_free_entry_data_list(list: *mut matchy_entry_dat
             return;
         }
 
-        let mut current = list;
-        while !current.is_null() {
-            let next = (*current).next;
-            let _ = Box::from_raw(current.cast::<OwnedEntryDataListNode>());
-            current = next;
-        }
+        let owner = list.cast::<OwnedEntryDataList>();
+        let allocation_capacity = (*owner).allocation_capacity;
+        let _ = Vec::from_raw_parts(owner, 1, allocation_capacity);
     });
 }
 
@@ -2137,15 +2456,24 @@ pub unsafe extern "C" fn matchy_result_to_json(result: *const matchy_result_t) -
 // VALIDATION API
 // ============================================================================
 
-/// Standard validation level - all offsets, UTF-8, basic structure
+/// Standard validation level - runtime envelope checks plus sampled reachable MMDB data.
+///
+/// For a known `database_type`, schema validation still checks every referenced
+/// entry at this level.
 pub const MATCHY_VALIDATION_STANDARD: i32 = 0;
-/// Strict validation level - standard plus deep graph analysis and consistency checks (default)
+/// Strict validation level - exhaustive MMDB records plus deep component checks.
 pub const MATCHY_VALIDATION_STRICT: i32 = 1;
 
 /// Validate a database file
 ///
-/// Validates a .mxy database file to ensure it's safe to use.
-/// Returns MATCHY_SUCCESS if the database is valid, or an error code if invalid.
+/// Checks a `.mxy` database file at the requested coverage level.
+/// Returns `MATCHY_SUCCESS` when the bytes read passed those checks, or an error
+/// code when validation failed. Standard validation is sampled; use Strict for
+/// untrusted input and impose deployment-appropriate resource limits.
+///
+/// A successful result applies only to the bytes read by this call. If the path
+/// can be replaced before it is opened, validate a protected immutable snapshot
+/// or bind the result to a content digest.
 ///
 /// # Parameters
 /// * `filename` - Path to database file (null-terminated C string, must not be NULL)
@@ -2170,7 +2498,7 @@ pub const MATCHY_VALIDATION_STRICT: i32 = 1;
 ///     if (error) matchy_free_string(error);
 ///     return 1;
 /// }
-/// printf("Database is valid and safe to use!\n");
+/// printf("The bytes read passed strict validation.\n");
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn matchy_validate(
@@ -2579,14 +2907,388 @@ mod tests {
     use std::collections::HashMap;
 
     fn build_test_db_bytes() -> Vec<u8> {
+        build_test_db_bytes_with_source("unit-test")
+    }
+
+    fn build_test_db_bytes_with_source(source: &str) -> Vec<u8> {
         let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
         let mut data = HashMap::new();
-        data.insert(
-            "source".to_string(),
-            DataValue::String("unit-test".to_string()),
-        );
+        data.insert("source".to_string(), DataValue::String(source.to_string()));
         builder.add_entry("1.1.1.1", data).unwrap();
         builder.build().unwrap()
+    }
+
+    fn estimated_string_size(value: &str) -> usize {
+        mem::size_of::<CString>() + value.len() + 1
+    }
+
+    #[test]
+    fn entry_data_storage_preserves_pointers_and_enforces_its_budget() {
+        let value = DataValue::String("same".to_string());
+        let per_value = estimated_string_size("same");
+        let mut storage = EntryDataStorage::with_limit(per_value * 2);
+
+        let first = matchy_entry_data_t::from_data_value(&value, &mut storage).unwrap();
+        let second = matchy_entry_data_t::from_data_value(&value, &mut storage).unwrap();
+        assert_eq!(storage.strings.len(), 2);
+        assert!(matches!(
+            matchy_entry_data_t::from_data_value(&value, &mut storage),
+            Err(EntryDataConversionError::ResourceExhausted)
+        ));
+        assert!(matches!(
+            matchy_entry_data_t::from_data_value(
+                &DataValue::String("different".to_string()),
+                &mut storage,
+            ),
+            Err(EntryDataConversionError::ResourceExhausted)
+        ));
+
+        // SAFETY: Both pointers refer to CString allocations retained by
+        // `storage`, which remains alive for the duration of these reads.
+        unsafe {
+            assert_eq!(CStr::from_ptr(first.value.utf8_string).to_bytes(), b"same");
+            assert_eq!(CStr::from_ptr(second.value.utf8_string).to_bytes(), b"same");
+        }
+    }
+
+    #[test]
+    fn entry_data_storage_charges_empty_value_overhead() {
+        let string_cost = estimated_string_size("");
+        let mut strings = EntryDataStorage::with_limit(string_cost);
+        matchy_entry_data_t::from_data_value(&DataValue::String(String::new()), &mut strings)
+            .unwrap();
+        assert!(matches!(
+            matchy_entry_data_t::from_data_value(&DataValue::String(String::new()), &mut strings,),
+            Err(EntryDataConversionError::ResourceExhausted)
+        ));
+
+        let bytes_cost = mem::size_of::<Vec<u8>>();
+        let mut bytes = EntryDataStorage::with_limit(bytes_cost);
+        matchy_entry_data_t::from_data_value(&DataValue::Bytes(Vec::new()), &mut bytes).unwrap();
+        assert!(matches!(
+            matchy_entry_data_t::from_data_value(&DataValue::Bytes(Vec::new()), &mut bytes),
+            Err(EntryDataConversionError::ResourceExhausted)
+        ));
+    }
+
+    #[test]
+    fn entry_data_storage_preserves_byte_and_timestamp_results() {
+        let payload = vec![1, 2, 3, 4];
+        let byte_cost = mem::size_of::<Vec<u8>>() + payload.len();
+        let mut bytes = EntryDataStorage::with_limit(byte_cost);
+        let retained =
+            matchy_entry_data_t::from_data_value(&DataValue::Bytes(payload.clone()), &mut bytes)
+                .unwrap();
+        assert!(matches!(
+            matchy_entry_data_t::from_data_value(&DataValue::Bytes(payload), &mut bytes),
+            Err(EntryDataConversionError::ResourceExhausted)
+        ));
+        // SAFETY: The returned pointer is retained by `bytes` and its reported
+        // size is the four-byte payload supplied above.
+        unsafe {
+            assert_eq!(
+                slice::from_raw_parts(retained.value.bytes, 4),
+                &[1, 2, 3, 4]
+            );
+        }
+
+        let mut timestamp_storage = EntryDataStorage::default();
+        let timestamp =
+            matchy_entry_data_t::from_data_value(&DataValue::Timestamp(0), &mut timestamp_storage)
+                .unwrap();
+        // SAFETY: The pointer is retained by `timestamp_storage`.
+        unsafe {
+            assert_eq!(
+                CStr::from_ptr(timestamp.value.utf8_string).to_bytes(),
+                b"1970-01-01T00:00:00Z"
+            );
+        }
+    }
+
+    #[test]
+    fn entry_data_conversion_distinguishes_malformed_strings() {
+        let mut storage = EntryDataStorage::default();
+        assert!(matches!(
+            matchy_entry_data_t::from_data_value(
+                &DataValue::String("bad\0value".to_string()),
+                &mut storage,
+            ),
+            Err(EntryDataConversionError::InvalidData)
+        ));
+        assert!(storage.strings.is_empty());
+        assert_eq!(storage.retained_bytes, 0);
+    }
+
+    #[test]
+    fn entry_data_list_has_an_aggregate_budget_and_valid_storage() {
+        let value = DataValue::Array(vec![
+            DataValue::String("first".to_string()),
+            DataValue::String("second".to_string()),
+        ]);
+        let owner_overhead = mem::size_of::<OwnedEntryDataList>()
+            .saturating_sub(mem::size_of::<CompatEntryDataListNode>());
+        let two_nodes_and_first_string = owner_overhead
+            + 2 * mem::size_of::<CompatEntryDataListNode>()
+            + estimated_string_size("first");
+        assert_eq!(
+            build_entry_data_list(&value, two_nodes_and_first_string).unwrap_err(),
+            EntryDataConversionError::ResourceExhausted
+        );
+
+        let list = build_entry_data_list(&value, 4096).unwrap();
+        // SAFETY: `list` was created by build_entry_data_list. Its retained
+        // strings remain owned until the matching free call below.
+        unsafe {
+            assert_eq!((*list).entry_data.type_, MATCHY_DATA_TYPE_ARRAY);
+            let first = (*list).next;
+            assert!(!first.is_null());
+            assert_eq!(
+                CStr::from_ptr((*first).entry_data.value.utf8_string).to_bytes(),
+                b"first"
+            );
+            let second = (*first).next;
+            assert!(!second.is_null());
+            assert_eq!(
+                CStr::from_ptr((*second).entry_data.value.utf8_string).to_bytes(),
+                b"second"
+            );
+            assert!((*second).next.is_null());
+            matchy_free_entry_data_list(list);
+        }
+    }
+
+    #[test]
+    fn mmdb_entry_data_list_has_null_pool_and_map_key_value_order() {
+        use crate::c_api::maxminddb_compat::{
+            MMDB_entry_data_list_s, MMDB_entry_s, MMDB_free_entry_data_list,
+            MMDB_get_entry_data_list,
+        };
+
+        assert_eq!(
+            mem::size_of::<CompatEntryDataListNode>(),
+            mem::size_of::<MMDB_entry_data_list_s>()
+        );
+        assert_eq!(
+            mem::align_of::<CompatEntryDataListNode>(),
+            mem::align_of::<MMDB_entry_data_list_s>()
+        );
+
+        let bytes = build_test_db_bytes();
+        // SAFETY: The test owns every handle and C string used here, keeps the
+        // database alive through list traversal, and frees each resource once.
+        unsafe {
+            let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!db.is_null());
+            let query = CString::new("1.1.1.1").unwrap();
+            let result = matchy_query(db, query.as_ptr());
+            let mut matchy_entry = matchy_entry_s {
+                db: ptr::null(),
+                _data_offset: 0,
+            };
+            assert_eq!(
+                matchy_result_get_entry(&result, &mut matchy_entry),
+                MATCHY_SUCCESS
+            );
+            let mut mmdb_entry = MMDB_entry_s {
+                mmdb: ptr::null(),
+                _matchy_entry: matchy_entry,
+            };
+            let mut list: *mut MMDB_entry_data_list_s = ptr::null_mut();
+            assert_eq!(MMDB_get_entry_data_list(&mut mmdb_entry, &mut list), 0);
+
+            assert!(!list.is_null());
+            assert_eq!((*list).entry_data.type_, MATCHY_DATA_TYPE_MAP);
+            assert!((*list).pool.is_null());
+
+            let key = (*list).next;
+            assert!(!key.is_null());
+            assert_eq!((*key).entry_data.type_, MATCHY_DATA_TYPE_UTF8_STRING);
+            assert_eq!(
+                CStr::from_ptr((*key).entry_data.value.utf8_string).to_bytes(),
+                b"source"
+            );
+            assert!((*key).pool.is_null());
+
+            let value = (*key).next;
+            assert!(!value.is_null());
+            assert_eq!((*value).entry_data.type_, MATCHY_DATA_TYPE_UTF8_STRING);
+            assert_eq!(
+                CStr::from_ptr((*value).entry_data.value.utf8_string).to_bytes(),
+                b"unit-test"
+            );
+            assert!((*value).pool.is_null());
+            assert!((*value).next.is_null());
+
+            MMDB_free_entry_data_list(list);
+            matchy_close(db);
+        }
+    }
+
+    #[test]
+    fn pattern_only_c_query_entry_and_aget_decode_inline_data() {
+        use matchy_paraglob::Paraglob;
+
+        let mut metadata = HashMap::new();
+        metadata.insert("kind".to_string(), DataValue::String("inline".to_string()));
+        let paraglob = Paraglob::build_from_patterns_with_data(
+            &["*.pattern.test"],
+            Some(&[Some(DataValue::Map(metadata))]),
+            MatchMode::CaseSensitive,
+        )
+        .unwrap();
+        let bytes = paraglob.buffer();
+
+        // SAFETY: All C pointers are derived from values kept alive through
+        // the call sequence, and the database handle is closed exactly once.
+        unsafe {
+            let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!db.is_null());
+            let query = CString::new("value.pattern.test").unwrap();
+            let result = matchy_query(db, query.as_ptr());
+            assert!(result.found);
+
+            let mut entry = matchy_entry_s {
+                db: ptr::null(),
+                _data_offset: 0,
+            };
+            assert_eq!(matchy_result_get_entry(&result, &mut entry), MATCHY_SUCCESS);
+
+            let key = CString::new("kind").unwrap();
+            let path = [key.as_ptr(), ptr::null()];
+            let mut value = matchy_entry_data_t::empty();
+            assert_eq!(
+                matchy_aget_value(&entry, &mut value, path.as_ptr()),
+                MATCHY_SUCCESS
+            );
+            assert_eq!(value.type_, MATCHY_DATA_TYPE_UTF8_STRING);
+            assert_eq!(
+                CStr::from_ptr(value.value.utf8_string).to_bytes(),
+                b"inline"
+            );
+
+            matchy_close(db);
+        }
+    }
+
+    #[test]
+    fn pattern_only_c_navigation_reports_no_data_for_valid_match() {
+        use matchy_paraglob::Paraglob;
+
+        let paraglob =
+            Paraglob::build_from_patterns(&["*.pattern.test"], MatchMode::CaseSensitive).unwrap();
+        let bytes = paraglob.buffer();
+
+        // SAFETY: All pointers refer to live local values, and the handle and
+        // optional list are released exactly once.
+        unsafe {
+            let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!db.is_null());
+            let query = CString::new("value.pattern.test").unwrap();
+            let result = matchy_query(db, query.as_ptr());
+            assert!(result.found);
+
+            let mut entry = matchy_entry_s {
+                db: ptr::null(),
+                _data_offset: 0,
+            };
+            assert_eq!(matchy_result_get_entry(&result, &mut entry), MATCHY_SUCCESS);
+
+            let path: [*const c_char; 1] = [ptr::null()];
+            let mut value = matchy_entry_data_t::empty();
+            assert_eq!(
+                matchy_aget_value(&entry, &mut value, path.as_ptr()),
+                MATCHY_ERROR_NO_DATA
+            );
+
+            let mut list = ptr::null_mut();
+            assert_eq!(
+                matchy_get_entry_data_list(&entry, &mut list),
+                MATCHY_ERROR_NO_DATA
+            );
+            assert!(list.is_null());
+            matchy_close(db);
+        }
+    }
+
+    #[test]
+    fn matchy_aget_value_reports_cache_exhaustion_without_invalidating_old_pointer() {
+        let bytes = build_test_db_bytes();
+
+        // SAFETY: The test uses handles and pointers created here, keeps all
+        // backing C strings alive, and closes the database exactly once.
+        unsafe {
+            let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!db.is_null());
+            let internal = matchy_t::as_internal(db);
+            *internal.value_cache.lock().unwrap() =
+                EntryDataStorage::with_limit(estimated_string_size("unit-test"));
+
+            let query = CString::new("1.1.1.1").unwrap();
+            let result = matchy_query(db, query.as_ptr());
+            let mut entry = matchy_entry_s {
+                db: ptr::null(),
+                _data_offset: 0,
+            };
+            assert_eq!(matchy_result_get_entry(&result, &mut entry), MATCHY_SUCCESS);
+
+            let source = CString::new("source").unwrap();
+            let path = [source.as_ptr(), ptr::null()];
+            let mut first = matchy_entry_data_t::empty();
+            assert_eq!(
+                matchy_aget_value(&entry, &mut first, path.as_ptr()),
+                MATCHY_SUCCESS
+            );
+            let first_pointer = first.value.utf8_string;
+            assert_eq!(CStr::from_ptr(first_pointer).to_bytes(), b"unit-test");
+
+            let mut second = matchy_entry_data_t::empty();
+            assert_eq!(
+                matchy_aget_value(&entry, &mut second, path.as_ptr()),
+                MATCHY_ERROR_OUT_OF_MEMORY
+            );
+            assert!(!second.has_data);
+            assert_eq!(CStr::from_ptr(first_pointer).to_bytes(), b"unit-test");
+
+            matchy_close(db);
+        }
+    }
+
+    #[test]
+    fn matchy_aget_value_maps_malformed_data_and_overlong_paths() {
+        let bytes = build_test_db_bytes_with_source("bad\0value");
+
+        // SAFETY: The test uses handles and pointers created here, keeps all
+        // backing C strings/path storage alive, and closes the database once.
+        unsafe {
+            let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!db.is_null());
+            let query = CString::new("1.1.1.1").unwrap();
+            let result = matchy_query(db, query.as_ptr());
+            let mut entry = matchy_entry_s {
+                db: ptr::null(),
+                _data_offset: 0,
+            };
+            assert_eq!(matchy_result_get_entry(&result, &mut entry), MATCHY_SUCCESS);
+
+            let source = CString::new("source").unwrap();
+            let path = [source.as_ptr(), ptr::null()];
+            let mut output = matchy_entry_data_t::empty();
+            assert_eq!(
+                matchy_aget_value(&entry, &mut output, path.as_ptr()),
+                MATCHY_ERROR_DATA_PARSE
+            );
+            assert!(!output.has_data);
+
+            let mut overlong_path = vec![source.as_ptr(); MAX_LOOKUP_PATH_COMPONENTS + 1];
+            overlong_path.push(ptr::null());
+            assert_eq!(
+                matchy_aget_value(&entry, &mut output, overlong_path.as_ptr()),
+                MATCHY_ERROR_INVALID_PARAM
+            );
+            assert!(!output.has_data);
+
+            matchy_close(db);
+        }
     }
 
     #[test]

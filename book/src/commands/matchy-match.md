@@ -14,7 +14,7 @@ The `matchy match` command processes log files or stdin, automatically extractin
 
 **Key features:**
 - Automatic extraction of IPs, domains, and emails from unstructured logs
-- SIMD-accelerated scanning (200-500 MB/sec typical throughput)
+- SIMD-friendly scanning with workload-dependent throughput
 - Outputs JSON (NDJSON format) to stdout for easy parsing
 - Statistics and diagnostics to stderr
 - Memory-efficient streaming processing
@@ -53,8 +53,8 @@ $ matchy match threats.mxy *.log -j 4        # Parallel (4 threads)
 $ matchy match threats.mxy *.log -j 1        # Sequential
 ```
 
-**Parallel processing benefits:**
-- 2-8x faster throughput on multi-core systems
+**Parallel processing characteristics:**
+- Can improve throughput when extraction/matching is CPU-bound and the workload is divisible
 - Better CPU utilization for I/O-bound workloads
 - Scales with number of CPU cores
 - Each worker has its own LRU cache
@@ -368,15 +368,10 @@ Extraction is context-aware with word boundaries and validates format (TLD check
 
 ## Performance
 
-Typical throughput:
-- **Sequential mode**: 200-500 MB/s on modern hardware
-- **Parallel mode**: 400-2000 MB/s depending on core count and workload
-
-**Parallel performance scaling:**
-- 2 cores: ~1.8x speedup
-- 4 cores: ~3.2x speedup
-- 8 cores: ~5.5x speedup
-- 16+ cores: ~8-10x speedup (diminishing returns)
+Sequential and parallel throughput depend on line length, extracted-item
+density, compression, storage, cache state, result rate, and CPU topology.
+Parallel scaling is not linear; measure `-j 1`, auto-detection, and a few fixed
+worker counts on the target system.
 
 **Best practices for performance:**
 - Use parallel mode (`-j auto`) for multiple large files

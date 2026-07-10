@@ -70,6 +70,10 @@ Any data accessed through a result depends on the database handle remaining
 open. Do not close `db` before converting the result to JSON or reading entry
 data.
 
+File-backed handles memory-map the database. Keep that inode immutable until
+`matchy_close()`: publish updates with a complete temporary file plus atomic
+replacement, never in-place truncation or rewriting.
+
 ## Strings Returned By Matchy
 
 ```c
@@ -84,6 +88,17 @@ if (result.found) {
 ```
 
 Only pass strings returned by Matchy to `matchy_free_string()`.
+
+String and byte pointers placed in `matchy_entry_data_t` by
+`matchy_aget_value()` are owned by the database handle and remain valid until
+`matchy_close()`. Successful string and byte results are retained without
+eviction, under a 64 MiB estimated-storage cap per handle. Once that cap is
+exhausted, earlier pointers remain valid and new retained values return
+`MATCHY_ERROR_OUT_OF_MEMORY`. There is no per-value free operation.
+
+For repeated bulk traversal, prefer an entry-data list. Each list has its own
+64 MiB aggregate storage cap and is reclaimed by
+`matchy_free_entry_data_list()`.
 
 ## Entry Data Lists
 

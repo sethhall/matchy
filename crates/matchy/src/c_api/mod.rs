@@ -8,7 +8,7 @@
 //! # API Modules
 //!
 //! - [`matchy`] - Core database building and querying API  
-//! - [`maxminddb_compat`] - MaxMind DB compatibility layer (drop-in replacement for libmaxminddb)
+//! - [`maxminddb_compat`] - Source-level counterparts for commonly used libmaxminddb APIs
 //!
 //! # Safety Guarantees
 //!

@@ -4,7 +4,9 @@ Official performance benchmarks and testing methodology for Matchy.
 
 ## Overview
 
-Matchy provides built-in benchmarking via the `matchy bench` command. All benchmarks use real-world data patterns and measure build time, load time, and query throughput.
+Matchy provides built-in benchmarking via the `matchy bench` command. The
+built-in workloads use generated data and measure build time, open time, and
+query throughput. Use application data for production decisions.
 
 ## Running Benchmarks
 
@@ -31,9 +33,12 @@ matchy bench pattern --count 100000 --query-count 1000000
 
 See [matchy bench command](../commands/matchy-bench.md) for full options.
 
-## Official Results
+## Archived Results
 
-> Generated with version 0.5.2 on Apple M-series hardware
+> The numbers in this section were generated with version 0.5.2 on unspecified
+> Apple M-series hardware. They predate the current v2 format and the version 3
+> literal-hash implementation. They are retained only as historical context and
+> must not be used as current performance claims or regression baselines.
 
 ### IP Address Lookups
 
@@ -68,8 +73,8 @@ See [matchy bench command](../commands/matchy-bench.md) for full options.
 
 **Key characteristics**:
 - O(1) hash table lookups
-- FxHash for fast non-cryptographic hashing
-- Zero-copy memory access
+- Historical implementation predating the current sharded 96-bit XXH3 format
+- Results require a fresh run before comparison with current code
 
 ### Pattern Matching (Globs)
 
@@ -103,11 +108,11 @@ See [matchy bench command](../commands/matchy-bench.md) for full options.
 | Query latency | 64.83µs |
 
 **Key characteristics**:
-- Realistic mixed workload
+- Historical generated mixed workload
 - Combined IP and pattern searches
 - Production-like performance
 
-## Performance Factors
+## Archived v0.5.2 Performance Factors
 
 ### Database Size
 
@@ -118,7 +123,7 @@ See [matchy bench command](../commands/matchy-bench.md) for full options.
 | 1M | 0.35s | 5.2M queries/sec |
 | 10M | 3.5s | 4.8M queries/sec |
 
-Query performance remains high even with large databases due to memory-mapped access and efficient data structures.
+These are historical v0.5.2 observations, not current scaling guarantees.
 
 ### Hit Rate Impact
 
@@ -143,28 +148,27 @@ Higher hit rates show slightly lower throughput due to result extraction overhea
 
 ### Per-Database Overhead
 
-- **Handle**: ~200 bytes
-- **File mapping**: 0 bytes (OS-managed)
-- **Query state**: 0 bytes (stack-allocated)
+- **Mapped bytes**: Virtual address space scales with file size; resident pages depend on access patterns and OS policy
+- **Runtime metadata**: Small owned structures are retained for section views and validated indexes
+- **Query cache**: Optional and workload-dependent; each active thread retains at most 16 recent generations under one 64 MiB estimated live-result budget
+- **Query state**: Some hot paths reuse thread-local buffers that can grow and retain capacity
 
 ### Sharing Between Processes
 
-With 10 processes using 1GB database:
-
-- **Without mmap**: 10 × 1GB = 10GB RAM
-- **With mmap**: ~1GB RAM (shared pages)
-
-Memory-mapped databases are shared between processes automatically by the OS.
+Read-only file-backed pages can be shared by processes mapping the same file.
+Actual resident memory also includes private runtime metadata, query caches,
+page tables, and pages dirtied or retained by the operating system. Measure
+RSS/PSS under a representative access pattern instead of assuming it equals
+the database size.
 
 ## Scalability
 
 ### Vertical Scaling
 
-- **Single-threaded**: 5.8M queries/sec
-- **4 threads**: 23M queries/sec (4×)
-- **8 threads**: 46M queries/sec (8×)
-
-Linear scaling due to thread-safe read-only access.
+Opened databases support concurrent read-only lookups, but scaling is not
+guaranteed to be linear. It depends on CPU topology, memory bandwidth, cache
+behavior, query mix, and per-thread cache state. Measure the intended thread
+count and pinning policy on the deployment hardware.
 
 ### Horizontal Scaling
 
@@ -173,28 +177,14 @@ Multiple servers can use the same database:
 - Local copies: Each server loads independently
 - Hot reload: Update without restart
 
-## Comparison to Alternatives
+## Comparing Alternatives
 
-### vs. Traditional Databases
-
-| Feature | Matchy | PostgreSQL | Redis |
-|---------|--------|------------|-------|
-| IP lookups/sec | 5.8M | 50K | 200K |
-| Pattern matching | Yes | Slow | No |
-| Memory usage | Low (mmap) | High | High |
-| Startup time | <1ms | Seconds | Seconds |
-| Concurrent reads | Unlimited | Limited | Limited |
-
-### vs. In-Memory Structures
-
-| Feature | Matchy | HashMap | Regex Set |
-|---------|--------|---------|----------|
-| Query speed | 5.8M/sec | 10M/sec | 10K/sec |
-| Memory | O(1) | O(n) | O(n) |
-| Load time | <1ms | Seconds | Seconds |
-| Persistence | Built-in | Manual | Manual |
-
-Matchy trades slight query speed for massive memory and load time advantages.
+Do not compare Matchy with PostgreSQL, Redis, a `HashMap`, or a regex engine by
+copying generic throughput numbers: durability, network transport, query
+semantics, hit rate, data representation, and cache state differ. Build an
+end-to-end benchmark with equivalent data and correctness requirements, then
+report the complete command, software versions, hardware, storage, warm-up,
+cache policy, and result distribution.
 
 ## Benchmarking Methodology
 
@@ -209,17 +199,22 @@ Benchmarks use realistic synthetic data:
 
 1. **Build time**: Time to compile entries
 2. **Save time**: Disk write performance
-3. **Load time**: Memory-mapping overhead (averaged over 3 runs)
-4. **Query time**: Batch query throughput
+3. **Open time**: Mapping plus structural parsing, reported separately for warm and cold page-cache states
+4. **Query time**: Batch throughput and latency distribution after an explicit warm-up policy
 
 ### Hardware
 
-Official benchmarks run on:
-- **CPU**: Apple M-series (ARM64)
-- **RAM**: 16GB+
-- **Storage**: SSD
+Record at least:
 
-Results vary by hardware but relative performance remains consistent.
+- Matchy version and exact revision
+- CPU model, core count, governor/power mode, RAM, OS, and filesystem
+- Storage model and whether the page cache is warm or cold
+- Database size and format versions
+- Query count, hit rate, pattern style, cache settings, and thread count
+- Concurrent system load and repeated-run variance
+
+Relative performance is not assumed to remain constant across hardware or
+workloads.
 
 ## Reproducing Benchmarks
 
@@ -261,10 +256,10 @@ matchy match test.mxy access.log --stats
 
 ### For Best Query Performance
 
-2. Reuse database handles
-3. Use memory-mapped files (automatic)
-4. Keep database on fast storage (SSD)
-5. Use direct IP lookup when possible
+1. Reuse database handles
+2. Use memory-mapped files (automatic)
+3. Keep database on fast storage
+4. Use direct IP lookup when possible
 
 ### For Best Build Performance
 
@@ -278,7 +273,7 @@ matchy match test.mxy access.log --stats
 1. Use memory-mapped mode (default)
 2. Share databases between processes
 3. Close unused databases promptly
-4. Use validated mode (skips validation cache)
+4. Disable or reduce the query cache when its hit rate does not justify its memory
 
 ## See Also
 

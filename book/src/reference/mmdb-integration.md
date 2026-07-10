@@ -12,7 +12,9 @@ Matchy provides a compatibility layer that allows existing `libmaxminddb` applic
 #include <matchy/maxminddb.h>
 ```
 
-Provides drop-in replacements for `libmaxminddb` functions.
+Provides source-level counterparts for commonly used `libmaxminddb` functions.
+The compatibility layer is not ABI-compatible and does not implement every
+low-level libmaxminddb behavior.
 
 ## Function Mapping
 
@@ -66,7 +68,8 @@ MMDB_lookup_result result = MMDB_lookup_string(mmdb, "192.0.2.1",
 
 ### 3. Result Lifetime
 
-Matchy query results are zero-allocation structs:
+Matchy query results are offset-only structs that own no decoded data (the
+matcher may still grow bounded thread-local scratch on a cold string query):
 ```c
 matchy_result_t result = matchy_query(db, query);
 if (result.found) {
@@ -77,10 +80,10 @@ matchy_free_result(&result);  // No-op today; kept for ABI compatibility
 
 ### 4. Data Types
 
-Matchy uses MMDB-compatible data types but with extended support:
-- All MMDB types supported
-- Additional types for pattern metadata
-- Same binary format for compatibility
+Matchy supports the standard MMDB data types and also defines a Matchy-only
+`Timestamp` extended type 128. Standard MMDB readers cannot decode that type.
+Matchy's decoder also enforces pointer-depth, nesting, work, and allocation
+limits; these safety limits are not part of the MMDB format itself.
 
 ## Migration Path
 
@@ -131,20 +134,24 @@ For large codebases:
 
 ## Binary Compatibility
 
-Matchy databases are **forward-compatible** with MMDB:
-- Standard MMDB metadata section
-- Compatible binary format
-- PARAGLOB extensions in separate section
+Matchy databases use:
 
-Existing MMDB tools can read Matchy databases (ignoring pattern data).
+- A standard MMDB tree, separator, metadata section, and standard data encodings
+- Optional PARAGLOB and literal-hash sections outside tree-referenced data
+- An optional Matchy-only `Timestamp` value type
+
+Existing MMDB tools can ignore the text-index sections and read IP records whose
+values use only standard MMDB types. They cannot decode Matchy `Timestamp`
+values.
 
 ## Performance
 
-Matchy provides similar or better performance:
+Matchy uses the same broad MMDB tree and memory-mapping design:
+
 - **IP lookups**: Same O(n) binary trie
 - **Memory usage**: Memory-mapped like MMDB
-- **Load time**: <1ms for any size
-- **Additional**: Pattern matching at no cost to IP lookups
+- **Opening**: Memory-mapped and avoids whole-file deserialization; latency depends on storage, cache state, platform, extensions, and legacy scanning
+- **Additional**: Optional text indexes do not participate in IP tree traversal, but they do add file size and open-time validation work
 
 ## Limitations
 

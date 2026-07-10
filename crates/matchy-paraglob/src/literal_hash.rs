@@ -33,7 +33,7 @@ use rustc_hash::FxHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::mem;
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Ref};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Magic bytes for AC literal hash section
 pub const AC_LITERAL_HASH_MAGIC: &[u8; 4] = b"ACLH";
@@ -213,10 +213,9 @@ impl Default for ACLiteralHashBuilder {
 /// Memory-mapped AC literal hash table for lookups
 #[derive(Clone)]
 pub struct ACLiteralHash<'a> {
-    buffer: &'a [u8],
-    header: ACLiteralHashHeader,
-    table_start: usize,
-    patterns_start: usize,
+    table: &'a [u8],
+    patterns: &'a [u8],
+    table_size: usize,
 }
 
 impl<'a> ACLiteralHash<'a> {
@@ -228,11 +227,11 @@ impl<'a> ACLiteralHash<'a> {
             ));
         }
 
-        // Parse header with zerocopy
-        let (header_ref, _) = Ref::<_, ACLiteralHashHeader>::from_prefix(buffer).map_err(|_| {
-            ParaglobError::InvalidPattern("Invalid AC literal hash header alignment".to_string())
+        // Read into an owned value so the source slice does not need to satisfy
+        // `ACLiteralHashHeader`'s alignment requirement.
+        let (header, _) = ACLiteralHashHeader::read_from_prefix(buffer).map_err(|_| {
+            ParaglobError::InvalidPattern("Truncated AC literal hash header".to_string())
         })?;
-        let header = *header_ref;
 
         // Validate header
         if &header.magic != AC_LITERAL_HASH_MAGIC {
@@ -249,14 +248,77 @@ impl<'a> ACLiteralHash<'a> {
             )));
         }
 
+        let table_size = usize::try_from(header.table_size).map_err(|_| {
+            ParaglobError::InvalidPattern("AC literal hash table size is invalid".to_string())
+        })?;
+        if table_size == 0 {
+            return Err(ParaglobError::InvalidPattern(
+                "AC literal hash table size must be non-zero".to_string(),
+            ));
+        }
+
+        let entry_count = usize::try_from(header.entry_count).map_err(|_| {
+            ParaglobError::InvalidPattern("AC literal hash entry count is invalid".to_string())
+        })?;
+        if entry_count > table_size {
+            return Err(ParaglobError::InvalidPattern(format!(
+                "AC literal hash entry count {entry_count} exceeds table size {table_size}"
+            )));
+        }
+
         let table_start = mem::size_of::<ACLiteralHashHeader>();
-        let patterns_start = header.patterns_offset as usize;
+        let table_bytes = table_size
+            .checked_mul(mem::size_of::<ACHashEntry>())
+            .ok_or_else(|| {
+                ParaglobError::InvalidPattern(
+                    "AC literal hash table size overflows address space".to_string(),
+                )
+            })?;
+        let table_end = table_start.checked_add(table_bytes).ok_or_else(|| {
+            ParaglobError::InvalidPattern(
+                "AC literal hash table range overflows address space".to_string(),
+            )
+        })?;
+        if table_end > buffer.len() {
+            return Err(ParaglobError::InvalidPattern(format!(
+                "Truncated AC literal hash table: need {table_end} bytes, have {}",
+                buffer.len()
+            )));
+        }
+
+        let patterns_start = usize::try_from(header.patterns_offset).map_err(|_| {
+            ParaglobError::InvalidPattern("AC literal hash pattern offset is invalid".to_string())
+        })?;
+        if patterns_start < table_end {
+            return Err(ParaglobError::InvalidPattern(format!(
+                "AC literal hash pattern section overlaps table: offset {patterns_start}, table ends at {table_end}"
+            )));
+        }
+
+        let patterns_size = usize::try_from(header.patterns_size).map_err(|_| {
+            ParaglobError::InvalidPattern("AC literal hash pattern size is invalid".to_string())
+        })?;
+        if !patterns_size.is_multiple_of(mem::size_of::<u32>()) {
+            return Err(ParaglobError::InvalidPattern(
+                "AC literal hash pattern section is not a whole number of u32 values".to_string(),
+            ));
+        }
+        let patterns_end = patterns_start.checked_add(patterns_size).ok_or_else(|| {
+            ParaglobError::InvalidPattern(
+                "AC literal hash pattern range overflows address space".to_string(),
+            )
+        })?;
+        if patterns_end > buffer.len() {
+            return Err(ParaglobError::InvalidPattern(format!(
+                "Truncated AC literal hash pattern section: need {patterns_end} bytes, have {}",
+                buffer.len()
+            )));
+        }
 
         Ok(Self {
-            buffer,
-            header,
-            table_start,
-            patterns_start,
+            table: &buffer[table_start..table_end],
+            patterns: &buffer[patterns_start..patterns_end],
+            table_size,
         })
     }
 
@@ -264,67 +326,231 @@ impl<'a> ACLiteralHash<'a> {
     ///
     /// Returns `true` if the literal ID was found in the hash table, `false`
     /// otherwise.
-    pub fn visit_pattern_ids(&self, literal_id: u32, visit: impl FnMut(u32)) -> bool {
+    pub fn visit_pattern_ids(&self, literal_id: u32, mut visit: impl FnMut(u32)) -> bool {
+        self.visit_pattern_ids_while(literal_id, |pattern_id| {
+            visit(pattern_id);
+            true
+        })
+    }
+
+    /// Visit pattern IDs until the callback requests an early stop.
+    ///
+    /// This is used by bounded query paths so a pattern list is not scanned
+    /// after its aggregate candidate cap has already been reached.
+    pub(crate) fn visit_pattern_ids_while(
+        &self,
+        literal_id: u32,
+        visit: impl FnMut(u32) -> bool,
+    ) -> bool {
         let hash = compute_hash(literal_id);
-        let Ok(table_size) = usize::try_from(self.header.table_size) else {
-            return false;
-        };
-        let mut slot = usize::try_from(hash).unwrap_or(0) % table_size;
+        let mut slot = usize::try_from(hash).unwrap_or(0) % self.table_size;
 
         let entry_size = mem::size_of::<ACHashEntry>();
 
-        for _ in 0..table_size {
-            let entry_offset = self.table_start + slot * entry_size;
-            if entry_offset + entry_size > self.buffer.len() {
-                return false;
-            }
-
-            let entry_slice = &self.buffer[entry_offset..];
-            let Ok((entry_ref, _)) = Ref::<_, ACHashEntry>::from_prefix(entry_slice) else {
+        for _ in 0..self.table_size {
+            let entry_offset = slot * entry_size;
+            let Some(entry_slice) = self.table.get(entry_offset..entry_offset + entry_size) else {
                 return false;
             };
-            let entry = *entry_ref;
+            let entry_literal_id = u32::from_le_bytes(
+                entry_slice[..4]
+                    .try_into()
+                    .expect("validated hash entries contain four-byte fields"),
+            );
 
-            if entry.literal_id == EMPTY_SLOT {
+            if entry_literal_id == EMPTY_SLOT {
                 return false;
             }
 
-            if entry.literal_id == literal_id {
-                return self.visit_pattern_list(
-                    entry.patterns_offset as usize,
-                    entry.pattern_count as usize,
+            if entry_literal_id == literal_id {
+                let patterns_offset = u32::from_le_bytes(
+                    entry_slice[4..8]
+                        .try_into()
+                        .expect("validated hash entries contain four-byte fields"),
+                );
+                let pattern_count = u32::from_le_bytes(
+                    entry_slice[8..12]
+                        .try_into()
+                        .expect("validated hash entries contain four-byte fields"),
+                );
+                return self.visit_pattern_list_while(
+                    usize::try_from(patterns_offset).unwrap_or(usize::MAX),
+                    usize::try_from(pattern_count).unwrap_or(usize::MAX),
                     visit,
                 );
             }
 
-            slot = (slot + 1) % table_size;
+            slot += 1;
+            if slot == self.table_size {
+                slot = 0;
+            }
         }
 
         false
     }
 
-    /// Visit a pattern list from the patterns section without allocating.
-    fn visit_pattern_list(&self, offset: usize, count: usize, mut visit: impl FnMut(u32)) -> bool {
-        let abs_offset = self.patterns_start + offset;
-        let bytes_needed = count * 4;
+    /// Visit pattern IDs while charging hash probes and list entries.
+    ///
+    /// `charge` is called once for every inspected hash slot and pattern-list
+    /// item. Returning `false` from either callback stops immediately; a failed
+    /// charge is reported separately from a visitor-requested stop.
+    pub(crate) fn try_visit_pattern_ids_while(
+        &self,
+        literal_id: u32,
+        mut charge: impl FnMut(usize) -> bool,
+        mut visit: impl FnMut(u32) -> bool,
+    ) -> Result<bool, ()> {
+        let hash = compute_hash(literal_id);
+        let mut slot = usize::try_from(hash).unwrap_or(0) % self.table_size;
+        let entry_size = mem::size_of::<ACHashEntry>();
 
-        if abs_offset + bytes_needed > self.buffer.len() {
-            return false;
+        for _ in 0..self.table_size {
+            if !charge(1) {
+                return Err(());
+            }
+
+            let entry_offset = slot * entry_size;
+            let Some(entry_slice) = self.table.get(entry_offset..entry_offset + entry_size) else {
+                return Ok(false);
+            };
+            let entry_literal_id = u32::from_le_bytes(
+                entry_slice[..4]
+                    .try_into()
+                    .expect("validated hash entries contain four-byte fields"),
+            );
+
+            if entry_literal_id == EMPTY_SLOT {
+                return Ok(false);
+            }
+
+            if entry_literal_id == literal_id {
+                let patterns_offset = u32::from_le_bytes(
+                    entry_slice[4..8]
+                        .try_into()
+                        .expect("validated hash entries contain four-byte fields"),
+                );
+                let pattern_count = u32::from_le_bytes(
+                    entry_slice[8..12]
+                        .try_into()
+                        .expect("validated hash entries contain four-byte fields"),
+                );
+                let offset = usize::try_from(patterns_offset).unwrap_or(usize::MAX);
+                let count = usize::try_from(pattern_count).unwrap_or(usize::MAX);
+                let Some(bytes_needed) = count.checked_mul(mem::size_of::<u32>()) else {
+                    return Ok(false);
+                };
+                let Some(pattern_bytes) = self
+                    .patterns
+                    .get(offset..)
+                    .and_then(|tail| tail.get(..bytes_needed))
+                else {
+                    return Ok(false);
+                };
+
+                for pattern_bytes in pattern_bytes.chunks_exact(mem::size_of::<u32>()) {
+                    if !charge(1) {
+                        return Err(());
+                    }
+                    let pattern_id = u32::from_le_bytes(
+                        pattern_bytes
+                            .try_into()
+                            .expect("slice length checked to be 4 bytes"),
+                    );
+                    if !visit(pattern_id) {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+
+            slot += 1;
+            if slot == self.table_size {
+                slot = 0;
+            }
         }
 
-        for i in 0..count {
-            let pattern_offset = abs_offset + i * 4;
-            let Some(pattern_bytes) = self.buffer.get(pattern_offset..pattern_offset + 4) else {
-                return false;
-            };
+        Ok(false)
+    }
+
+    /// Visit a pattern list from the patterns section without allocating.
+    fn visit_pattern_list_while(
+        &self,
+        offset: usize,
+        count: usize,
+        mut visit: impl FnMut(u32) -> bool,
+    ) -> bool {
+        let Some(bytes_needed) = count.checked_mul(mem::size_of::<u32>()) else {
+            return false;
+        };
+        let Some(pattern_bytes) = self
+            .patterns
+            .get(offset..)
+            .and_then(|tail| tail.get(..bytes_needed))
+        else {
+            return false;
+        };
+
+        for pattern_bytes in pattern_bytes.chunks_exact(mem::size_of::<u32>()) {
             let pattern_id = u32::from_le_bytes(
                 pattern_bytes
                     .try_into()
                     .expect("slice length checked to be 4 bytes"),
             );
-            visit(pattern_id);
+            if !visit(pattern_id) {
+                return false;
+            }
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallible_visitor_stops_scanning_pattern_list() {
+        let mut builder = ACLiteralHashBuilder::new();
+        builder.add_mapping(7, (0..100).collect());
+        let buffer = builder.build();
+        let hash = ACLiteralHash::from_buffer(&buffer).unwrap();
+        let mut visited = Vec::new();
+
+        let completed = hash.visit_pattern_ids_while(7, |pattern_id| {
+            visited.push(pattern_id);
+            visited.len() < 3
+        });
+
+        assert!(!completed);
+        assert_eq!(visited, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn work_charged_visitor_stops_when_budget_is_exhausted() {
+        let mut builder = ACLiteralHashBuilder::new();
+        builder.add_mapping(7, (0..100).collect());
+        let buffer = builder.build();
+        let hash = ACLiteralHash::from_buffer(&buffer).unwrap();
+        let mut remaining = 2usize;
+        let mut visited = Vec::new();
+
+        let result = hash.try_visit_pattern_ids_while(
+            7,
+            |units| {
+                let Some(next) = remaining.checked_sub(units) else {
+                    return false;
+                };
+                remaining = next;
+                true
+            },
+            |pattern_id| {
+                visited.push(pattern_id);
+                true
+            },
+        );
+
+        assert_eq!(result, Err(()));
+        assert_eq!(visited, vec![0]);
     }
 }
