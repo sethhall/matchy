@@ -795,11 +795,7 @@ fn validate_data_section_utf8(
     } else {
         node_count.min(20)
     };
-    let step = if nodes_to_check == 0 {
-        1
-    } else {
-        (node_count / nodes_to_check).max(1)
-    };
+    let step = node_count.checked_div(nodes_to_check).unwrap_or(1).max(1);
 
     let mut strings_checked = 0u64;
     let mut values_checked = 0usize;
@@ -1289,11 +1285,7 @@ fn validate_data_section_pointers(
     } else {
         node_count.min(20)
     };
-    let step = if nodes_to_check == 0 {
-        1
-    } else {
-        (node_count / nodes_to_check).max(1)
-    };
+    let step = node_count.checked_div(nodes_to_check).unwrap_or(1).max(1);
 
     let mut values_checked = 0usize;
     let mut cycles_detected = 0;
