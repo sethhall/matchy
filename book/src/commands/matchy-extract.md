@@ -268,10 +268,13 @@ Validates format and rejects invalid addresses (e.g., `999.999.999.999`).
 
 ### IPv6 Addresses
 
-Extracts IPv6 addresses in all standard formats:
+Extracts IPv6 addresses in full eight-hextet form and the common internally
+compressed form:
 - Full: `2001:0db8:0000:0000:0000:0000:0000:0001`
 - Compressed: `2001:db8::1`
-- IPv4-mapped: `::ffff:192.0.2.1`
+
+Very short forms, leading or trailing `::`, loopback, and link-local addresses
+remain excluded by the extractor's high-signal filters.
 
 ### Domain Names
 

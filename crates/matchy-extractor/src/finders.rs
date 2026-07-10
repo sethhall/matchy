@@ -12,8 +12,6 @@ pub enum Finder {
     WordBoundaries,
     /// Dot positions (for domains, IPv4)
     Dots,
-    /// Double-colon positions (for IPv6)
-    DoubleColons,
     /// At-sign positions (for emails)
     AtSigns,
     /// "0x" prefix positions (for Ethereum)
@@ -25,7 +23,6 @@ pub struct FinderResults<'a> {
     pub chunk: &'a [u8],
     word_boundaries: Option<Vec<usize>>,
     dots: Option<Vec<usize>>,
-    double_colons: Option<Vec<usize>>,
     at_signs: Option<Vec<usize>>,
     hex_prefixes: Option<Vec<usize>>,
 }
@@ -37,7 +34,6 @@ impl<'a> FinderResults<'a> {
             chunk,
             word_boundaries: None,
             dots: None,
-            double_colons: None,
             at_signs: None,
             hex_prefixes: None,
         }
@@ -54,12 +50,6 @@ impl<'a> FinderResults<'a> {
             Finder::Dots => {
                 if self.dots.is_none() {
                     self.dots = Some(memchr::memchr_iter(b'.', self.chunk).collect());
-                }
-            }
-            Finder::DoubleColons => {
-                if self.double_colons.is_none() {
-                    let finder = memchr::memmem::Finder::new(b"::");
-                    self.double_colons = Some(finder.find_iter(self.chunk).collect());
                 }
             }
             Finder::AtSigns => {
@@ -88,14 +78,6 @@ impl<'a> FinderResults<'a> {
     #[inline]
     pub fn dots(&self) -> &[usize] {
         self.dots.as_ref().expect("Dots not requested by extractor")
-    }
-
-    /// Get double-colon positions (panics if not computed - programmer error).
-    #[inline]
-    pub fn double_colons(&self) -> &[usize] {
-        self.double_colons
-            .as_ref()
-            .expect("DoubleColons not requested by extractor")
     }
 
     /// Get at-sign positions (panics if not computed - programmer error).
@@ -201,14 +183,6 @@ mod tests {
         let mut results = FinderResults::new(chunk);
         results.ensure(Finder::AtSigns);
         assert_eq!(results.at_signs(), &[4, 25]);
-    }
-
-    #[test]
-    fn test_finder_results_double_colons() {
-        let chunk = b"addr 2001:db8::1 here";
-        let mut results = FinderResults::new(chunk);
-        results.ensure(Finder::DoubleColons);
-        assert_eq!(results.double_colons(), &[13]);
     }
 
     #[test]

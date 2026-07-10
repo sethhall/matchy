@@ -80,10 +80,10 @@ for match_item in extractor.extract_from_line(line) {
 
 ### IPv6 Addresses
 
-Extracts all valid IPv6 addresses:
+Extracts common compressed IPv6 addresses and full eight-hextet addresses:
 
 ```rust
-let line = b"Server at 2001:db8::1 responded from fe80::1";
+let line = b"Peers: 2001:db8::1 and 2001:0db8:85a3:0000:0000:8a2e:0370:7334";
 
 for match_item in extractor.extract_from_line(line) {
     if let ExtractedItem::Ipv6(ip) = match_item.item {
@@ -92,14 +92,17 @@ for match_item in extractor.extract_from_line(line) {
 }
 // Output:
 // IPv6: 2001:db8::1
-// IPv6: fe80::1
+// IPv6: 2001:db8:85a3::8a2e:370:7334
 ```
 
 **Features:**
-- **SIMD-accelerated**: Uses `memchr` for fast colon detection
-- **Compressed notation**: Handles `::` and full addresses
-- **Validation**: Full RFC 4291 compliance via Rust's `Ipv6Addr`
-- **Mixed notation**: Supports `::ffff:127.0.0.1` format
+- **Density-gated scanning**: Ignores sparse timestamp and `key:value` colons before candidate validation
+- **Compressed and uncompressed notation**: Handles internal `::` compression and all eight-hextet forms
+- **Zero-allocation validation**: Parses uncompressed candidates directly from bytes
+- **Exact spans**: Preserves the original spelling; full eight-hextet matches exclude a trailing bare port
+
+The extractor retains its existing high-signal IPv6 filters: very short forms,
+leading or trailing `::`, loopback, and link-local addresses are not returned.
 
 ### Email Addresses
 
