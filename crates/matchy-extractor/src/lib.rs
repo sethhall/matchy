@@ -16,7 +16,7 @@ pub use types::{ExtractedItem, HashType, Match};
 
 use extractors::{
     BitcoinExtractor, DomainExtractor, EmailExtractor, EthereumExtractor, ExtractorKind,
-    HashExtractor, Ipv4Extractor, MoneroExtractor,
+    HashExtractor, Ipv4Extractor, Ipv6Extractor, MoneroExtractor,
 };
 use finders::FinderResults;
 use iter::ExtractIter;
@@ -128,7 +128,7 @@ impl ExtractorBuilder {
         }
 
         if self.extract_ipv6 {
-            enabled.push(ExtractorKind::Ipv6(Box::default()));
+            enabled.push(ExtractorKind::Ipv6(Box::<Ipv6Extractor>::default()));
         }
 
         if self.extract_emails {
