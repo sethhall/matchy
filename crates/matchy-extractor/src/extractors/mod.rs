@@ -41,7 +41,7 @@ pub trait PatternExtractor: Send + Sync {
 pub enum ExtractorKind {
     Domain(DomainExtractor),
     Ipv4(Ipv4Extractor),
-    Ipv6(Ipv6Extractor),
+    Ipv6(Box<Ipv6Extractor>),
     Email(EmailExtractor),
     Hash(HashExtractor),
     Bitcoin(BitcoinExtractor),
