@@ -296,7 +296,10 @@ namespace matchy {
 #define MATCHY_ITEM_TYPE_MONERO 11
 
 /*
- Opaque database builder handle
+ Opaque database builder handle.
+
+ Handle pointers are identity tokens, not addresses callers or Matchy may
+ dereference. Unknown, stale, and wrong-kind tokens are rejected safely.
  */
 typedef struct matchy_builder_t {
   uint8_t _private[0];
@@ -423,7 +426,10 @@ typedef struct matchy_open_options_t {
 } matchy_open_options_t;
 
 /*
- Opaque database handle
+ Opaque database handle.
+
+ Handle pointers are identity tokens, not addresses callers or Matchy may
+ dereference. Unknown, stale, and wrong-kind tokens fail closed safely.
  */
 typedef struct matchy_t {
   uint8_t _private[0];
@@ -544,7 +550,10 @@ typedef struct matchy_entry_data_list_t {
 } matchy_entry_data_list_t;
 
 /*
- Opaque extractor handle
+ Opaque extractor handle.
+
+ Handle pointers are identity tokens, not addresses callers or Matchy may
+ dereference. Unknown, stale, and wrong-kind tokens are rejected safely.
  */
 typedef struct matchy_extractor_t {
   uint8_t _private[0];
@@ -628,8 +637,8 @@ struct matchy_builder_t *matchy_builder_new(void);
  * MATCHY_ERROR_INVALID_PARAM if builder is NULL
 
  # Safety
- * `builder` must be a valid pointer returned by `matchy_builder_new()` or NULL
- * `builder` must not have been freed with `matchy_builder_free()`
+ * `builder` is treated only as an opaque token; NULL, unknown, or closed
+   values return `MATCHY_ERROR_INVALID_PARAM`
 
  # Example
  ```c
@@ -660,8 +669,8 @@ int32_t matchy_builder_set_case_insensitive(struct matchy_builder_t *builder, bo
  * MATCHY_ERROR_INVALID_PARAM if builder or schema_name is NULL
 
  # Safety
- * `builder` must be a valid pointer returned by `matchy_builder_new()` or NULL
- * `builder` must not have been freed with `matchy_builder_free()`
+ * `builder` is treated only as an opaque token; NULL, unknown, or closed
+   values return `MATCHY_ERROR_INVALID_PARAM`
  * `schema_name` must be a valid null-terminated C string or NULL
 
  # Example
@@ -692,7 +701,8 @@ int32_t matchy_builder_set_schema(struct matchy_builder_t *builder, const char *
  * Error code < 0 on failure
 
  # Safety
- * `builder` must be a valid pointer from matchy_builder_new
+ * `builder` is treated only as an opaque token; NULL, unknown, or closed
+   values return `MATCHY_ERROR_INVALID_PARAM`
  * `key` must be a valid null-terminated C string
  * `json_data` must be a valid null-terminated C string containing valid JSON
 
@@ -717,7 +727,8 @@ int32_t matchy_builder_add(struct matchy_builder_t *builder, const char *key, co
  * Error code < 0 on failure
 
  # Safety
- * `builder` must be a valid pointer from matchy_builder_new
+ * `builder` is treated only as an opaque token; NULL, unknown, or closed
+   values return `MATCHY_ERROR_INVALID_PARAM`
  * `description` must be a valid null-terminated C string
  */
 int32_t matchy_builder_set_description(struct matchy_builder_t *builder, const char *description);
@@ -737,7 +748,8 @@ int32_t matchy_builder_set_description(struct matchy_builder_t *builder, const c
  * MATCHY_ERROR_INVALID_PARAM if parameters invalid
 
  # Safety
- * `builder` must be a valid pointer from matchy_builder_new
+ * `builder` is treated only as an opaque token; NULL, unknown, or closed
+   values return `MATCHY_ERROR_INVALID_PARAM`
  * `url` must be a valid null-terminated C string
 
  # Example
@@ -759,7 +771,8 @@ int32_t matchy_builder_set_update_url(struct matchy_builder_t *builder, const ch
  * Error code < 0 on failure
 
  # Safety
- * `builder` must be a valid pointer from matchy_builder_new
+ * `builder` is treated only as an opaque token; NULL, unknown, or closed
+   values return `MATCHY_ERROR_INVALID_PARAM`
  * `filename` must be a valid null-terminated C string
 
  # Example
@@ -784,7 +797,8 @@ int32_t matchy_builder_save(struct matchy_builder_t *builder, const char *filena
  * Error code < 0 on failure
 
  # Safety
- * `builder` must be a valid pointer from matchy_builder_new
+ * `builder` is treated only as an opaque token; NULL, unknown, or closed
+   values return `MATCHY_ERROR_INVALID_PARAM`
  * `buffer` and `size` must be valid pointers
  * Caller must free the returned buffer with libc::free()
 
@@ -807,9 +821,8 @@ int32_t matchy_builder_build(struct matchy_builder_t *builder, uint8_t **buffer,
  * `builder` - Builder handle (may be NULL)
 
  # Safety
- * `builder` must be NULL or a valid pointer from matchy_builder_new
- * Must not be used after calling this function
- * Calling with NULL is safe (no-op)
+ * `builder` is treated only as an opaque token; NULL, unknown, already
+   closed, or wrong-kind values are safe no-ops
  */
 void matchy_builder_free(struct matchy_builder_t *builder);
 
@@ -937,13 +950,15 @@ struct matchy_t *matchy_open_buffer(const uint8_t *buffer, uintptr_t size);
 
  Returns statistics about query performance, cache effectiveness,
  and query distribution.
+ If `db` is NULL, unknown, or closed, `stats` is filled with zeros.
 
  # Parameters
  * `db` - Database handle (must not be NULL)
  * `stats` - Pointer to stats structure to fill (must not be NULL)
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
  * `stats` must be a valid pointer to matchy_stats_t
 
  # Example
@@ -973,7 +988,8 @@ void matchy_get_stats(const struct matchy_t *db, struct matchy_stats_t *stats);
  * `db` - Database handle (must not be NULL)
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
 
  # Example
  ```c
@@ -995,9 +1011,13 @@ void matchy_clear_cache(const struct matchy_t *db);
  * `db` - Database handle (may be NULL)
 
  # Safety
- * `db` must be NULL or a valid pointer from matchy_open
- * Must not be used after calling this function
- * Calling with NULL is safe (no-op)
+ * `db` is treated only as an opaque token; NULL, unknown, already closed,
+   or wrong-kind values are safe no-ops
+ * Concurrent operations that already acquired the handle finish before the
+   database resources are released
+ * Concurrent calls to `matchy_close` all return after that release completes
+ * Calling `matchy_close` reentrantly from an operation on the same handle is
+   a safe no-op; call it again after the surrounding operation returns
 
  # Example
  ```c
@@ -1031,7 +1051,8 @@ void matchy_close(struct matchy_t *db);
  * Caller must free result with matchy_free_result
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
  * `query` must be a valid null-terminated C string
 
  # Example
@@ -1067,7 +1088,8 @@ struct matchy_result_t matchy_query(const struct matchy_t *db, const char *query
  * `result` - Pointer to result struct to fill (must not be NULL)
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
  * `query` must be a valid null-terminated C string
  * `result` must be a valid pointer to a matchy_result_t
 
@@ -1130,7 +1152,8 @@ const char *matchy_version(void);
  * NULL if db is NULL
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
  */
 const char *matchy_format(const struct matchy_t *db);
 
@@ -1145,7 +1168,8 @@ const char *matchy_format(const struct matchy_t *db);
  * false if not or if db is NULL
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
  */
 bool matchy_has_ip_data(const struct matchy_t *db);
 
@@ -1160,7 +1184,8 @@ bool matchy_has_ip_data(const struct matchy_t *db);
  * false if not or if db is NULL
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
  */
 bool matchy_has_string_data(const struct matchy_t *db);
 
@@ -1175,7 +1200,8 @@ bool matchy_has_string_data(const struct matchy_t *db);
  * false if not or if db is NULL
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
  */
 bool matchy_has_literal_data(const struct matchy_t *db);
 
@@ -1190,7 +1216,8 @@ bool matchy_has_literal_data(const struct matchy_t *db);
  * false if not or if db is NULL
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
  */
 bool matchy_has_glob_data(const struct matchy_t *db);
 
@@ -1205,7 +1232,8 @@ bool matchy_has_glob_data(const struct matchy_t *db);
  * false if not or if db is NULL
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
 
  # Deprecated
  Use matchy_has_literal_data or matchy_has_glob_data instead
@@ -1225,7 +1253,8 @@ bool matchy_has_pattern_data(const struct matchy_t *db);
  * NULL if no metadata available or db is NULL
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
  */
 char *matchy_metadata(const struct matchy_t *db);
 
@@ -1244,7 +1273,8 @@ char *matchy_metadata(const struct matchy_t *db);
  * NULL if pattern ID not found or db has no patterns
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
  */
 char *matchy_get_pattern_string(const struct matchy_t *db, uint32_t pattern_id);
 
@@ -1261,7 +1291,8 @@ char *matchy_get_pattern_string(const struct matchy_t *db, uint32_t pattern_id);
  * Number of patterns (0 if no patterns or db is NULL)
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
  */
 uintptr_t matchy_pattern_count(const struct matchy_t *db);
 
@@ -1392,7 +1423,8 @@ void matchy_free_entry_data_list(struct matchy_entry_data_list_t *list);
  * NULL if no update URL is set or db is NULL
 
  # Safety
- * `db` must be a valid pointer from matchy_open
+ * `db` is treated only as an opaque token; NULL, unknown, or closed values
+   use the function's documented fallback
 
  # Example
  ```c
@@ -1558,7 +1590,8 @@ struct matchy_extractor_t *matchy_extractor_create(uint32_t flags);
  ```
 
  # Safety
- * `extractor` must be a valid pointer returned by `matchy_extractor_create`
+ * `extractor` is treated only as an opaque token; NULL, unknown, or closed
+   values return `MATCHY_ERROR_INVALID_PARAM`
  * `data` must point to a valid buffer of at least `len` bytes
  * `matches` must be a valid pointer to an uninitialized `matchy_matches_t`
  */
@@ -1582,7 +1615,8 @@ void matchy_matches_free(struct matchy_matches_t *matches);
  * `extractor` - Extractor handle (may be NULL)
 
  # Safety
- * Must not be used after calling this function
+ * `extractor` is treated only as an opaque token; NULL, unknown, already
+   closed, or wrong-kind values are safe no-ops
  */
 void matchy_extractor_free(struct matchy_extractor_t *extractor);
 

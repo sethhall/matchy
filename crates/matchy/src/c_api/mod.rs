@@ -15,7 +15,9 @@
 //! All C functions follow these safety rules:
 //! - Null pointer checks on all inputs
 //! - Panic catching at FFI boundaries  
-//! - Opaque handles for resource management
+//! - Opaque handles are non-dereferenced identity tokens; stale, foreign,
+//!   wrong-kind, and already-closed tokens fail closed
+//! - Handle identities are never reused, preventing stale-token ABA aliasing
 //! - C-compatible result values or integer error codes (no exceptions)
 //! - Memory ownership clearly documented
 //!

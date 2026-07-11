@@ -7,18 +7,25 @@ use crate::database::{Database, DatabaseError, ReloadEvent};
 use crate::schema_validation::SchemaValidator;
 use crate::schemas::{get_schema_info, is_known_database_type};
 use crate::DatabaseBuilder;
+use arc_swap::ArcSwapOption;
 use chrono::TimeZone;
 use matchy_data_format::DataValue;
 use matchy_match_mode::MatchMode;
+use rustc_hash::FxHashMap;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::fmt::Write;
+use std::marker::PhantomData;
 use std::mem;
+use std::num::NonZeroUsize;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
+use std::rc::Rc;
 use std::slice;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 
 struct CCallbackAdapter {
     callback: unsafe extern "C" fn(event: *const matchy_reload_event_t, user_data: *mut c_void),
@@ -84,13 +91,19 @@ pub const MATCHY_ERROR_INTERNAL: i32 = -12;
 // OPAQUE HANDLES
 // ============================================================================
 
-/// Opaque database builder handle
+/// Opaque database builder handle.
+///
+/// Handle pointers are identity tokens, not addresses callers or Matchy may
+/// dereference. Unknown, stale, and wrong-kind tokens are rejected safely.
 #[repr(C)]
 pub struct matchy_builder_t {
     _private: [u8; 0],
 }
 
-/// Opaque database handle
+/// Opaque database handle.
+///
+/// Handle pointers are identity tokens, not addresses callers or Matchy may
+/// dereference. Unknown, stale, and wrong-kind tokens fail closed safely.
 #[repr(C)]
 pub struct matchy_t {
     _private: [u8; 0],
@@ -160,32 +173,492 @@ pub(super) fn ffi_guard<T>(fallback: T, f: impl FnOnce() -> T) -> T {
     }
 }
 
-// Conversion helpers for opaque types
+/// Number of opaque handle identities retained in each allocation page.
+///
+/// Identity bytes intentionally live until process exit so an address is never
+/// issued twice. The resources named by those identities are still reclaimed
+/// synchronously when their handles are closed.
+const OPAQUE_HANDLE_TOKEN_PAGE_SIZE: usize = 4096;
+
+#[derive(Clone, Copy)]
+struct OpaqueHandleToken {
+    _reserved: u8,
+}
+
+#[derive(Default)]
+struct OpaqueHandleTokenArena {
+    pages: Vec<Box<[OpaqueHandleToken]>>,
+    next_index: usize,
+}
+
+impl OpaqueHandleTokenArena {
+    fn allocate<T>(&mut self) -> (*mut T, OpaqueHandleId) {
+        if self.pages.is_empty() || self.next_index == OPAQUE_HANDLE_TOKEN_PAGE_SIZE {
+            self.pages.push(
+                vec![OpaqueHandleToken { _reserved: 0 }; OPAQUE_HANDLE_TOKEN_PAGE_SIZE]
+                    .into_boxed_slice(),
+            );
+            self.next_index = 0;
+        }
+
+        let token = &mut self.pages.last_mut().expect("page was just allocated")[self.next_index];
+        self.next_index += 1;
+
+        let handle = ptr::from_mut(token).cast::<T>();
+        let id = OpaqueHandleId(
+            NonZeroUsize::new(handle.addr()).expect("allocated handle token cannot be null"),
+        );
+        (handle, id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct OpaqueHandleId(NonZeroUsize);
+
+impl OpaqueHandleId {
+    fn from_ptr<T>(handle: *const T) -> Option<Self> {
+        NonZeroUsize::new(handle.addr()).map(Self)
+    }
+}
+
+struct OpaqueHandleSlot<T> {
+    value: RwLock<Option<T>>,
+}
+
+impl<T> OpaqueHandleSlot<T> {
+    fn new(value: T) -> Self {
+        Self {
+            value: RwLock::new(Some(value)),
+        }
+    }
+
+    fn take(&self) -> Option<T> {
+        let mut value = self.value.write().unwrap_or_else(PoisonError::into_inner);
+        value.take()
+    }
+}
+
+struct OpaqueHandleRegistry<T> {
+    active: RwLock<FxHashMap<OpaqueHandleId, Arc<OpaqueHandleSlot<T>>>>,
+}
+
+impl<T> Default for OpaqueHandleRegistry<T> {
+    fn default() -> Self {
+        Self {
+            active: RwLock::new(FxHashMap::default()),
+        }
+    }
+}
+
+impl<T> OpaqueHandleRegistry<T> {
+    fn insert<H>(&self, value: T) -> *mut H {
+        let (handle, id) = opaque_handle_token_arena()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .allocate::<H>();
+        let previous = self
+            .active
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, Arc::new(OpaqueHandleSlot::new(value)));
+        debug_assert!(previous.is_none(), "opaque handle identities are unique");
+        handle
+    }
+
+    fn acquire<H>(&self, handle: *const H) -> Option<Arc<OpaqueHandleSlot<T>>> {
+        let id = OpaqueHandleId::from_ptr(handle)?;
+        self.active
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .cloned()
+    }
+
+    fn retire<H>(&self, handle: *const H) -> Option<Arc<OpaqueHandleSlot<T>>> {
+        let id = OpaqueHandleId::from_ptr(handle)?;
+        self.active
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id)
+    }
+
+    fn with_read<H, R>(&self, handle: *const H, f: impl FnOnce(&T) -> R) -> Option<R> {
+        let slot = self.acquire(handle)?;
+        let value = slot.value.read().ok()?;
+        value.as_ref().map(f)
+    }
+
+    fn with_write<H, R>(&self, handle: *const H, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        let slot = self.acquire(handle)?;
+        let mut value = slot.value.write().ok()?;
+        value.as_mut().map(f)
+    }
+
+    fn close<H>(&self, handle: *const H) -> bool {
+        let Some(slot) = self.retire(handle) else {
+            return false;
+        };
+
+        // Remove first so no new operation can start, then wait for any
+        // operation already holding the slot lock before dropping the value.
+        let value = slot.take();
+        drop(value);
+        true
+    }
+}
+
+fn opaque_handle_token_arena() -> &'static Mutex<OpaqueHandleTokenArena> {
+    static ARENA: OnceLock<Mutex<OpaqueHandleTokenArena>> = OnceLock::new();
+    ARENA.get_or_init(|| Mutex::new(OpaqueHandleTokenArena::default()))
+}
+
+fn builder_handle_registry() -> &'static OpaqueHandleRegistry<MatchyBuilderInternal> {
+    static REGISTRY: OnceLock<OpaqueHandleRegistry<MatchyBuilderInternal>> = OnceLock::new();
+    REGISTRY.get_or_init(OpaqueHandleRegistry::default)
+}
+
+/// Database token pages are permanent, so validating an address against one
+/// makes the corresponding cell safe to access without trusting the caller's
+/// pointer. Each cell is issued at most once, which also prevents ABA reuse.
+const DATABASE_HANDLE_CELLS_PER_PAGE: usize = 512;
+const DATABASE_HANDLE_ACTIVE: u8 = 0;
+const DATABASE_HANDLE_CLOSING: u8 = 1;
+const DATABASE_HANDLE_CLOSED: u8 = 2;
+
+struct DatabaseHandleCell {
+    state: ArcSwapOption<MatchyInternal>,
+    close_state: AtomicU8,
+}
+
+impl DatabaseHandleCell {
+    fn new() -> Self {
+        Self {
+            state: ArcSwapOption::empty(),
+            close_state: AtomicU8::new(DATABASE_HANDLE_ACTIVE),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DatabaseHandlePage {
+    cells: Arc<[DatabaseHandleCell]>,
+    start_address: usize,
+    issued_count: usize,
+}
+
+impl DatabaseHandlePage {
+    fn new() -> Self {
+        let cells: Arc<[DatabaseHandleCell]> = (0..DATABASE_HANDLE_CELLS_PER_PAGE)
+            .map(|_| DatabaseHandleCell::new())
+            .collect::<Vec<_>>()
+            .into();
+        let start_address = cells.as_ptr().addr();
+        Self {
+            cells,
+            start_address,
+            issued_count: 0,
+        }
+    }
+
+    fn cell_index(&self, address: usize) -> Option<usize> {
+        let offset = address.checked_sub(self.start_address)?;
+        let cell_size = mem::size_of::<DatabaseHandleCell>();
+        if offset % cell_size != 0 {
+            return None;
+        }
+        let index = offset / cell_size;
+        (index < self.issued_count).then_some(index)
+    }
+
+    fn cell(&self, address: usize) -> Option<&DatabaseHandleCell> {
+        self.cells.get(self.cell_index(address)?)
+    }
+}
+
+#[derive(Default)]
+struct DatabaseHandleArena {
+    pages: Vec<DatabaseHandlePage>,
+    next_index: usize,
+}
+
+impl DatabaseHandleArena {
+    fn insert(&mut self, internal: MatchyInternal) -> *mut matchy_t {
+        if self.pages.is_empty() || self.next_index == DATABASE_HANDLE_CELLS_PER_PAGE {
+            self.pages.push(DatabaseHandlePage::new());
+            self.next_index = 0;
+        }
+
+        let page = self.pages.last_mut().expect("page was just allocated");
+        let cell = &page.cells[self.next_index];
+
+        debug_assert!(
+            cell.state.load().is_none(),
+            "database cells are issued once"
+        );
+        cell.state.store(Some(Arc::new(internal)));
+        let handle = ptr::from_ref(cell).cast_mut().cast::<matchy_t>();
+        self.next_index += 1;
+        page.issued_count = self.next_index;
+
+        handle
+    }
+
+    fn page_for_address(&self, address: usize) -> Option<DatabaseHandlePage> {
+        self.pages
+            .iter()
+            .find(|page| page.cell_index(address).is_some())
+            .cloned()
+    }
+}
+
+fn database_handle_arena() -> &'static Mutex<DatabaseHandleArena> {
+    static ARENA: OnceLock<Mutex<DatabaseHandleArena>> = OnceLock::new();
+    ARENA.get_or_init(|| Mutex::new(DatabaseHandleArena::default()))
+}
+
+thread_local! {
+    /// A copied page descriptor validates repeated handles without a global
+    /// lock. Nested reads may share it; a nested miss uses the arena page and
+    /// simply skips replacing a cache that an outer read still borrows.
+    static DATABASE_HANDLE_PAGE_CACHE: RefCell<Option<DatabaseHandlePage>> =
+        const { RefCell::new(None) };
+}
+
+fn with_database_handle_cell<R>(
+    handle: *const matchy_t,
+    f: impl FnOnce(&DatabaseHandleCell) -> R,
+) -> Option<R> {
+    let address = NonZeroUsize::new(handle.addr())?.get();
+    DATABASE_HANDLE_PAGE_CACHE.with(|cache| {
+        {
+            let cached = cache.borrow();
+            if let Some(cell) = cached.as_ref().and_then(|page| page.cell(address)) {
+                return Some(f(cell));
+            }
+        }
+
+        let page = database_handle_arena()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .page_for_address(address)?;
+        let result = f(page.cell(address)?);
+        if let Ok(mut cached) = cache.try_borrow_mut() {
+            cached.replace(page);
+        }
+        Some(result)
+    })
+}
+
+thread_local! {
+    /// Fast-path marker for the common non-nested operation. It is used only to
+    /// make same-thread reentrant close a safe no-op; ArcSwap owns reclamation.
+    static ACTIVE_DATABASE_PRIMARY: Cell<usize> = const { Cell::new(0) };
+    /// Additional same-thread operations are rare, so they use a compact slot
+    /// vector without adding allocation or scanning to the normal path.
+    static ACTIVE_DATABASE_OVERFLOW: RefCell<Vec<Option<usize>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+struct ActiveDatabaseHandle {
+    address: usize,
+    overflow_slot: Option<usize>,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl ActiveDatabaseHandle {
+    fn enter(cell: &DatabaseHandleCell) -> Self {
+        let address = ptr::from_ref(cell).addr();
+        let uses_primary = ACTIVE_DATABASE_PRIMARY.with(|primary| {
+            if primary.get() == 0 {
+                primary.set(address);
+                true
+            } else {
+                false
+            }
+        });
+        let overflow_slot = (!uses_primary).then(|| {
+            ACTIVE_DATABASE_OVERFLOW.with(|overflow| {
+                let mut overflow = overflow.borrow_mut();
+                let slot = overflow
+                    .iter()
+                    .position(Option::is_none)
+                    .unwrap_or(overflow.len());
+                if slot == overflow.len() {
+                    overflow.push(Some(address));
+                } else {
+                    overflow[slot] = Some(address);
+                }
+                slot
+            })
+        });
+
+        Self {
+            address,
+            overflow_slot,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+}
+
+impl Drop for ActiveDatabaseHandle {
+    fn drop(&mut self) {
+        if let Some(slot) = self.overflow_slot {
+            ACTIVE_DATABASE_OVERFLOW.with(|overflow| {
+                let mut overflow = overflow.borrow_mut();
+                debug_assert_eq!(overflow.get(slot).copied().flatten(), Some(self.address));
+                overflow[slot] = None;
+                while overflow.last().is_some_and(Option::is_none) {
+                    overflow.pop();
+                }
+            });
+        } else {
+            ACTIVE_DATABASE_PRIMARY.with(|primary| {
+                debug_assert_eq!(primary.get(), self.address);
+                primary.set(0);
+            });
+        }
+    }
+}
+
+fn current_thread_uses_database_cell(cell: &DatabaseHandleCell) -> bool {
+    let address = ptr::from_ref(cell).addr();
+    ACTIVE_DATABASE_PRIMARY.with(|primary| primary.get() == address)
+        || ACTIVE_DATABASE_OVERFLOW.with(|overflow| overflow.borrow().contains(&Some(address)))
+}
+
+#[cfg(test)]
+struct DatabaseHandleLease {
+    _state: Arc<MatchyInternal>,
+    _active: ActiveDatabaseHandle,
+}
+
+#[cfg(test)]
+fn acquire_database_handle(handle: *const matchy_t) -> Option<DatabaseHandleLease> {
+    with_database_handle_cell(handle, |cell| {
+        let active = ActiveDatabaseHandle::enter(cell);
+        let state = cell.state.load_full()?;
+        Some(DatabaseHandleLease {
+            _state: state,
+            _active: active,
+        })
+    })
+    .flatten()
+}
+
+struct DatabaseCloseCompletion<'a>(&'a AtomicU8);
+
+impl Drop for DatabaseCloseCompletion<'_> {
+    fn drop(&mut self) {
+        self.0.store(DATABASE_HANDLE_CLOSED, Ordering::Release);
+    }
+}
+
+fn wait_for_database_close(close_state: &AtomicU8) {
+    let mut spins = 0;
+    while close_state.load(Ordering::Acquire) != DATABASE_HANDLE_CLOSED {
+        if spins < 64 {
+            spins += 1;
+            std::hint::spin_loop();
+        } else {
+            std::thread::yield_now();
+        }
+    }
+}
+
+fn close_database_handle(handle: *const matchy_t) -> bool {
+    with_database_handle_cell(handle, |cell| {
+        if current_thread_uses_database_cell(cell) {
+            // Synchronous reclamation cannot wait for a lease owned by this
+            // thread. Leave the token active so the caller can close it after
+            // the surrounding operation returns.
+            return false;
+        }
+
+        match cell.close_state.compare_exchange(
+            DATABASE_HANDLE_ACTIVE,
+            DATABASE_HANDLE_CLOSING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {}
+            Err(DATABASE_HANDLE_CLOSING) => {
+                wait_for_database_close(&cell.close_state);
+                return false;
+            }
+            Err(DATABASE_HANDLE_CLOSED) => return false,
+            Err(unexpected) => unreachable!("invalid database close state: {unexpected}"),
+        }
+
+        let _completion = DatabaseCloseCompletion(&cell.close_state);
+        let Some(mut state) = cell.state.swap(None) else {
+            return false;
+        };
+
+        // ArcSwap pays all pre-swap reader debts before returning from swap. No
+        // later reader can acquire this Arc after the cell contains None, so
+        // the strong count now decreases monotonically as in-flight calls finish.
+        let mut spins = 0;
+        while Arc::strong_count(&state) != 1 {
+            if spins < 64 {
+                spins += 1;
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        loop {
+            match Arc::try_unwrap(state) {
+                Ok(internal) => {
+                    drop(internal);
+                    return true;
+                }
+                Err(shared) => {
+                    state = shared;
+                    std::thread::yield_now();
+                }
+            }
+        }
+    })
+    .unwrap_or(false)
+}
+
 impl matchy_builder_t {
-    fn from_internal(internal: Box<MatchyBuilderInternal>) -> *mut Self {
-        Box::into_raw(internal).cast::<Self>()
+    fn from_internal(internal: MatchyBuilderInternal) -> *mut Self {
+        builder_handle_registry().insert(internal)
     }
 
-    unsafe fn into_internal(ptr: *mut Self) -> Box<MatchyBuilderInternal> {
-        Box::from_raw(ptr.cast::<MatchyBuilderInternal>())
+    fn with_internal<R>(
+        ptr: *const Self,
+        f: impl FnOnce(&mut MatchyBuilderInternal) -> R,
+    ) -> Option<R> {
+        builder_handle_registry().with_write(ptr, f)
     }
 
-    unsafe fn as_internal_mut(ptr: *mut Self) -> &'static mut MatchyBuilderInternal {
-        &mut *ptr.cast::<MatchyBuilderInternal>()
+    fn close(ptr: *const Self) -> bool {
+        builder_handle_registry().close(ptr)
     }
 }
 
 impl matchy_t {
-    fn from_internal(internal: Box<MatchyInternal>) -> *mut Self {
-        Box::into_raw(internal).cast::<Self>()
+    fn from_internal(internal: MatchyInternal) -> *mut Self {
+        database_handle_arena()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(internal)
     }
 
-    unsafe fn into_internal(ptr: *mut Self) -> Box<MatchyInternal> {
-        Box::from_raw(ptr.cast::<MatchyInternal>())
+    fn with_internal<R>(ptr: *const Self, f: impl FnOnce(&MatchyInternal) -> R) -> Option<R> {
+        let (active, state) = with_database_handle_cell(ptr, |cell| {
+            (ActiveDatabaseHandle::enter(cell), cell.state.load())
+        })?;
+        let result = state.as_deref().map(f);
+        drop(state);
+        drop(active);
+        result
     }
 
-    unsafe fn as_internal(ptr: *const Self) -> &'static MatchyInternal {
-        &*ptr.cast::<MatchyInternal>()
+    fn close(ptr: *const Self) -> bool {
+        close_database_handle(ptr)
     }
 }
 
@@ -211,10 +684,10 @@ impl matchy_t {
 pub extern "C" fn matchy_builder_new() -> *mut matchy_builder_t {
     ffi_guard(ptr::null_mut(), || {
         let builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
-        let internal = Box::new(MatchyBuilderInternal {
+        let internal = MatchyBuilderInternal {
             builder,
             validator: None,
-        });
+        };
         matchy_builder_t::from_internal(internal)
     })
 }
@@ -233,8 +706,8 @@ pub extern "C" fn matchy_builder_new() -> *mut matchy_builder_t {
 /// * MATCHY_ERROR_INVALID_PARAM if builder is NULL
 ///
 /// # Safety
-/// * `builder` must be a valid pointer returned by `matchy_builder_new()` or NULL
-/// * `builder` must not have been freed with `matchy_builder_free()`
+/// * `builder` is treated only as an opaque token; NULL, unknown, or closed
+///   values return `MATCHY_ERROR_INVALID_PARAM`
 ///
 /// # Example
 /// ```c
@@ -252,15 +725,17 @@ pub unsafe extern "C" fn matchy_builder_set_case_insensitive(
             return MATCHY_ERROR_INVALID_PARAM;
         }
 
-        let internal = matchy_builder_t::as_internal_mut(builder);
-        let match_mode = if case_insensitive {
-            MatchMode::CaseInsensitive
-        } else {
-            MatchMode::CaseSensitive
-        };
-        internal.builder.set_match_mode(match_mode);
+        matchy_builder_t::with_internal(builder, |internal| {
+            let match_mode = if case_insensitive {
+                MatchMode::CaseInsensitive
+            } else {
+                MatchMode::CaseSensitive
+            };
+            internal.builder.set_match_mode(match_mode);
 
-        MATCHY_SUCCESS
+            MATCHY_SUCCESS
+        })
+        .unwrap_or(MATCHY_ERROR_INVALID_PARAM)
     })
 }
 
@@ -283,8 +758,8 @@ pub unsafe extern "C" fn matchy_builder_set_case_insensitive(
 /// * MATCHY_ERROR_INVALID_PARAM if builder or schema_name is NULL
 ///
 /// # Safety
-/// * `builder` must be a valid pointer returned by `matchy_builder_new()` or NULL
-/// * `builder` must not have been freed with `matchy_builder_free()`
+/// * `builder` is treated only as an opaque token; NULL, unknown, or closed
+///   values return `MATCHY_ERROR_INVALID_PARAM`
 /// * `schema_name` must be a valid null-terminated C string or NULL
 ///
 /// # Example
@@ -323,18 +798,20 @@ pub unsafe extern "C" fn matchy_builder_set_schema(
             Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
         };
 
-        // Get the canonical database type and set it
-        let internal = matchy_builder_t::as_internal_mut(builder);
-        if let Some(info) = get_schema_info(name) {
-            // DatabaseBuilder's with_database_type takes ownership and returns Self
-            // We need to use a placeholder to swap it out
-            let placeholder = DatabaseBuilder::new(MatchMode::CaseSensitive);
-            let old_builder = std::mem::replace(&mut internal.builder, placeholder);
-            internal.builder = old_builder.with_database_type(info.database_type);
-        }
-        internal.validator = Some(validator);
+        matchy_builder_t::with_internal(builder, |internal| {
+            // Get the canonical database type and set it
+            if let Some(info) = get_schema_info(name) {
+                // DatabaseBuilder's with_database_type takes ownership and returns Self
+                // We need to use a placeholder to swap it out
+                let placeholder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+                let old_builder = std::mem::replace(&mut internal.builder, placeholder);
+                internal.builder = old_builder.with_database_type(info.database_type);
+            }
+            internal.validator = Some(validator);
 
-        MATCHY_SUCCESS
+            MATCHY_SUCCESS
+        })
+        .unwrap_or(MATCHY_ERROR_INVALID_PARAM)
     })
 }
 
@@ -352,7 +829,8 @@ pub unsafe extern "C" fn matchy_builder_set_schema(
 /// * Error code < 0 on failure
 ///
 /// # Safety
-/// * `builder` must be a valid pointer from matchy_builder_new
+/// * `builder` is treated only as an opaque token; NULL, unknown, or closed
+///   values return `MATCHY_ERROR_INVALID_PARAM`
 /// * `key` must be a valid null-terminated C string
 /// * `json_data` must be a valid null-terminated C string containing valid JSON
 ///
@@ -400,19 +878,20 @@ pub unsafe extern "C" fn matchy_builder_add(
             }
         };
 
-        let internal = matchy_builder_t::as_internal_mut(builder);
-
-        // Validate against schema if one is set
-        if let Some(ref validator) = internal.validator {
-            if validator.validate(&data_map).is_err() {
-                return MATCHY_ERROR_SCHEMA_VALIDATION;
+        matchy_builder_t::with_internal(builder, |internal| {
+            // Validate against schema if one is set
+            if let Some(ref validator) = internal.validator {
+                if validator.validate(&data_map).is_err() {
+                    return MATCHY_ERROR_SCHEMA_VALIDATION;
+                }
             }
-        }
 
-        match internal.builder.add_entry(key_str, data_map) {
-            Ok(_) => MATCHY_SUCCESS,
-            Err(_) => MATCHY_ERROR_INVALID_FORMAT,
-        }
+            match internal.builder.add_entry(key_str, data_map) {
+                Ok(_) => MATCHY_SUCCESS,
+                Err(_) => MATCHY_ERROR_INVALID_FORMAT,
+            }
+        })
+        .unwrap_or(MATCHY_ERROR_INVALID_PARAM)
     })
 }
 
@@ -427,7 +906,8 @@ pub unsafe extern "C" fn matchy_builder_add(
 /// * Error code < 0 on failure
 ///
 /// # Safety
-/// * `builder` must be a valid pointer from matchy_builder_new
+/// * `builder` is treated only as an opaque token; NULL, unknown, or closed
+///   values return `MATCHY_ERROR_INVALID_PARAM`
 /// * `description` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn matchy_builder_set_description(
@@ -444,15 +924,17 @@ pub unsafe extern "C" fn matchy_builder_set_description(
             Err(_) => return MATCHY_ERROR_INVALID_PARAM,
         };
 
-        let internal = matchy_builder_t::as_internal_mut(builder);
-        // Create new builder with description
-        let old_builder = std::mem::replace(
-            &mut internal.builder,
-            DatabaseBuilder::new(MatchMode::CaseSensitive),
-        );
-        internal.builder = old_builder.with_description("en", desc_str);
+        matchy_builder_t::with_internal(builder, |internal| {
+            // Create new builder with description
+            let old_builder = std::mem::replace(
+                &mut internal.builder,
+                DatabaseBuilder::new(MatchMode::CaseSensitive),
+            );
+            internal.builder = old_builder.with_description("en", desc_str);
 
-        MATCHY_SUCCESS
+            MATCHY_SUCCESS
+        })
+        .unwrap_or(MATCHY_ERROR_INVALID_PARAM)
     })
 }
 
@@ -470,7 +952,8 @@ pub unsafe extern "C" fn matchy_builder_set_description(
 /// * MATCHY_ERROR_INVALID_PARAM if parameters invalid
 ///
 /// # Safety
-/// * `builder` must be a valid pointer from matchy_builder_new
+/// * `builder` is treated only as an opaque token; NULL, unknown, or closed
+///   values return `MATCHY_ERROR_INVALID_PARAM`
 /// * `url` must be a valid null-terminated C string
 ///
 /// # Example
@@ -492,14 +975,16 @@ pub unsafe extern "C" fn matchy_builder_set_update_url(
             Err(_) => return MATCHY_ERROR_INVALID_PARAM,
         };
 
-        let internal = matchy_builder_t::as_internal_mut(builder);
-        let old_builder = std::mem::replace(
-            &mut internal.builder,
-            DatabaseBuilder::new(MatchMode::CaseSensitive),
-        );
-        internal.builder = old_builder.with_update_url(url_str);
+        matchy_builder_t::with_internal(builder, |internal| {
+            let old_builder = std::mem::replace(
+                &mut internal.builder,
+                DatabaseBuilder::new(MatchMode::CaseSensitive),
+            );
+            internal.builder = old_builder.with_update_url(url_str);
 
-        MATCHY_SUCCESS
+            MATCHY_SUCCESS
+        })
+        .unwrap_or(MATCHY_ERROR_INVALID_PARAM)
     })
 }
 
@@ -514,7 +999,8 @@ pub unsafe extern "C" fn matchy_builder_set_update_url(
 /// * Error code < 0 on failure
 ///
 /// # Safety
-/// * `builder` must be a valid pointer from matchy_builder_new
+/// * `builder` is treated only as an opaque token; NULL, unknown, or closed
+///   values return `MATCHY_ERROR_INVALID_PARAM`
 /// * `filename` must be a valid null-terminated C string
 ///
 /// # Example
@@ -538,21 +1024,23 @@ pub unsafe extern "C" fn matchy_builder_save(
             Err(_) => return MATCHY_ERROR_INVALID_PARAM,
         };
 
-        let internal = matchy_builder_t::as_internal_mut(builder);
-        // Replace builder with a dummy one to take ownership
-        let builder_to_build = std::mem::replace(
-            &mut internal.builder,
-            DatabaseBuilder::new(MatchMode::CaseSensitive),
-        );
-        let bytes = match builder_to_build.build() {
-            Ok(b) => b,
-            Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
-        };
+        matchy_builder_t::with_internal(builder, |internal| {
+            // Replace builder with a dummy one to take ownership
+            let builder_to_build = std::mem::replace(
+                &mut internal.builder,
+                DatabaseBuilder::new(MatchMode::CaseSensitive),
+            );
+            let bytes = match builder_to_build.build() {
+                Ok(b) => b,
+                Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
+            };
 
-        match std::fs::write(path, bytes) {
-            Ok(_) => MATCHY_SUCCESS,
-            Err(_) => MATCHY_ERROR_IO,
-        }
+            match std::fs::write(path, bytes) {
+                Ok(_) => MATCHY_SUCCESS,
+                Err(_) => MATCHY_ERROR_IO,
+            }
+        })
+        .unwrap_or(MATCHY_ERROR_INVALID_PARAM)
     })
 }
 
@@ -568,7 +1056,8 @@ pub unsafe extern "C" fn matchy_builder_save(
 /// * Error code < 0 on failure
 ///
 /// # Safety
-/// * `builder` must be a valid pointer from matchy_builder_new
+/// * `builder` is treated only as an opaque token; NULL, unknown, or closed
+///   values return `MATCHY_ERROR_INVALID_PARAM`
 /// * `buffer` and `size` must be valid pointers
 /// * Caller must free the returned buffer with libc::free()
 ///
@@ -592,31 +1081,33 @@ pub unsafe extern "C" fn matchy_builder_build(
             return MATCHY_ERROR_INVALID_PARAM;
         }
 
-        let internal = matchy_builder_t::as_internal_mut(builder);
-        // Replace builder with a dummy one to take ownership
-        let builder_to_build = std::mem::replace(
-            &mut internal.builder,
-            DatabaseBuilder::new(MatchMode::CaseSensitive),
-        );
-        let bytes = match builder_to_build.build() {
-            Ok(b) => b,
-            Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
-        };
+        matchy_builder_t::with_internal(builder, |internal| {
+            // Replace builder with a dummy one to take ownership
+            let builder_to_build = std::mem::replace(
+                &mut internal.builder,
+                DatabaseBuilder::new(MatchMode::CaseSensitive),
+            );
+            let bytes = match builder_to_build.build() {
+                Ok(b) => b,
+                Err(_) => return MATCHY_ERROR_INVALID_FORMAT,
+            };
 
-        // Allocate buffer using libc::malloc so C can free it
-        let buf_size = bytes.len();
-        let buf_ptr = libc::malloc(buf_size).cast::<u8>();
-        if buf_ptr.is_null() {
-            return MATCHY_ERROR_OUT_OF_MEMORY;
-        }
+            // Allocate buffer using libc::malloc so C can free it
+            let buf_size = bytes.len();
+            let buf_ptr = libc::malloc(buf_size).cast::<u8>();
+            if buf_ptr.is_null() {
+                return MATCHY_ERROR_OUT_OF_MEMORY;
+            }
 
-        // Copy data
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr, buf_size);
+            // Copy data
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr, buf_size);
 
-        *buffer = buf_ptr;
-        *size = buf_size;
+            *buffer = buf_ptr;
+            *size = buf_size;
 
-        MATCHY_SUCCESS
+            MATCHY_SUCCESS
+        })
+        .unwrap_or(MATCHY_ERROR_INVALID_PARAM)
     })
 }
 
@@ -626,15 +1117,12 @@ pub unsafe extern "C" fn matchy_builder_build(
 /// * `builder` - Builder handle (may be NULL)
 ///
 /// # Safety
-/// * `builder` must be NULL or a valid pointer from matchy_builder_new
-/// * Must not be used after calling this function
-/// * Calling with NULL is safe (no-op)
+/// * `builder` is treated only as an opaque token; NULL, unknown, already
+///   closed, or wrong-kind values are safe no-ops
 #[no_mangle]
 pub unsafe extern "C" fn matchy_builder_free(builder: *mut matchy_builder_t) {
     ffi_guard((), || {
-        if !builder.is_null() {
-            let _ = matchy_builder_t::into_internal(builder);
-        }
+        let _ = matchy_builder_t::close(builder);
     });
 }
 
@@ -883,10 +1371,7 @@ pub unsafe extern "C" fn matchy_open_with_options(
         }
 
         match opener.open() {
-            Ok(db) => {
-                let internal = Box::new(MatchyInternal::new(db));
-                matchy_t::from_internal(internal)
-            }
+            Ok(db) => matchy_t::from_internal(MatchyInternal::new(db)),
             Err(_) => ptr::null_mut(),
         }
     })
@@ -956,10 +1441,7 @@ pub unsafe extern "C" fn matchy_open_buffer(buffer: *const u8, size: usize) -> *
 
         let slice = slice::from_raw_parts(buffer, size);
         match Database::from_bytes(slice.to_vec()) {
-            Ok(db) => {
-                let internal = Box::new(MatchyInternal::new(db));
-                matchy_t::from_internal(internal)
-            }
+            Ok(db) => matchy_t::from_internal(MatchyInternal::new(db)),
             Err(_) => ptr::null_mut(),
         }
     })
@@ -989,13 +1471,15 @@ pub struct matchy_stats_t {
 ///
 /// Returns statistics about query performance, cache effectiveness,
 /// and query distribution.
+/// If `db` is NULL, unknown, or closed, `stats` is filled with zeros.
 ///
 /// # Parameters
 /// * `db` - Database handle (must not be NULL)
 /// * `stats` - Pointer to stats structure to fill (must not be NULL)
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 /// * `stats` must be a valid pointer to matchy_stats_t
 ///
 /// # Example
@@ -1015,22 +1499,36 @@ pub struct matchy_stats_t {
 #[no_mangle]
 pub unsafe extern "C" fn matchy_get_stats(db: *const matchy_t, stats: *mut matchy_stats_t) {
     ffi_guard((), || {
-        if db.is_null() || stats.is_null() {
+        if stats.is_null() {
             return;
         }
 
-        let internal = matchy_t::as_internal(db);
-        let rust_stats = internal.database.stats();
-
         *stats = matchy_stats_t {
-            total_queries: rust_stats.total_queries,
-            queries_with_match: rust_stats.queries_with_match,
-            queries_without_match: rust_stats.queries_without_match,
-            cache_hits: rust_stats.cache_hits,
-            cache_misses: rust_stats.cache_misses,
-            ip_queries: rust_stats.ip_queries,
-            string_queries: rust_stats.string_queries,
+            total_queries: 0,
+            queries_with_match: 0,
+            queries_without_match: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            ip_queries: 0,
+            string_queries: 0,
         };
+        if db.is_null() {
+            return;
+        }
+
+        let _ = matchy_t::with_internal(db, |internal| {
+            let rust_stats = internal.database.stats();
+
+            *stats = matchy_stats_t {
+                total_queries: rust_stats.total_queries,
+                queries_with_match: rust_stats.queries_with_match,
+                queries_without_match: rust_stats.queries_without_match,
+                cache_hits: rust_stats.cache_hits,
+                cache_misses: rust_stats.cache_misses,
+                ip_queries: rust_stats.ip_queries,
+                string_queries: rust_stats.string_queries,
+            };
+        });
     });
 }
 
@@ -1043,7 +1541,8 @@ pub unsafe extern "C" fn matchy_get_stats(db: *const matchy_t, stats: *mut match
 /// * `db` - Database handle (must not be NULL)
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 ///
 /// # Example
 /// ```c
@@ -1060,8 +1559,9 @@ pub unsafe extern "C" fn matchy_clear_cache(db: *const matchy_t) {
             return;
         }
 
-        let internal = matchy_t::as_internal(db);
-        internal.database.clear_cache();
+        let _ = matchy_t::with_internal(db, |internal| {
+            internal.database.clear_cache();
+        });
     });
 }
 
@@ -1073,9 +1573,13 @@ pub unsafe extern "C" fn matchy_clear_cache(db: *const matchy_t) {
 /// * `db` - Database handle (may be NULL)
 ///
 /// # Safety
-/// * `db` must be NULL or a valid pointer from matchy_open
-/// * Must not be used after calling this function
-/// * Calling with NULL is safe (no-op)
+/// * `db` is treated only as an opaque token; NULL, unknown, already closed,
+///   or wrong-kind values are safe no-ops
+/// * Concurrent operations that already acquired the handle finish before the
+///   database resources are released
+/// * Concurrent calls to `matchy_close` all return after that release completes
+/// * Calling `matchy_close` reentrantly from an operation on the same handle is
+///   a safe no-op; call it again after the surrounding operation returns
 ///
 /// # Example
 /// ```c
@@ -1085,9 +1589,7 @@ pub unsafe extern "C" fn matchy_clear_cache(db: *const matchy_t) {
 #[no_mangle]
 pub unsafe extern "C" fn matchy_close(db: *mut matchy_t) {
     ffi_guard((), || {
-        if !db.is_null() {
-            let _ = matchy_t::into_internal(db);
-        }
+        let _ = matchy_t::close(db);
     });
 }
 
@@ -1114,7 +1616,8 @@ pub unsafe extern "C" fn matchy_close(db: *mut matchy_t) {
 /// * Caller must free result with matchy_free_result
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 /// * `query` must be a valid null-terminated C string
 ///
 /// # Example
@@ -1150,17 +1653,19 @@ pub unsafe extern "C" fn matchy_query(
             Err(_) => return empty_matchy_result(),
         };
 
-        let internal = matchy_t::as_internal(db);
-        match internal.database.lookup_ref(query_str) {
-            Ok(lookup_ref) if lookup_ref.found => matchy_result_t {
-                found: true,
-                prefix_len: lookup_ref.prefix_len,
-                _result_type: lookup_ref.result_type,
-                _data_offset: lookup_ref.data_offset,
-                _db_ref: db,
-            },
-            _ => empty_matchy_result(),
-        }
+        matchy_t::with_internal(db, |internal| {
+            match internal.database.lookup_ref(query_str) {
+                Ok(lookup_ref) if lookup_ref.found => matchy_result_t {
+                    found: true,
+                    prefix_len: lookup_ref.prefix_len,
+                    _result_type: lookup_ref.result_type,
+                    _data_offset: lookup_ref.data_offset,
+                    _db_ref: db,
+                },
+                _ => empty_matchy_result(),
+            }
+        })
+        .unwrap_or_else(empty_matchy_result)
     })
 }
 
@@ -1175,7 +1680,8 @@ pub unsafe extern "C" fn matchy_query(
 /// * `result` - Pointer to result struct to fill (must not be NULL)
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 /// * `query` must be a valid null-terminated C string
 /// * `result` must be a valid pointer to a matchy_result_t
 ///
@@ -1262,7 +1768,8 @@ pub extern "C" fn matchy_version() -> *const c_char {
 /// * NULL if db is NULL
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 #[no_mangle]
 pub unsafe extern "C" fn matchy_format(db: *const matchy_t) -> *const c_char {
     ffi_guard(ptr::null(), || {
@@ -1270,9 +1777,11 @@ pub unsafe extern "C" fn matchy_format(db: *const matchy_t) -> *const c_char {
             return ptr::null();
         }
 
-        let internal = matchy_t::as_internal(db);
-        let format_str = internal.database.format();
-        format_str.as_ptr().cast::<c_char>()
+        matchy_t::with_internal(db, |internal| {
+            let format_str = internal.database.format();
+            format_str.as_ptr().cast::<c_char>()
+        })
+        .unwrap_or(ptr::null())
     })
 }
 
@@ -1286,7 +1795,8 @@ pub unsafe extern "C" fn matchy_format(db: *const matchy_t) -> *const c_char {
 /// * false if not or if db is NULL
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 #[no_mangle]
 pub unsafe extern "C" fn matchy_has_ip_data(db: *const matchy_t) -> bool {
     ffi_guard(false, || {
@@ -1294,8 +1804,7 @@ pub unsafe extern "C" fn matchy_has_ip_data(db: *const matchy_t) -> bool {
             return false;
         }
 
-        let internal = matchy_t::as_internal(db);
-        internal.database.has_ip_data()
+        matchy_t::with_internal(db, |internal| internal.database.has_ip_data()).unwrap_or(false)
     })
 }
 
@@ -1309,7 +1818,8 @@ pub unsafe extern "C" fn matchy_has_ip_data(db: *const matchy_t) -> bool {
 /// * false if not or if db is NULL
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 #[no_mangle]
 pub unsafe extern "C" fn matchy_has_string_data(db: *const matchy_t) -> bool {
     ffi_guard(false, || {
@@ -1317,8 +1827,7 @@ pub unsafe extern "C" fn matchy_has_string_data(db: *const matchy_t) -> bool {
             return false;
         }
 
-        let internal = matchy_t::as_internal(db);
-        internal.database.has_string_data()
+        matchy_t::with_internal(db, |internal| internal.database.has_string_data()).unwrap_or(false)
     })
 }
 
@@ -1332,7 +1841,8 @@ pub unsafe extern "C" fn matchy_has_string_data(db: *const matchy_t) -> bool {
 /// * false if not or if db is NULL
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 #[no_mangle]
 pub unsafe extern "C" fn matchy_has_literal_data(db: *const matchy_t) -> bool {
     ffi_guard(false, || {
@@ -1340,8 +1850,8 @@ pub unsafe extern "C" fn matchy_has_literal_data(db: *const matchy_t) -> bool {
             return false;
         }
 
-        let internal = matchy_t::as_internal(db);
-        internal.database.has_literal_data()
+        matchy_t::with_internal(db, |internal| internal.database.has_literal_data())
+            .unwrap_or(false)
     })
 }
 
@@ -1355,7 +1865,8 @@ pub unsafe extern "C" fn matchy_has_literal_data(db: *const matchy_t) -> bool {
 /// * false if not or if db is NULL
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 #[no_mangle]
 pub unsafe extern "C" fn matchy_has_glob_data(db: *const matchy_t) -> bool {
     ffi_guard(false, || {
@@ -1363,8 +1874,7 @@ pub unsafe extern "C" fn matchy_has_glob_data(db: *const matchy_t) -> bool {
             return false;
         }
 
-        let internal = matchy_t::as_internal(db);
-        internal.database.has_glob_data()
+        matchy_t::with_internal(db, |internal| internal.database.has_glob_data()).unwrap_or(false)
     })
 }
 
@@ -1378,7 +1888,8 @@ pub unsafe extern "C" fn matchy_has_glob_data(db: *const matchy_t) -> bool {
 /// * false if not or if db is NULL
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 ///
 /// # Deprecated
 /// Use matchy_has_literal_data or matchy_has_glob_data instead
@@ -1393,8 +1904,7 @@ pub unsafe extern "C" fn matchy_has_pattern_data(db: *const matchy_t) -> bool {
             return false;
         }
 
-        let internal = matchy_t::as_internal(db);
-        internal.database.has_string_data()
+        matchy_t::with_internal(db, |internal| internal.database.has_string_data()).unwrap_or(false)
     })
 }
 
@@ -1410,7 +1920,8 @@ pub unsafe extern "C" fn matchy_has_pattern_data(db: *const matchy_t) -> bool {
 /// * NULL if no metadata available or db is NULL
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 #[no_mangle]
 pub unsafe extern "C" fn matchy_metadata(db: *const matchy_t) -> *mut c_char {
     ffi_guard(ptr::null_mut(), || {
@@ -1418,20 +1929,22 @@ pub unsafe extern "C" fn matchy_metadata(db: *const matchy_t) -> *mut c_char {
             return ptr::null_mut();
         }
 
-        let internal = matchy_t::as_internal(db);
-        match internal.database.metadata() {
-            Some(metadata) => {
-                // Convert metadata to JSON string
-                match serde_json::to_string(&metadata) {
-                    Ok(json_str) => match CString::new(json_str) {
-                        Ok(c_str) => c_str.into_raw(),
+        matchy_t::with_internal(db, |internal| {
+            match internal.database.metadata() {
+                Some(metadata) => {
+                    // Convert metadata to JSON string
+                    match serde_json::to_string(&metadata) {
+                        Ok(json_str) => match CString::new(json_str) {
+                            Ok(c_str) => c_str.into_raw(),
+                            Err(_) => ptr::null_mut(),
+                        },
                         Err(_) => ptr::null_mut(),
-                    },
-                    Err(_) => ptr::null_mut(),
+                    }
                 }
+                None => ptr::null_mut(),
             }
-            None => ptr::null_mut(),
-        }
+        })
+        .unwrap_or(ptr::null_mut())
     })
 }
 
@@ -1449,7 +1962,8 @@ pub unsafe extern "C" fn matchy_metadata(db: *const matchy_t) -> *mut c_char {
 /// * NULL if pattern ID not found or db has no patterns
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 #[no_mangle]
 pub unsafe extern "C" fn matchy_get_pattern_string(
     db: *const matchy_t,
@@ -1460,17 +1974,18 @@ pub unsafe extern "C" fn matchy_get_pattern_string(
             return ptr::null_mut();
         }
 
-        let internal = matchy_t::as_internal(db);
-
-        // Get pattern string from database
-        if let Some(pattern_str) = internal.database.get_pattern_string(pattern_id) {
-            match CString::new(pattern_str) {
-                Ok(c_str) => return c_str.into_raw(),
-                Err(_) => return ptr::null_mut(),
+        matchy_t::with_internal(db, |internal| {
+            // Get pattern string from database
+            if let Some(pattern_str) = internal.database.get_pattern_string(pattern_id) {
+                match CString::new(pattern_str) {
+                    Ok(c_str) => return c_str.into_raw(),
+                    Err(_) => return ptr::null_mut(),
+                }
             }
-        }
 
-        ptr::null_mut()
+            ptr::null_mut()
+        })
+        .unwrap_or(ptr::null_mut())
     })
 }
 
@@ -1486,7 +2001,8 @@ pub unsafe extern "C" fn matchy_get_pattern_string(
 /// * Number of patterns (0 if no patterns or db is NULL)
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 #[no_mangle]
 pub unsafe extern "C" fn matchy_pattern_count(db: *const matchy_t) -> usize {
     ffi_guard(0, || {
@@ -1494,8 +2010,7 @@ pub unsafe extern "C" fn matchy_pattern_count(db: *const matchy_t) -> usize {
             return 0;
         }
 
-        let internal = matchy_t::as_internal(db);
-        internal.database.pattern_count()
+        matchy_t::with_internal(db, |internal| internal.database.pattern_count()).unwrap_or(0)
     })
 }
 
@@ -1987,7 +2502,7 @@ pub unsafe extern "C" fn matchy_result_get_entry(
         }
 
         let res = &*result;
-        if !res.found {
+        if !res.found || matchy_t::with_internal(res._db_ref, |_| ()).is_none() {
             return MATCHY_ERROR_NO_DATA;
         }
 
@@ -2073,49 +2588,55 @@ pub unsafe extern "C" fn matchy_aget_value(
             return MATCHY_ERROR_NO_DATA;
         }
 
-        let internal = matchy_t::as_internal(db);
-        let data = match internal.database.decode_at_offset((*entry)._data_offset) {
-            Ok(d) => d,
-            Err(error) => {
-                (*entry_data) = matchy_entry_data_t::empty();
-                return if matches!(error, DatabaseError::Unsupported(_)) {
-                    MATCHY_ERROR_NO_DATA
-                } else {
+        let data_offset = (*entry)._data_offset;
+        matchy_t::with_internal(db, |internal| {
+            let data = match internal.database.decode_at_offset(data_offset) {
+                Ok(d) => d,
+                Err(error) => {
+                    (*entry_data) = matchy_entry_data_t::empty();
+                    return if matches!(error, DatabaseError::Unsupported(_)) {
+                        MATCHY_ERROR_NO_DATA
+                    } else {
+                        MATCHY_ERROR_DATA_PARSE
+                    };
+                }
+            };
+
+            let target = match navigate_path(&data, &path_vec) {
+                Some(v) => v,
+                None => {
+                    (*entry_data) = matchy_entry_data_t::empty();
+                    return MATCHY_ERROR_LOOKUP_PATH_INVALID;
+                }
+            };
+
+            let mut value_cache = match internal.value_cache.lock() {
+                Ok(cache) => cache,
+                Err(_) => {
+                    (*entry_data) = matchy_entry_data_t::empty();
+                    return MATCHY_ERROR_DATA_PARSE;
+                }
+            };
+
+            match matchy_entry_data_t::from_data_value(target, &mut value_cache) {
+                Ok(d) => {
+                    (*entry_data) = d;
+                    MATCHY_SUCCESS
+                }
+                Err(EntryDataConversionError::InvalidData) => {
+                    (*entry_data) = matchy_entry_data_t::empty();
                     MATCHY_ERROR_DATA_PARSE
-                };
+                }
+                Err(EntryDataConversionError::ResourceExhausted) => {
+                    (*entry_data) = matchy_entry_data_t::empty();
+                    MATCHY_ERROR_OUT_OF_MEMORY
+                }
             }
-        };
-
-        let target = match navigate_path(&data, &path_vec) {
-            Some(v) => v,
-            None => {
-                (*entry_data) = matchy_entry_data_t::empty();
-                return MATCHY_ERROR_LOOKUP_PATH_INVALID;
-            }
-        };
-
-        let mut value_cache = match internal.value_cache.lock() {
-            Ok(cache) => cache,
-            Err(_) => {
-                (*entry_data) = matchy_entry_data_t::empty();
-                return MATCHY_ERROR_DATA_PARSE;
-            }
-        };
-
-        match matchy_entry_data_t::from_data_value(target, &mut value_cache) {
-            Ok(d) => {
-                (*entry_data) = d;
-                MATCHY_SUCCESS
-            }
-            Err(EntryDataConversionError::InvalidData) => {
-                (*entry_data) = matchy_entry_data_t::empty();
-                MATCHY_ERROR_DATA_PARSE
-            }
-            Err(EntryDataConversionError::ResourceExhausted) => {
-                (*entry_data) = matchy_entry_data_t::empty();
-                MATCHY_ERROR_OUT_OF_MEMORY
-            }
-        }
+        })
+        .unwrap_or_else(|| {
+            (*entry_data) = matchy_entry_data_t::empty();
+            MATCHY_ERROR_NO_DATA
+        })
     })
 }
 
@@ -2283,20 +2804,23 @@ pub unsafe extern "C" fn matchy_get_entry_data_list(
             return MATCHY_ERROR_NO_DATA;
         }
 
-        let internal = matchy_t::as_internal(db);
-        let data = match internal.database.decode_at_offset((*entry)._data_offset) {
-            Ok(d) => d,
-            Err(DatabaseError::Unsupported(_)) => return MATCHY_ERROR_NO_DATA,
-            Err(_) => return MATCHY_ERROR_DATA_PARSE,
-        };
-        match build_entry_data_list(&data, ENTRY_DATA_STORAGE_LIMIT) {
-            Ok(list) => {
-                *entry_data_list = list;
-                MATCHY_SUCCESS
+        let data_offset = (*entry)._data_offset;
+        matchy_t::with_internal(db, |internal| {
+            let data = match internal.database.decode_at_offset(data_offset) {
+                Ok(d) => d,
+                Err(DatabaseError::Unsupported(_)) => return MATCHY_ERROR_NO_DATA,
+                Err(_) => return MATCHY_ERROR_DATA_PARSE,
+            };
+            match build_entry_data_list(&data, ENTRY_DATA_STORAGE_LIMIT) {
+                Ok(list) => {
+                    *entry_data_list = list;
+                    MATCHY_SUCCESS
+                }
+                Err(EntryDataConversionError::InvalidData) => MATCHY_ERROR_DATA_PARSE,
+                Err(EntryDataConversionError::ResourceExhausted) => MATCHY_ERROR_OUT_OF_MEMORY,
             }
-            Err(EntryDataConversionError::InvalidData) => MATCHY_ERROR_DATA_PARSE,
-            Err(EntryDataConversionError::ResourceExhausted) => MATCHY_ERROR_OUT_OF_MEMORY,
-        }
+        })
+        .unwrap_or(MATCHY_ERROR_NO_DATA)
     })
 }
 
@@ -2340,7 +2864,8 @@ pub unsafe extern "C" fn matchy_free_entry_data_list(list: *mut matchy_entry_dat
 /// * NULL if no update URL is set or db is NULL
 ///
 /// # Safety
-/// * `db` must be a valid pointer from matchy_open
+/// * `db` is treated only as an opaque token; NULL, unknown, or closed values
+///   use the function's documented fallback
 ///
 /// # Example
 /// ```c
@@ -2357,14 +2882,14 @@ pub unsafe extern "C" fn matchy_get_update_url(db: *const matchy_t) -> *mut c_ch
             return ptr::null_mut();
         }
 
-        let internal = matchy_t::as_internal(db);
-        match internal.database.update_url() {
+        matchy_t::with_internal(db, |internal| match internal.database.update_url() {
             Some(url) => match CString::new(url) {
                 Ok(c_str) => c_str.into_raw(),
                 Err(_) => ptr::null_mut(),
             },
             None => ptr::null_mut(),
-        }
+        })
+        .unwrap_or(ptr::null_mut())
     })
 }
 
@@ -2434,21 +2959,25 @@ pub unsafe extern "C" fn matchy_result_to_json(result: *const matchy_result_t) -
             return ptr::null_mut();
         }
 
-        let internal = matchy_t::as_internal((*result)._db_ref);
-        let data = match internal.database.decode_at_offset((*result)._data_offset) {
-            Ok(d) => d,
-            Err(_) => return ptr::null_mut(),
-        };
+        let db = (*result)._db_ref;
+        let data_offset = (*result)._data_offset;
+        matchy_t::with_internal(db, |internal| {
+            let data = match internal.database.decode_at_offset(data_offset) {
+                Ok(d) => d,
+                Err(_) => return ptr::null_mut(),
+            };
 
-        let json_str = match serde_json::to_string(&data) {
-            Ok(s) => s,
-            Err(_) => return ptr::null_mut(),
-        };
+            let json_str = match serde_json::to_string(&data) {
+                Ok(s) => s,
+                Err(_) => return ptr::null_mut(),
+            };
 
-        match CString::new(json_str) {
-            Ok(c_str) => c_str.into_raw(),
-            Err(_) => ptr::null_mut(),
-        }
+            match CString::new(json_str) {
+                Ok(c_str) => c_str.into_raw(),
+                Err(_) => ptr::null_mut(),
+            }
+        })
+        .unwrap_or(ptr::null_mut())
     })
 }
 
@@ -2611,7 +3140,10 @@ pub const MATCHY_ITEM_TYPE_ETHEREUM: u8 = 10;
 /// Monero address
 pub const MATCHY_ITEM_TYPE_MONERO: u8 = 11;
 
-/// Opaque extractor handle
+/// Opaque extractor handle.
+///
+/// Handle pointers are identity tokens, not addresses callers or Matchy may
+/// dereference. Unknown, stale, and wrong-kind tokens are rejected safely.
 #[repr(C)]
 pub struct matchy_extractor_t {
     _private: [u8; 0],
@@ -2649,17 +3181,22 @@ struct MatchesInternal {
     strings: Vec<CString>,
 }
 
+fn extractor_handle_registry() -> &'static OpaqueHandleRegistry<Extractor> {
+    static REGISTRY: OnceLock<OpaqueHandleRegistry<Extractor>> = OnceLock::new();
+    REGISTRY.get_or_init(OpaqueHandleRegistry::default)
+}
+
 impl matchy_extractor_t {
-    fn from_internal(internal: Box<Extractor>) -> *mut Self {
-        Box::into_raw(internal).cast::<Self>()
+    fn from_internal(internal: Extractor) -> *mut Self {
+        extractor_handle_registry().insert(internal)
     }
 
-    unsafe fn to_internal(ptr: *mut Self) -> Box<Extractor> {
-        Box::from_raw(ptr.cast::<Extractor>())
+    fn with_internal<R>(ptr: *const Self, f: impl FnOnce(&Extractor) -> R) -> Option<R> {
+        extractor_handle_registry().with_read(ptr, f)
     }
 
-    unsafe fn as_internal(ptr: *const Self) -> &'static Extractor {
-        &*ptr.cast::<Extractor>()
+    fn close(ptr: *const Self) -> bool {
+        extractor_handle_registry().close(ptr)
     }
 }
 
@@ -2714,7 +3251,7 @@ pub extern "C" fn matchy_extractor_create(flags: u32) -> *mut matchy_extractor_t
             .extract_monero((flags & MATCHY_EXTRACT_MONERO) != 0);
 
         match builder.build() {
-            Ok(extractor) => matchy_extractor_t::from_internal(Box::new(extractor)),
+            Ok(extractor) => matchy_extractor_t::from_internal(extractor),
             Err(_) => ptr::null_mut(),
         }
     })
@@ -2756,7 +3293,8 @@ pub extern "C" fn matchy_extractor_create(flags: u32) -> *mut matchy_extractor_t
 /// ```
 ///
 /// # Safety
-/// * `extractor` must be a valid pointer returned by `matchy_extractor_create`
+/// * `extractor` is treated only as an opaque token; NULL, unknown, or closed
+///   values return `MATCHY_ERROR_INVALID_PARAM`
 /// * `data` must point to a valid buffer of at least `len` bytes
 /// * `matches` must be a valid pointer to an uninitialized `matchy_matches_t`
 #[no_mangle]
@@ -2775,43 +3313,45 @@ pub unsafe extern "C" fn matchy_extractor_extract_chunk(
         (*matches).count = 0;
         (*matches)._internal = ptr::null_mut();
 
-        let ext = matchy_extractor_t::as_internal(extractor);
-        let chunk = slice::from_raw_parts(data, len);
+        matchy_extractor_t::with_internal(extractor, |ext| {
+            let chunk = slice::from_raw_parts(data, len);
 
-        // Extract matches
-        let rust_matches = ext.extract_from_chunk(chunk);
+            // Extract matches
+            let rust_matches = ext.extract_from_chunk(chunk);
 
-        // Convert to C representation
-        let mut strings = Vec::with_capacity(rust_matches.len());
-        let mut c_matches = Vec::with_capacity(rust_matches.len());
+            // Convert to C representation
+            let mut strings = Vec::with_capacity(rust_matches.len());
+            let mut c_matches = Vec::with_capacity(rust_matches.len());
 
-        for m in rust_matches {
-            let value_str = m.item.as_value();
-            let c_string = match CString::new(value_str) {
-                Ok(s) => s,
-                Err(_) => continue, // Skip invalid strings
-            };
+            for m in rust_matches {
+                let value_str = m.item.as_value();
+                let c_string = match CString::new(value_str) {
+                    Ok(s) => s,
+                    Err(_) => continue, // Skip invalid strings
+                };
 
-            c_matches.push(matchy_match_t {
-                item_type: item_type_from_extracted(&m.item),
-                value: c_string.as_ptr(),
-                start: m.span.0,
-                end: m.span.1,
+                c_matches.push(matchy_match_t {
+                    item_type: item_type_from_extracted(&m.item),
+                    value: c_string.as_ptr(),
+                    start: m.span.0,
+                    end: m.span.1,
+                });
+                strings.push(c_string);
+            }
+
+            // Store internal data and populate output
+            let internal = Box::new(MatchesInternal {
+                matches: c_matches,
+                strings,
             });
-            strings.push(c_string);
-        }
 
-        // Store internal data and populate output
-        let internal = Box::new(MatchesInternal {
-            matches: c_matches,
-            strings,
-        });
+            (*matches).items = internal.matches.as_ptr();
+            (*matches).count = internal.matches.len();
+            (*matches)._internal = Box::into_raw(internal).cast::<c_void>();
 
-        (*matches).items = internal.matches.as_ptr();
-        (*matches).count = internal.matches.len();
-        (*matches)._internal = Box::into_raw(internal).cast::<c_void>();
-
-        MATCHY_SUCCESS
+            MATCHY_SUCCESS
+        })
+        .unwrap_or(MATCHY_ERROR_INVALID_PARAM)
     })
 }
 
@@ -2844,13 +3384,12 @@ pub unsafe extern "C" fn matchy_matches_free(matches: *mut matchy_matches_t) {
 /// * `extractor` - Extractor handle (may be NULL)
 ///
 /// # Safety
-/// * Must not be used after calling this function
+/// * `extractor` is treated only as an opaque token; NULL, unknown, already
+///   closed, or wrong-kind values are safe no-ops
 #[no_mangle]
 pub unsafe extern "C" fn matchy_extractor_free(extractor: *mut matchy_extractor_t) {
     ffi_guard((), || {
-        if !extractor.is_null() {
-            let _ = matchy_extractor_t::to_internal(extractor);
-        }
+        let _ = matchy_extractor_t::close(extractor);
     });
 }
 
@@ -2904,7 +3443,12 @@ pub extern "C" fn matchy_item_type_name(item_type: u8) -> *const c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::sync::Barrier;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn build_test_db_bytes() -> Vec<u8> {
         build_test_db_bytes_with_source("unit-test")
@@ -3219,9 +3763,11 @@ mod tests {
         unsafe {
             let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
             assert!(!db.is_null());
-            let internal = matchy_t::as_internal(db);
-            *internal.value_cache.lock().unwrap() =
-                EntryDataStorage::with_limit(estimated_string_size("unit-test"));
+            assert!(matchy_t::with_internal(db, |internal| {
+                *internal.value_cache.lock().unwrap() =
+                    EntryDataStorage::with_limit(estimated_string_size("unit-test"));
+            })
+            .is_some());
 
             let query = CString::new("1.1.1.1").unwrap();
             let result = matchy_query(db, query.as_ptr());
@@ -3325,12 +3871,438 @@ mod tests {
     }
 
     #[test]
+    fn matchy_get_stats_zeros_output_for_invalid_handles() {
+        let mut stats = matchy_stats_t {
+            total_queries: u64::MAX,
+            queries_with_match: u64::MAX,
+            queries_without_match: u64::MAX,
+            cache_hits: u64::MAX,
+            cache_misses: u64::MAX,
+            ip_queries: u64::MAX,
+            string_queries: u64::MAX,
+        };
+
+        // SAFETY: The output pointer is valid; NULL and foreign database
+        // tokens are required to use the documented zero fallback.
+        unsafe {
+            matchy_get_stats(ptr::null(), &mut stats);
+        }
+        assert_eq!(stats.total_queries, 0);
+        assert_eq!(stats.queries_with_match, 0);
+        assert_eq!(stats.queries_without_match, 0);
+        assert_eq!(stats.cache_hits, 0);
+        assert_eq!(stats.cache_misses, 0);
+        assert_eq!(stats.ip_queries, 0);
+        assert_eq!(stats.string_queries, 0);
+
+        stats.total_queries = u64::MAX;
+        let foreign = ptr::from_ref(&stats).cast::<matchy_t>();
+        // SAFETY: The foreign handle is treated only as an opaque address and
+        // the stats output remains valid.
+        unsafe { matchy_get_stats(foreign, &mut stats) };
+        assert_eq!(stats.total_queries, 0);
+    }
+
+    #[test]
     fn test_ffi_guard_returns_fallback_on_panic() {
         let result = ffi_guard(MATCHY_ERROR_INTERNAL, || -> i32 {
             panic!("simulated FFI boundary panic");
         });
 
         assert_eq!(result, MATCHY_ERROR_INTERNAL);
+    }
+
+    #[test]
+    fn opaque_handle_token_arena_never_reuses_an_address() {
+        let mut arena = OpaqueHandleTokenArena::default();
+        let mut addresses = HashSet::new();
+
+        for _ in 0..(OPAQUE_HANDLE_TOKEN_PAGE_SIZE * 2 + 1) {
+            let (handle, id) = arena.allocate::<matchy_t>();
+            assert_eq!(handle.addr(), id.0.get());
+            assert!(addresses.insert(handle.addr()));
+        }
+    }
+
+    #[test]
+    fn database_pages_reject_unissued_cells_and_stale_descriptors() {
+        let mut page = DatabaseHandlePage::new();
+        let first = ptr::from_ref(&page.cells[0]).addr();
+        let second = ptr::from_ref(&page.cells[1]).addr();
+        let no_cells_issued = page.clone();
+
+        assert!(page.cell(first).is_none());
+        page.issued_count = 1;
+        assert!(page.cell(first).is_some());
+        assert!(page.cell(second).is_none());
+        assert!(no_cells_issued.cell(first).is_none());
+
+        let one_cell_issued = page.clone();
+        page.issued_count = 2;
+        assert!(page.cell(second).is_some());
+        assert!(one_cell_issued.cell(second).is_none());
+    }
+
+    #[test]
+    fn database_handle_cells_never_reuse_an_address() {
+        let bytes = build_test_db_bytes();
+        let mut addresses = HashSet::new();
+
+        // SAFETY: Every open call receives a valid live buffer, and every
+        // returned opaque handle is closed exactly once.
+        unsafe {
+            for _ in 0..(DATABASE_HANDLE_CELLS_PER_PAGE + 1) {
+                let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+                assert!(!db.is_null());
+                assert!(addresses.insert(db.addr()));
+                matchy_close(db);
+            }
+        }
+    }
+
+    #[test]
+    fn nested_database_access_tracks_reentrant_operations() {
+        fn access_at_depth(db: *const matchy_t, depth: usize) {
+            assert!(matchy_t::with_internal(db, |_| {
+                if depth > 0 {
+                    access_at_depth(db, depth - 1);
+                }
+            })
+            .is_some());
+        }
+
+        let bytes = build_test_db_bytes();
+        // SAFETY: The input buffer remains live and the handle is closed after
+        // all nested accesses have returned.
+        unsafe {
+            let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!db.is_null());
+            access_at_depth(db, u64::BITS as usize + 2);
+            matchy_close(db);
+        }
+    }
+
+    #[test]
+    fn nested_database_access_across_token_pages_is_reentrant() {
+        let bytes = build_test_db_bytes();
+        let mut handles = Vec::new();
+
+        // SAFETY: Every open receives a live copied buffer, and all returned
+        // handles are retained until nested access finishes and then closed.
+        unsafe {
+            let first = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!first.is_null());
+            handles.push(first);
+            let first_page = database_handle_arena()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .page_for_address(first.addr())
+                .unwrap()
+                .start_address;
+
+            let second_page_handle = loop {
+                let handle = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+                assert!(!handle.is_null());
+                handles.push(handle);
+                let page = database_handle_arena()
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .page_for_address(handle.addr())
+                    .unwrap()
+                    .start_address;
+                if page != first_page {
+                    break handle;
+                }
+                assert!(handles.len() <= DATABASE_HANDLE_CELLS_PER_PAGE + 1);
+            };
+
+            assert!(matchy_t::with_internal(first, |_| {
+                assert!(matchy_t::with_internal(second_page_handle, |_| {}).is_some());
+            })
+            .is_some());
+            assert!(with_database_handle_cell(first, |_| {
+                assert!(with_database_handle_cell(second_page_handle, |_| {}).is_some());
+            })
+            .is_some());
+
+            for handle in handles {
+                matchy_close(handle);
+            }
+        }
+    }
+
+    #[test]
+    fn active_database_tracking_supports_out_of_order_drops() {
+        let cell = DatabaseHandleCell::new();
+        let first = ActiveDatabaseHandle::enter(&cell);
+        let second = ActiveDatabaseHandle::enter(&cell);
+        assert!(current_thread_uses_database_cell(&cell));
+
+        drop(first);
+        assert!(current_thread_uses_database_cell(&cell));
+        let replacement = ActiveDatabaseHandle::enter(&cell);
+        assert!(current_thread_uses_database_cell(&cell));
+
+        // Deliberately drop the older nested guard first. Explicit overflow
+        // slots make this safe without relying on stack order.
+        drop(second);
+        assert!(current_thread_uses_database_cell(&cell));
+        drop(replacement);
+        assert!(!current_thread_uses_database_cell(&cell));
+    }
+
+    #[test]
+    fn reentrant_database_close_is_a_safe_no_op() {
+        let bytes = build_test_db_bytes();
+        let query = CString::new("1.1.1.1").unwrap();
+
+        // SAFETY: The source and query buffers remain live. The nested close
+        // is required to leave the handle active until this operation returns.
+        unsafe {
+            let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!db.is_null());
+            assert!(matchy_t::with_internal(db, |_| matchy_close(db)).is_some());
+            assert!(matchy_query(db, query.as_ptr()).found);
+            matchy_close(db);
+            assert!(!matchy_query(db, query.as_ptr()).found);
+        }
+    }
+
+    #[test]
+    fn foreign_and_wrong_kind_opaque_handles_fail_closed() {
+        let bytes = build_test_db_bytes();
+        let query = CString::new("1.1.1.1").unwrap();
+        let foreign_value = 0_u8;
+        let foreign_db = ptr::from_ref(&foreign_value).cast::<matchy_t>();
+
+        // SAFETY: Opaque handles are registry keys and are never dereferenced.
+        // All non-handle pointers remain valid for every call.
+        unsafe {
+            assert!(!matchy_query(foreign_db, query.as_ptr()).found);
+            assert!(!matchy_has_ip_data(foreign_db));
+            matchy_close(foreign_db.cast_mut());
+
+            let builder = matchy_builder_new();
+            assert!(!builder.is_null());
+            let wrong_kind = builder.cast::<matchy_t>();
+            assert!(!matchy_query(wrong_kind, query.as_ptr()).found);
+            matchy_close(wrong_kind);
+            assert_eq!(
+                matchy_builder_set_case_insensitive(builder, true),
+                MATCHY_SUCCESS
+            );
+            matchy_builder_free(builder);
+
+            let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!db.is_null());
+            assert!(matchy_query(db, query.as_ptr()).found);
+            matchy_close(db);
+        }
+
+        assert_eq!(foreign_value, 0);
+    }
+
+    #[test]
+    fn closed_database_handles_and_results_fail_closed() {
+        let bytes = build_test_db_bytes();
+        let query = CString::new("1.1.1.1").unwrap();
+
+        // SAFETY: The stale value is an opaque registry token and is never
+        // dereferenced. Query/result/output pointers remain live and valid.
+        unsafe {
+            let db = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!db.is_null());
+            let old_address = db.addr();
+            let result = matchy_query(db, query.as_ptr());
+            assert!(result.found);
+            let mut stale_entry = matchy_entry_s {
+                db: ptr::null(),
+                _data_offset: 0,
+            };
+            assert_eq!(
+                matchy_result_get_entry(&result, &mut stale_entry),
+                MATCHY_SUCCESS
+            );
+
+            matchy_close(db);
+            assert!(!matchy_query(db, query.as_ptr()).found);
+            assert!(matchy_result_to_json(&result).is_null());
+
+            let path = [ptr::null()];
+            let mut value = matchy_entry_data_t::empty();
+            assert_eq!(
+                matchy_aget_value(&stale_entry, &mut value, path.as_ptr()),
+                MATCHY_ERROR_NO_DATA
+            );
+            assert!(!value.has_data);
+            let mut list = ptr::null_mut();
+            assert_eq!(
+                matchy_get_entry_data_list(&stale_entry, &mut list),
+                MATCHY_ERROR_NO_DATA
+            );
+            assert!(list.is_null());
+
+            let mut entry = matchy_entry_s {
+                db: ptr::null(),
+                _data_offset: 0,
+            };
+            assert_eq!(
+                matchy_result_get_entry(&result, &mut entry),
+                MATCHY_ERROR_NO_DATA
+            );
+
+            matchy_close(db);
+
+            let replacement = matchy_open_buffer(bytes.as_ptr(), bytes.len());
+            assert!(!replacement.is_null());
+            assert_ne!(replacement.addr(), old_address);
+            matchy_close(replacement);
+        }
+    }
+
+    #[test]
+    fn stale_builder_and_extractor_handles_are_rejected() {
+        let key = CString::new("1.1.1.1").unwrap();
+        let data = CString::new("{}").unwrap();
+        let input = b"example.com";
+
+        // SAFETY: Stale opaque tokens are never dereferenced. All remaining
+        // C string, input, and output pointers are valid for each call.
+        unsafe {
+            let builder = matchy_builder_new();
+            assert!(!builder.is_null());
+            matchy_builder_free(builder);
+            assert_eq!(
+                matchy_builder_add(builder, key.as_ptr(), data.as_ptr()),
+                MATCHY_ERROR_INVALID_PARAM
+            );
+            matchy_builder_free(builder);
+
+            let extractor = matchy_extractor_create(MATCHY_EXTRACT_DOMAINS);
+            assert!(!extractor.is_null());
+            matchy_extractor_free(extractor);
+            let mut matches = matchy_matches_t {
+                items: ptr::null(),
+                count: 0,
+                _internal: ptr::null_mut(),
+            };
+            assert_eq!(
+                matchy_extractor_extract_chunk(
+                    extractor,
+                    input.as_ptr(),
+                    input.len(),
+                    &mut matches,
+                ),
+                MATCHY_ERROR_INVALID_PARAM
+            );
+            assert!(matches.items.is_null());
+            assert_eq!(matches.count, 0);
+            assert!(matches._internal.is_null());
+            matchy_extractor_free(extractor);
+        }
+    }
+
+    #[test]
+    fn database_close_waits_for_in_flight_handle_access() {
+        let bytes = build_test_db_bytes();
+
+        // SAFETY: The source buffer is valid and copied by the open call.
+        let db = unsafe { matchy_open_buffer(bytes.as_ptr(), bytes.len()) };
+        assert!(!db.is_null());
+        let access = acquire_database_handle(db).unwrap();
+
+        let address = db.addr();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let closer = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            // SAFETY: `matchy_close` treats this value only as a registry key.
+            unsafe { matchy_close(ptr::without_provenance_mut(address)) };
+            closed_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while with_database_handle_cell(db, |cell| cell.state.load().is_some()).unwrap_or(false) {
+            assert!(Instant::now() < deadline, "close did not retire the handle");
+            thread::yield_now();
+        }
+        assert!(closed_rx.try_recv().is_err());
+
+        let (second_started_tx, second_started_rx) = mpsc::channel();
+        let (second_closed_tx, second_closed_rx) = mpsc::channel();
+        let second_closer = thread::spawn(move || {
+            second_started_tx.send(()).unwrap();
+            // SAFETY: A concurrent close of the same opaque token must join
+            // the first close's completion barrier rather than return early.
+            unsafe { matchy_close(ptr::without_provenance_mut(address)) };
+            second_closed_tx.send(()).unwrap();
+        });
+        second_started_rx.recv().unwrap();
+        assert!(
+            second_closed_rx
+                .recv_timeout(Duration::from_millis(20))
+                .is_err(),
+            "a concurrent close returned before reclamation completed"
+        );
+
+        drop(access);
+        closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        second_closed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        closer.join().unwrap();
+        second_closer.join().unwrap();
+    }
+
+    #[test]
+    fn database_close_completes_under_sustained_readers() {
+        const READER_COUNT: usize = 4;
+
+        let bytes = build_test_db_bytes();
+        // SAFETY: The source buffer is valid and copied by the open call.
+        let db = unsafe { matchy_open_buffer(bytes.as_ptr(), bytes.len()) };
+        assert!(!db.is_null());
+        let address = db.addr();
+        let start = Arc::new(Barrier::new(READER_COUNT + 1));
+        let running = Arc::new(AtomicBool::new(true));
+
+        let readers = (0..READER_COUNT)
+            .map(|_| {
+                let start = Arc::clone(&start);
+                let running = Arc::clone(&running);
+                thread::spawn(move || {
+                    let query = CString::new("1.1.1.1").unwrap();
+                    let db = ptr::without_provenance::<matchy_t>(address);
+                    start.wait();
+                    while running.load(Ordering::Relaxed) {
+                        // SAFETY: The database value is an opaque token only;
+                        // the query C string remains live for every call.
+                        let _ = unsafe { matchy_query(db, query.as_ptr()) };
+                    }
+                    // SAFETY: A closed opaque token must fail without being
+                    // dereferenced, while the query pointer is still valid.
+                    assert!(!unsafe { matchy_query(db, query.as_ptr()) }.found);
+                })
+            })
+            .collect::<Vec<_>>();
+
+        start.wait();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let closer = thread::spawn(move || {
+            // SAFETY: Matchy treats this reconstructed value only as an opaque
+            // token and synchronizes with all already-started readers.
+            unsafe { matchy_close(ptr::without_provenance_mut(address)) };
+            closed_tx.send(()).unwrap();
+        });
+
+        let close_result = closed_rx.recv_timeout(Duration::from_secs(2));
+        running.store(false, Ordering::Relaxed);
+        assert!(close_result.is_ok(), "close starved behind active readers");
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        closer.join().unwrap();
     }
 
     #[test]
