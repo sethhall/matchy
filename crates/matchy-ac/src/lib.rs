@@ -154,7 +154,7 @@ struct BuilderState {
 }
 
 impl BuilderState {
-    fn new(_id: u32, _depth: u8) -> Self {
+    fn new() -> Self {
         Self {
             transitions: HashMap::new(),
             failure: 0,
@@ -183,7 +183,7 @@ impl BuilderState {
 impl ACBuilder {
     fn new(mode: MatchMode) -> Self {
         Self {
-            states: vec![BuilderState::new(0, 0)], // Root
+            states: vec![BuilderState::new()], // Root
             mode,
             patterns: Vec::new(),
         }
@@ -212,11 +212,8 @@ impl ACBuilder {
 
         // Build trie path
         let mut current = 0u32;
-        let mut depth = 0u8;
 
         for &ch in &pattern_bytes {
-            depth += 1;
-
             // Check if transition already exists
             if let Some(&next) = self.states[current as usize].transitions.get(&ch) {
                 current = next;
@@ -225,7 +222,7 @@ impl ACBuilder {
                 let new_id = u32::try_from(self.states.len()).map_err(|_| {
                     ACError::ResourceLimitExceeded("State count exceeds u32::MAX".into())
                 })?;
-                self.states.push(BuilderState::new(new_id, depth));
+                self.states.push(BuilderState::new());
                 self.states[current as usize].transitions.insert(ch, new_id);
                 current = new_id;
             }
@@ -287,17 +284,15 @@ impl ACBuilder {
                     }
                 }
 
-                // Merge outputs from ALL suffix states (via failure links)
-                // This is critical: we need to inherit patterns from the entire failure link chain
-                let mut suffix_state = self.states[next_state as usize].failure;
-                while suffix_state != 0 {
-                    let suffix_outputs = self.states[suffix_state as usize].outputs.clone();
-                    if !suffix_outputs.is_empty() {
-                        self.states[next_state as usize]
-                            .outputs
-                            .extend(suffix_outputs);
-                    }
-                    suffix_state = self.states[suffix_state as usize].failure;
+                // The failure state's outputs already include the outputs inherited
+                // from its own failure chain. Copying only that list preserves every
+                // suffix match without adding the same pattern ID more than once.
+                let failure_state = self.states[next_state as usize].failure;
+                if failure_state != 0 {
+                    let suffix_outputs = self.states[failure_state as usize].outputs.clone();
+                    self.states[next_state as usize]
+                        .outputs
+                        .extend(suffix_outputs);
                 }
             }
         }
@@ -305,9 +300,22 @@ impl ACBuilder {
 
     /// Serialize into offset-based format with state-specific encoding
     fn serialize(self) -> Result<Vec<u8>, ACError> {
+        if let Some((state_id, state)) = self
+            .states
+            .iter()
+            .enumerate()
+            .find(|(_, state)| state.outputs.len() > usize::from(u8::MAX))
+        {
+            return Err(ACError::ResourceLimitExceeded(format!(
+                "AC state {state_id} has {} pattern outputs; maximum is {}",
+                state.outputs.len(),
+                u8::MAX
+            )));
+        }
+
         let mut buffer = Vec::new();
 
-        // Calculate section sizes - using cache-optimized ACNodeHot (16 bytes)
+        // Calculate section sizes - using cache-optimized ACNodeHot (20 bytes)
         let node_size = mem::size_of::<ACNodeHot>();
         let edge_size = mem::size_of::<ACEdge>();
         let dense_size = mem::size_of::<DenseLookup>();
@@ -493,7 +501,7 @@ impl ACBuilder {
                 pattern_offset += mem::size_of::<u32>();
             }
 
-            // Write cache-optimized hot node (16 bytes)
+            // Write cache-optimized hot node (20 bytes)
             let failure_offset = if state.failure == 0 {
                 0u32
             } else {
@@ -502,12 +510,15 @@ impl ACBuilder {
                 })?
             };
 
-            // Edge and pattern counts saturate at u8::MAX (255)
+            // Dense states do not use edge_count during lookup. Pattern output
+            // counts were checked before serialization, so conversion is exact.
             let edge_count_u8 = match kind {
                 StateKind::One => 0, // Single edge stored inline, not in edge array
                 _ => u8::try_from(state.transitions.len()).unwrap_or(u8::MAX),
             };
-            let pattern_count_u8 = u8::try_from(state.outputs.len()).unwrap_or(u8::MAX);
+            let pattern_count_u8 = u8::try_from(state.outputs.len()).map_err(|_| {
+                ACError::ResourceLimitExceeded(format!("AC state {i} has too many pattern outputs"))
+            })?;
 
             // Create hot node with optimal field ordering for cache access
             let one_target = match kind {
@@ -602,6 +613,57 @@ mod tests {
         let ac = ACAutomaton::build(&patterns, MatchMode::CaseSensitive).unwrap();
 
         assert!(!ac.buffer.is_empty());
+    }
+
+    #[test]
+    fn failure_outputs_are_inherited_once() {
+        let ac = ACAutomaton::build(&["a", "ba", "cba"], MatchMode::CaseSensitive).unwrap();
+        let node_size = std::mem::size_of::<ACNodeHot>();
+        let terminal_offset = (ac.node_count() - 1) * node_size;
+        let (terminal, _) = ACNodeHot::read_from_prefix(&ac.buffer()[terminal_offset..]).unwrap();
+
+        assert_eq!(terminal.pattern_count, 3);
+        let patterns_offset = usize::try_from(terminal.patterns_offset).unwrap();
+        let pattern_bytes = &ac.buffer()
+            [patterns_offset..patterns_offset + usize::from(terminal.pattern_count) * 4];
+        let pattern_ids: Vec<u32> = pattern_bytes
+            .chunks_exact(4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert_eq!(pattern_ids, [2, 1, 0]);
+    }
+
+    #[test]
+    fn rejects_states_with_more_than_u8_max_outputs() {
+        let patterns = vec!["same"; usize::from(u8::MAX) + 1];
+
+        let error = match ACAutomaton::build(&patterns, MatchMode::CaseSensitive) {
+            Ok(_) => panic!("expected excessive state outputs to be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, ACError::ResourceLimitExceeded(_)));
+        assert!(error.to_string().contains("256 pattern outputs"));
+    }
+
+    #[test]
+    fn accepts_exactly_u8_max_outputs() {
+        let patterns = vec!["same"; usize::from(u8::MAX)];
+        let ac = ACAutomaton::build(&patterns, MatchMode::CaseSensitive).unwrap();
+        let node_size = std::mem::size_of::<ACNodeHot>();
+        let terminal_offset = (ac.node_count() - 1) * node_size;
+        let (terminal, _) = ACNodeHot::read_from_prefix(&ac.buffer()[terminal_offset..]).unwrap();
+
+        assert_eq!(terminal.pattern_count, u8::MAX);
+    }
+
+    #[test]
+    fn builds_patterns_longer_than_u8_max() {
+        let pattern = "a".repeat(300);
+        let ac = ACAutomaton::build(&[pattern.as_str()], MatchMode::CaseSensitive).unwrap();
+
+        assert_eq!(ac.node_count(), pattern.len() + 1);
+        assert!(!ac.buffer().is_empty());
     }
 }
 
