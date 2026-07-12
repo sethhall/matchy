@@ -12,6 +12,7 @@ mod types;
 mod util;
 
 pub use error::ExtractorError;
+pub use iter::ExtractIter;
 pub use types::{ExtractedItem, HashType, Match};
 
 use extractors::{
@@ -19,9 +20,9 @@ use extractors::{
     HashExtractor, Ipv4Extractor, Ipv6Extractor, MoneroExtractor,
 };
 use finders::FinderResults;
-use iter::ExtractIter;
 
-pub struct ExtractorBuilder {
+#[derive(Clone, Copy)]
+struct ExtractorConfig {
     extract_domains: bool,
     extract_emails: bool,
     extract_ipv4: bool,
@@ -34,9 +35,8 @@ pub struct ExtractorBuilder {
     require_word_boundaries: bool,
 }
 
-impl ExtractorBuilder {
-    #[must_use]
-    pub fn new() -> Self {
+impl Default for ExtractorConfig {
+    fn default() -> Self {
         Self {
             extract_domains: true,
             extract_emails: true,
@@ -50,123 +50,142 @@ impl ExtractorBuilder {
             require_word_boundaries: true,
         }
     }
+}
 
+/// Configures which indicator types an [`Extractor`] recognizes.
+///
+/// By default, all supported indicator types are enabled, domains require at
+/// least two labels, and extractors enforce word boundaries where applicable.
+pub struct ExtractorBuilder {
+    config: ExtractorConfig,
+}
+
+impl ExtractorBuilder {
+    /// Creates a builder with all supported indicator types enabled.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: ExtractorConfig::default(),
+        }
+    }
+
+    /// Enables or disables domain extraction.
     #[must_use]
     pub fn extract_domains(mut self, enable: bool) -> Self {
-        self.extract_domains = enable;
+        self.config.extract_domains = enable;
         self
     }
 
+    /// Enables or disables email extraction.
     #[must_use]
     pub fn extract_emails(mut self, enable: bool) -> Self {
-        self.extract_emails = enable;
+        self.config.extract_emails = enable;
         self
     }
 
+    /// Enables or disables IPv4 extraction.
     #[must_use]
     pub fn extract_ipv4(mut self, enable: bool) -> Self {
-        self.extract_ipv4 = enable;
+        self.config.extract_ipv4 = enable;
         self
     }
 
+    /// Enables or disables IPv6 extraction.
     #[must_use]
     pub fn extract_ipv6(mut self, enable: bool) -> Self {
-        self.extract_ipv6 = enable;
+        self.config.extract_ipv6 = enable;
         self
     }
 
+    /// Enables or disables file-hash extraction.
     #[must_use]
     pub fn extract_hashes(mut self, enable: bool) -> Self {
-        self.extract_hashes = enable;
+        self.config.extract_hashes = enable;
         self
     }
 
+    /// Enables or disables Bitcoin address extraction.
     #[must_use]
     pub fn extract_bitcoin(mut self, enable: bool) -> Self {
-        self.extract_bitcoin = enable;
+        self.config.extract_bitcoin = enable;
         self
     }
 
+    /// Enables or disables Ethereum address extraction.
     #[must_use]
     pub fn extract_ethereum(mut self, enable: bool) -> Self {
-        self.extract_ethereum = enable;
+        self.config.extract_ethereum = enable;
         self
     }
 
+    /// Enables or disables Monero address extraction.
     #[must_use]
     pub fn extract_monero(mut self, enable: bool) -> Self {
-        self.extract_monero = enable;
+        self.config.extract_monero = enable;
         self
     }
 
+    /// Sets the minimum number of labels required for extracted domains.
     #[must_use]
     pub fn min_domain_labels(mut self, min: usize) -> Self {
-        self.min_domain_labels = min;
+        self.config.min_domain_labels = min;
         self
     }
 
+    /// Controls whether applicable extractors require surrounding word boundaries.
     #[must_use]
     pub fn require_word_boundaries(mut self, require: bool) -> Self {
-        self.require_word_boundaries = require;
+        self.config.require_word_boundaries = require;
         self
     }
 
+    /// Builds an extractor with this configuration.
     pub fn build(self) -> Result<Extractor, ExtractorError> {
+        let config = self.config;
         let mut enabled = Vec::new();
 
-        if self.extract_domains {
+        if config.extract_domains {
             enabled.push(ExtractorKind::Domain(DomainExtractor::new(
-                self.min_domain_labels,
-                self.require_word_boundaries,
+                config.min_domain_labels,
+                config.require_word_boundaries,
             )));
         }
 
-        if self.extract_ipv4 {
+        if config.extract_ipv4 {
             enabled.push(ExtractorKind::Ipv4(Ipv4Extractor::new(
-                self.require_word_boundaries,
+                config.require_word_boundaries,
             )));
         }
 
-        if self.extract_ipv6 {
+        if config.extract_ipv6 {
             enabled.push(ExtractorKind::Ipv6(Box::<Ipv6Extractor>::default()));
         }
 
-        if self.extract_emails {
+        if config.extract_emails {
             enabled.push(ExtractorKind::Email(EmailExtractor::new(
-                self.require_word_boundaries,
+                config.require_word_boundaries,
             )));
         }
 
-        if self.extract_hashes {
+        if config.extract_hashes {
             enabled.push(ExtractorKind::Hash(HashExtractor::new()));
         }
 
-        if self.extract_bitcoin {
+        if config.extract_bitcoin {
             enabled.push(ExtractorKind::Bitcoin(BitcoinExtractor::new()));
         }
 
-        if self.extract_ethereum {
+        if config.extract_ethereum {
             enabled.push(ExtractorKind::Ethereum(EthereumExtractor::new(
-                self.require_word_boundaries,
+                config.require_word_boundaries,
             )));
         }
 
-        if self.extract_monero {
+        if config.extract_monero {
             enabled.push(ExtractorKind::Monero(MoneroExtractor::new()));
         }
 
-        Ok(Extractor {
-            extract_domains: self.extract_domains,
-            extract_emails: self.extract_emails,
-            extract_ipv4: self.extract_ipv4,
-            extract_ipv6: self.extract_ipv6,
-            extract_hashes: self.extract_hashes,
-            extract_bitcoin: self.extract_bitcoin,
-            extract_ethereum: self.extract_ethereum,
-            extract_monero: self.extract_monero,
-            min_domain_labels: self.min_domain_labels,
-            enabled,
-        })
+        Ok(Extractor { config, enabled })
     }
 }
 
@@ -176,104 +195,108 @@ impl Default for ExtractorBuilder {
     }
 }
 
+/// Extracts structured indicators from byte slices.
 pub struct Extractor {
-    extract_domains: bool,
-    extract_emails: bool,
-    extract_ipv4: bool,
-    extract_ipv6: bool,
-    extract_hashes: bool,
-    extract_bitcoin: bool,
-    extract_ethereum: bool,
-    extract_monero: bool,
-    min_domain_labels: usize,
+    config: ExtractorConfig,
     enabled: Vec<ExtractorKind>,
 }
 
-// SAFETY: Extractor is Send because all fields are either Copy types or 'static.
-// The Vec<ExtractorKind> contains no interior mutability.
-unsafe impl Send for Extractor {}
-
-// SAFETY: Extractor is Sync because it has no interior mutability.
-// All extraction methods take &self and use thread-local scratch buffers.
-unsafe impl Sync for Extractor {}
-
 impl Extractor {
+    /// Creates an extractor with the default configuration.
     pub fn new() -> Result<Self, ExtractorError> {
         Self::builder().build()
     }
 
+    /// Creates a builder for configuring an extractor.
     #[must_use]
     pub fn builder() -> ExtractorBuilder {
         ExtractorBuilder::new()
     }
 
+    /// Extracts indicators from one line.
+    ///
+    /// Extraction is performed eagerly when the returned iterator is created.
     #[must_use]
     pub fn extract_from_line<'a>(&'a self, line: &'a [u8]) -> ExtractIter<'a> {
         ExtractIter::new(&self.enabled, line)
     }
 
+    /// Extracts all indicators from a byte slice.
     #[must_use]
     pub fn extract_from_chunk<'a>(&'a self, chunk: &'a [u8]) -> Vec<Match<'a>> {
-        let mut matches = Vec::new();
-        let mut results = FinderResults::new(chunk);
-
-        for extractor in &self.enabled {
-            for finder in extractor.required_finders() {
-                results.ensure(*finder);
-            }
-        }
-
-        for extractor in &self.enabled {
-            extractor.extract(&results, &mut matches);
-        }
-
-        matches
+        extract_matches(&self.enabled, chunk)
     }
 
+    /// Returns whether domain extraction is enabled.
     #[must_use]
     pub fn extract_domains(&self) -> bool {
-        self.extract_domains
+        self.config.extract_domains
     }
 
+    /// Returns whether email extraction is enabled.
     #[must_use]
     pub fn extract_emails(&self) -> bool {
-        self.extract_emails
+        self.config.extract_emails
     }
 
+    /// Returns whether IPv4 extraction is enabled.
     #[must_use]
     pub fn extract_ipv4(&self) -> bool {
-        self.extract_ipv4
+        self.config.extract_ipv4
     }
 
+    /// Returns whether IPv6 extraction is enabled.
     #[must_use]
     pub fn extract_ipv6(&self) -> bool {
-        self.extract_ipv6
+        self.config.extract_ipv6
     }
 
+    /// Returns whether file-hash extraction is enabled.
     #[must_use]
     pub fn extract_hashes(&self) -> bool {
-        self.extract_hashes
+        self.config.extract_hashes
     }
 
+    /// Returns whether Bitcoin address extraction is enabled.
     #[must_use]
     pub fn extract_bitcoin(&self) -> bool {
-        self.extract_bitcoin
+        self.config.extract_bitcoin
     }
 
+    /// Returns whether Ethereum address extraction is enabled.
     #[must_use]
     pub fn extract_ethereum(&self) -> bool {
-        self.extract_ethereum
+        self.config.extract_ethereum
     }
 
+    /// Returns whether Monero address extraction is enabled.
     #[must_use]
     pub fn extract_monero(&self) -> bool {
-        self.extract_monero
+        self.config.extract_monero
     }
 
+    /// Returns the minimum label count required for extracted domains.
     #[must_use]
     pub fn min_domain_labels(&self) -> usize {
-        self.min_domain_labels
+        self.config.min_domain_labels
     }
+}
+
+fn extract_matches<'a>(extractors: &[ExtractorKind], input: &'a [u8]) -> Vec<Match<'a>> {
+    let mut results = FinderResults::new(input);
+
+    for extractor in extractors {
+        for finder in extractor.required_finders() {
+            results.ensure(*finder);
+        }
+    }
+
+    let mut matches = Vec::new();
+    for extractor in extractors {
+        extractor.extract(&results, &mut matches);
+    }
+
+    matches
 }
 
 #[cfg(test)]

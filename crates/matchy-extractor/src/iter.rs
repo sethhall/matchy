@@ -1,33 +1,18 @@
 //! Iterator over extracted patterns in a line.
 
+use crate::extract_matches;
 use crate::extractors::ExtractorKind;
-use crate::finders::FinderResults;
 use crate::types::Match;
 
+/// An iterator over matches eagerly extracted from an input byte slice.
 pub struct ExtractIter<'a> {
-    matches: Vec<Match<'a>>,
-    current_idx: usize,
+    matches: std::vec::IntoIter<Match<'a>>,
 }
 
 impl<'a> ExtractIter<'a> {
-    pub fn new(extractors: &[ExtractorKind], line: &'a [u8]) -> Self {
-        let mut matches = Vec::new();
-
-        let mut results = FinderResults::new(line);
-
-        for extractor in extractors {
-            for finder in extractor.required_finders() {
-                results.ensure(*finder);
-            }
-        }
-
-        for extractor in extractors {
-            extractor.extract(&results, &mut matches);
-        }
-
+    pub(crate) fn new(extractors: &[ExtractorKind], line: &'a [u8]) -> Self {
         Self {
-            matches,
-            current_idx: 0,
+            matches: extract_matches(extractors, line).into_iter(),
         }
     }
 }
@@ -36,18 +21,11 @@ impl<'a> Iterator for ExtractIter<'a> {
     type Item = Match<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_idx < self.matches.len() {
-            let match_item = self.matches[self.current_idx].clone();
-            self.current_idx += 1;
-            Some(match_item)
-        } else {
-            None
-        }
+        self.matches.next()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.matches.len() - self.current_idx;
-        (remaining, Some(remaining))
+        self.matches.size_hint()
     }
 }
 
