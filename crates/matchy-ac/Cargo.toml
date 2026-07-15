@@ -5,7 +5,7 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Offset-based Aho-Corasick automaton for matchy (internal)"
+description = "Offset-based, zero-copy Aho-Corasick automaton"
 readme = "../../README.md"
 
 [dependencies]

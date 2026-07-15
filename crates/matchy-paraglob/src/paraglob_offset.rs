@@ -18,15 +18,16 @@
 use crate::error::ParaglobError;
 use crate::glob::{CharClassItem, GlobPattern, GlobSegment};
 use crate::offset_format::{
-    read_cstring, ACEdge, GlobSegmentIndex, ParaglobHeader, PatternDataMapping, PatternEntry,
+    read_cstring, GlobSegmentIndex, ParaglobHeader, PatternDataMapping, PatternEntry,
     SingleWildcard,
 };
-use matchy_ac::ACAutomaton;
+use matchy_ac::{ACAutomaton, ACAutomatonView, ACQueryEvent};
 use matchy_data_format::{DataDecoder, DataEncoder, DataValue, DecodeBudget};
 use matchy_match_mode::MatchMode;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::mem;
+use std::ops::ControlFlow;
 use std::thread_local;
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -1590,12 +1591,22 @@ impl Paraglob {
             // Run AC automaton matching directly on text bytes (AC handles case-insensitivity)
             let text_bytes = text.as_bytes();
             let mode = self.mode;
+            // Paraglob's outer format has already validated the AC section
+            // envelope. The view continues to check every indirect offset
+            // lazily, preserving constant-time startup for mmap databases.
+            let Ok(ac_view) = ACAutomatonView::from_parts(
+                ac_buffer,
+                usize::try_from(header.ac_node_count).unwrap_or(0),
+                header.ac_literal_map_count,
+                mode,
+            ) else {
+                return Ok(());
+            };
             let literal_hit_error = AC_LITERAL_BUFFER.with(|buf| {
                 Self::run_ac_matching_into_static::<BOUNDED>(
-                    ac_buffer,
+                    &ac_view,
                     text_bytes,
                     mode,
-                    usize::try_from(header.ac_node_count).unwrap_or(0),
                     max_matching_work,
                     &mut buf.borrow_mut(),
                     work_budget,
@@ -2049,27 +2060,55 @@ impl Paraglob {
     /// Run AC automaton matching on the offset-based buffer
     /// Writes AC literal IDs into the provided HashSet (avoids allocation)
     fn run_ac_matching_into_static<const BOUNDED: bool>(
-        ac_buffer: &[u8],
+        view: &ACAutomatonView<'_>,
         text: &[u8],
         mode: MatchMode,
-        node_count: usize,
         max_literal_hits: usize,
         matches: &mut HashSet<u32>,
         work_budget: &mut MatchingWorkBudget,
     ) -> Option<&'static str> {
-        if ac_buffer.is_empty() || text.is_empty() || node_count == 0 {
+        if text.is_empty() {
             return None;
         }
 
+        let mut run_normalized = |search_text: &[u8]| {
+            let mut state = view.create_state();
+            let mut error = None;
+            let _ = view.try_advance_normalized(&mut state, search_text, |event| match event {
+                ACQueryEvent::Work(work) => {
+                    if work_budget.try_charge::<BOUNDED>(work) {
+                        ControlFlow::Continue(())
+                    } else {
+                        error = Some("Matching work limit exceeded");
+                        ControlFlow::Break(())
+                    }
+                }
+                ACQueryEvent::Output(output) => {
+                    let pattern_id = output.pattern_id;
+                    if !BOUNDED {
+                        matches.insert(pattern_id);
+                        return ControlFlow::Continue(());
+                    }
+                    if matches.len() >= max_literal_hits {
+                        if matches.contains(&pattern_id) {
+                            return ControlFlow::Continue(());
+                        }
+                        error = Some("AC literal hit limit exceeded");
+                        return ControlFlow::Break(());
+                    }
+                    if matches.len() == matches.capacity() && matches.try_reserve(1).is_err() {
+                        error = Some("AC literal hit allocation failed");
+                        return ControlFlow::Break(());
+                    }
+                    matches.insert(pattern_id);
+                    ControlFlow::Continue(())
+                }
+            });
+            error
+        };
+
         match mode {
-            MatchMode::CaseSensitive => Self::run_ac_matching_normalized::<BOUNDED>(
-                ac_buffer,
-                text,
-                node_count,
-                max_literal_hits,
-                matches,
-                work_budget,
-            ),
+            MatchMode::CaseSensitive => run_normalized(text),
             MatchMode::CaseInsensitive => NORMALIZED_TEXT_BUFFER.with(|buf| {
                 let mut normalized = buf.borrow_mut();
                 if BOUNDED {
@@ -2079,337 +2118,9 @@ impl Paraglob {
                     }
                 }
                 crate::simd_utils::ascii_lowercase(text, &mut normalized);
-                Self::run_ac_matching_normalized::<BOUNDED>(
-                    ac_buffer,
-                    &normalized,
-                    node_count,
-                    max_literal_hits,
-                    matches,
-                    work_budget,
-                )
+                run_normalized(&normalized)
             }),
         }
-    }
-
-    #[inline(always)]
-    fn read_ac_node(nodes: &[u8], node_offset: usize) -> Option<crate::offset_format::ACNodeHot> {
-        use crate::offset_format::ACNodeHot;
-
-        let node_size = mem::size_of::<ACNodeHot>();
-        let node_bytes = nodes.get(node_offset..)?.get(..node_size)?;
-        ACNodeHot::read_from_prefix(node_bytes)
-            .ok()
-            .map(|(node, _)| node)
-    }
-
-    #[inline(always)]
-    fn read_u32_le(buffer: &[u8], offset: usize) -> Option<u32> {
-        let end = offset.checked_add(mem::size_of::<u32>())?;
-        let bytes: [u8; 4] = buffer.get(offset..end)?.try_into().ok()?;
-        Some(u32::from_le_bytes(bytes))
-    }
-
-    #[inline(always)]
-    fn checked_ac_target(target_offset: u32, nodes_size: usize) -> Option<usize> {
-        let target = usize::try_from(target_offset).ok()?;
-        // Node reads are byte-based and therefore do not require aligned
-        // offsets. Keeping this check to the actual safety invariant avoids a
-        // division on every automaton transition while malformed targets still
-        // fail closed in `read_ac_node`.
-        if target == 0 || target >= nodes_size {
-            return None;
-        }
-        Some(target)
-    }
-
-    /// Run AC automaton matching on already-normalized bytes.
-    fn run_ac_matching_normalized<const BOUNDED: bool>(
-        ac_buffer: &[u8],
-        search_text: &[u8],
-        node_count: usize,
-        max_literal_hits: usize,
-        matches: &mut HashSet<u32>,
-        work_budget: &mut MatchingWorkBudget,
-    ) -> Option<&'static str> {
-        use crate::offset_format::{ACNodeHot, StateKind};
-
-        let nodes_size = node_count.checked_mul(mem::size_of::<ACNodeHot>())?;
-        if nodes_size > ac_buffer.len() {
-            return None;
-        }
-        let nodes = &ac_buffer[..nodes_size];
-
-        // Read the root by value so neither the mmap base nor a malicious
-        // offset needs to be naturally aligned. Current writers use Dense,
-        // while older v5 writers may use Empty, One, or Sparse.
-        let root_node = Self::read_ac_node(nodes, 0)?;
-        let root_kind = StateKind::from_u8(root_node.state_kind)?;
-        let root_dense_table = if root_kind == StateKind::Dense {
-            let Ok(root_dense_offset) = usize::try_from(root_node.edges_offset) else {
-                return None;
-            };
-            if root_dense_offset < nodes_size
-                || !root_dense_offset.is_multiple_of(mem::size_of::<u32>())
-            {
-                return None;
-            }
-            let root_dense_end = root_dense_offset.checked_add(256 * mem::size_of::<u32>())?;
-            let root_dense_table = ac_buffer.get(root_dense_offset..root_dense_end)?;
-            Some(root_dense_table)
-        } else {
-            None
-        };
-
-        let mut current_offset = 0usize; // Start at root node
-
-        for &search_ch in search_text.iter() {
-            let mut failure_hops_remaining = node_count;
-
-            // Traverse to next state
-            loop {
-                if current_offset == 0 {
-                    if let Some(root_dense_table) = root_dense_table {
-                        // Preserve the direct-table hot path for current files.
-                        if !work_budget.try_charge::<BOUNDED>(1) {
-                            return Some("Matching work limit exceeded");
-                        }
-                        let target_offset = usize::from(search_ch) * mem::size_of::<u32>();
-                        let target_bytes: [u8; 4] = root_dense_table
-                            [target_offset..target_offset + mem::size_of::<u32>()]
-                            .try_into()
-                            .expect("u8-indexed dense lookup always contains four bytes");
-                        let target = u32::from_le_bytes(target_bytes);
-                        if target != 0 {
-                            if let Some(target) = Self::checked_ac_target(target, nodes_size) {
-                                current_offset = target;
-                            }
-                        }
-                    } else {
-                        let transition = match Self::find_ac_transition_with_budget::<BOUNDED>(
-                            ac_buffer,
-                            root_node,
-                            search_ch,
-                            nodes_size,
-                            work_budget,
-                        ) {
-                            Ok(transition) => transition,
-                            Err(error) => return Some(error),
-                        };
-                        if let Some(target) = transition {
-                            current_offset = target;
-                        }
-                    }
-                    break;
-                }
-
-                let Some(node) = Self::read_ac_node(nodes, current_offset) else {
-                    current_offset = 0;
-                    break;
-                };
-
-                // Try to find transition for non-root nodes.
-                let transition = match Self::find_ac_transition_with_budget::<BOUNDED>(
-                    ac_buffer,
-                    node,
-                    search_ch,
-                    nodes_size,
-                    work_budget,
-                ) {
-                    Ok(transition) => transition,
-                    Err(error) => return Some(error),
-                };
-                if let Some(next_offset) = transition {
-                    current_offset = next_offset;
-                    break;
-                }
-
-                if failure_hops_remaining == 0 {
-                    // A well-formed automaton reaches root in fewer than
-                    // `node_count` hops. This also terminates malicious cycles.
-                    current_offset = 0;
-                    break;
-                }
-                if !work_budget.try_charge::<BOUNDED>(1) {
-                    return Some("Matching work limit exceeded");
-                }
-                failure_hops_remaining -= 1;
-
-                if node.failure_offset == 0 {
-                    current_offset = 0;
-                    continue;
-                }
-                let Some(failure_offset) = Self::checked_ac_target(node.failure_offset, nodes_size)
-                else {
-                    current_offset = 0;
-                    break;
-                };
-                current_offset = failure_offset;
-            }
-
-            // Collect pattern IDs at this state (skip for root - no patterns there)
-            if current_offset == 0 {
-                continue;
-            }
-
-            let Some(node) = Self::read_ac_node(nodes, current_offset) else {
-                current_offset = 0;
-                continue;
-            };
-
-            if node.pattern_count > 0 {
-                let Ok(patterns_offset) = usize::try_from(node.patterns_offset) else {
-                    continue;
-                };
-                if patterns_offset < nodes_size
-                    || !patterns_offset.is_multiple_of(mem::size_of::<u32>())
-                {
-                    continue;
-                }
-                let pattern_count = usize::from(node.pattern_count);
-                let Some(patterns_size) = pattern_count.checked_mul(mem::size_of::<u32>()) else {
-                    continue;
-                };
-                if patterns_offset
-                    .checked_add(patterns_size)
-                    .is_none_or(|end| end > ac_buffer.len())
-                {
-                    continue;
-                }
-                let Some(patterns) = ac_buffer
-                    .get(patterns_offset..)
-                    .and_then(|tail| tail.get(..pattern_count * mem::size_of::<u32>()))
-                else {
-                    continue;
-                };
-                for pattern in patterns.chunks_exact(mem::size_of::<u32>()) {
-                    if !work_budget.try_charge::<BOUNDED>(1) {
-                        return Some("Matching work limit exceeded");
-                    }
-                    let pattern_id = u32::from_le_bytes(
-                        pattern
-                            .try_into()
-                            .expect("bounded pattern list contains four-byte entries"),
-                    );
-                    if !BOUNDED {
-                        matches.insert(pattern_id);
-                        continue;
-                    }
-                    if matches.len() >= max_literal_hits {
-                        if matches.contains(&pattern_id) {
-                            continue;
-                        }
-                        return Some("AC literal hit limit exceeded");
-                    }
-                    if matches.len() == matches.capacity() && matches.try_reserve(1).is_err() {
-                        return Some("AC literal hit allocation failed");
-                    }
-                    matches.insert(pattern_id);
-                }
-            }
-        }
-        None
-    }
-
-    /// Find a transition from a node for a character in AC automaton
-    /// Uses state-specific encoding for optimal performance
-    #[inline(always)]
-    fn find_ac_transition(
-        ac_buffer: &[u8],
-        node: crate::offset_format::ACNodeHot,
-        ch: u8,
-        nodes_size: usize,
-    ) -> Option<usize> {
-        use crate::offset_format::StateKind;
-
-        // Dispatch on state encoding
-        let kind = StateKind::from_u8(node.state_kind)?;
-
-        match kind {
-            StateKind::Empty => None,
-
-            StateKind::One => {
-                // Single inline comparison
-                if node.one_char == ch {
-                    Self::checked_ac_target(node.edges_offset, nodes_size)
-                } else {
-                    None
-                }
-            }
-
-            StateKind::Sparse => {
-                // Linear search through sparse edges
-                let edges_offset = usize::try_from(node.edges_offset).ok()?;
-                let edge_size = mem::size_of::<ACEdge>();
-                let count = usize::from(node.edge_count);
-                if edges_offset < nodes_size || !edges_offset.is_multiple_of(mem::size_of::<u32>())
-                {
-                    return None;
-                }
-                let edges_size = count.checked_mul(edge_size)?;
-                if edges_offset.checked_add(edges_size)? > ac_buffer.len() {
-                    return None;
-                }
-
-                let edges = ac_buffer.get(edges_offset..)?.get(..edges_size)?;
-                for edge in edges.chunks_exact(edge_size) {
-                    let edge_character = edge[0];
-
-                    if edge_character == ch {
-                        let target_start = std::mem::offset_of!(ACEdge, target_offset);
-                        let target = u32::from_le_bytes(
-                            edge[target_start..target_start + mem::size_of::<u32>()]
-                                .try_into()
-                                .expect("bounded AC edge contains a four-byte target"),
-                        );
-                        return Self::checked_ac_target(target, nodes_size);
-                    }
-                    if edge_character > ch {
-                        return None;
-                    }
-                }
-                None
-            }
-
-            StateKind::Dense => {
-                let lookup_offset = usize::try_from(node.edges_offset).ok()?;
-                if lookup_offset < nodes_size
-                    || !lookup_offset.is_multiple_of(mem::size_of::<u32>())
-                {
-                    return None;
-                }
-                let target_offset =
-                    checked_index_offset(lookup_offset, usize::from(ch), mem::size_of::<u32>())?;
-                let target = Self::read_u32_le(ac_buffer, target_offset)?;
-                Self::checked_ac_target(target, nodes_size)
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn find_ac_transition_with_budget<const BOUNDED: bool>(
-        ac_buffer: &[u8],
-        node: crate::offset_format::ACNodeHot,
-        ch: u8,
-        nodes_size: usize,
-        work_budget: &mut MatchingWorkBudget,
-    ) -> Result<Option<usize>, &'static str> {
-        if BOUNDED {
-            use crate::offset_format::StateKind;
-
-            let Some(kind) = StateKind::from_u8(node.state_kind) else {
-                return Ok(None);
-            };
-            let work = if kind == StateKind::Sparse {
-                usize::from(node.edge_count).max(1)
-            } else {
-                1
-            };
-            if !work_budget.try_charge::<true>(work) {
-                return Err("Matching work limit exceeded");
-            }
-        }
-
-        Ok(Self::find_ac_transition(ac_buffer, node, ch, nodes_size))
     }
 
     /// Get the buffer (for serialization)

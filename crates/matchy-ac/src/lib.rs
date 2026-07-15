@@ -13,10 +13,21 @@
 //! - Pattern ID arrays referenced by nodes
 //!
 //! All operations (both building and matching) work directly on this buffer.
+//!
+//! # Querying
+//!
+//! [`ACAutomaton::view`] creates a streaming query view over a newly built
+//! automaton. For persisted or memory-mapped buffers, store the node count,
+//! pattern count, and match mode alongside the buffer, then use
+//! [`ACAutomatonView::new`] for eager validation or
+//! [`ACAutomatonView::from_parts`] for lazy checked access.
+//! Pattern lengths are separate metadata because they are not needed when only
+//! output IDs are required.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::mem;
+use std::ops::ControlFlow;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 // Re-export MatchMode from shared crate
@@ -54,6 +65,51 @@ impl fmt::Display for ACError {
 
 impl std::error::Error for ACError {}
 
+/// One byte-pattern occurrence. Offsets are absolute within the streaming
+/// input and `end` is exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ACMatch {
+    /// Builder-assigned pattern identifier.
+    pub pattern_id: u32,
+    /// Inclusive start offset of the occurrence.
+    pub start: u64,
+    /// Exclusive end offset of the occurrence.
+    pub end: u64,
+}
+
+/// A raw automaton output before a pattern length is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ACOutput {
+    /// Builder-assigned pattern identifier.
+    pub pattern_id: u32,
+    /// Exclusive absolute end offset of the occurrence.
+    pub end: u64,
+}
+
+/// Event emitted by the bounded, allocation-free query API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ACQueryEvent {
+    /// Conservative units of transition or output work about to be performed.
+    Work(usize),
+    /// One pattern output at the current streaming position.
+    Output(ACOutput),
+}
+
+/// Independent streaming cursor for an [`ACAutomatonView`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ACMatchState {
+    current_offset: usize,
+    position: u64,
+}
+
+impl ACMatchState {
+    /// Number of input bytes consumed since this cursor was created or reset.
+    #[must_use]
+    pub const fn position(&self) -> u64 {
+        self.position
+    }
+}
+
 // Binary format structures for offset-based AC automaton
 
 /// State encoding type
@@ -68,6 +124,18 @@ pub enum StateKind {
     Sparse = 2,
     /// 9+ transitions - dense lookup table (2-5% of states)
     Dense = 3,
+}
+
+impl StateKind {
+    const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Empty),
+            1 => Some(Self::One),
+            2 => Some(Self::Sparse),
+            3 => Some(Self::Dense),
+            _ => None,
+        }
+    }
 }
 
 /// AC Node hot data (checked every transition)
@@ -123,6 +191,424 @@ pub struct DenseLookup {
     pub targets: [u32; 256],
 }
 
+/// Zero-copy query view over a serialized AC automaton.
+///
+/// The view borrows the encoded nodes, edges, and outputs directly. Advancing a
+/// cursor never rebuilds or relocates the automaton.
+pub struct ACAutomatonView<'a> {
+    buffer: &'a [u8],
+    nodes: &'a [u8],
+    node_count: usize,
+    pattern_count: u32,
+    pattern_lengths: Option<&'a [usize]>,
+    mode: MatchMode,
+}
+
+impl<'a> ACAutomatonView<'a> {
+    /// Validate a serialized automaton for output-ID queries.
+    pub fn new(
+        buffer: &'a [u8],
+        node_count: usize,
+        pattern_count: u32,
+        mode: MatchMode,
+    ) -> Result<Self, ACError> {
+        Self::create(buffer, node_count, pattern_count, None, mode, true)
+    }
+
+    /// Create a view with constant-time envelope validation.
+    ///
+    /// Indirect offsets and pattern IDs are checked lazily before each use, so
+    /// malformed references fail closed. Use [`Self::new`] when loading an
+    /// untrusted standalone automaton and eager structural error reporting is
+    /// preferred.
+    pub fn from_parts(
+        buffer: &'a [u8],
+        node_count: usize,
+        pattern_count: u32,
+        mode: MatchMode,
+    ) -> Result<Self, ACError> {
+        Self::create(buffer, node_count, pattern_count, None, mode, false)
+    }
+
+    /// Create an exact-span view with constant-time envelope validation.
+    ///
+    /// This is the pattern-length counterpart to [`Self::from_parts`].
+    pub fn from_parts_with_pattern_lengths(
+        buffer: &'a [u8],
+        node_count: usize,
+        pattern_lengths: &'a [usize],
+        mode: MatchMode,
+    ) -> Result<Self, ACError> {
+        let pattern_count = validate_pattern_lengths(pattern_lengths)?;
+        Self::create(
+            buffer,
+            node_count,
+            pattern_count,
+            Some(pattern_lengths),
+            mode,
+            false,
+        )
+    }
+
+    /// Validate a serialized automaton for exact-span queries.
+    ///
+    /// `pattern_lengths` must use the builder's pattern-ID order.
+    pub fn with_pattern_lengths(
+        buffer: &'a [u8],
+        node_count: usize,
+        pattern_lengths: &'a [usize],
+        mode: MatchMode,
+    ) -> Result<Self, ACError> {
+        let pattern_count = validate_pattern_lengths(pattern_lengths)?;
+        Self::create(
+            buffer,
+            node_count,
+            pattern_count,
+            Some(pattern_lengths),
+            mode,
+            true,
+        )
+    }
+
+    fn create(
+        buffer: &'a [u8],
+        node_count: usize,
+        pattern_count: u32,
+        pattern_lengths: Option<&'a [usize]>,
+        mode: MatchMode,
+        validate_structure: bool,
+    ) -> Result<Self, ACError> {
+        if node_count == 0 || pattern_count == 0 {
+            return Err(ACError::InvalidInput(
+                "Automaton node and pattern counts must be non-zero".to_string(),
+            ));
+        }
+        let nodes_size = node_count
+            .checked_mul(mem::size_of::<ACNodeHot>())
+            .ok_or_else(|| ACError::InvalidInput("AC node table size overflow".to_string()))?;
+        let nodes = buffer.get(..nodes_size).ok_or_else(|| {
+            ACError::InvalidInput("AC node table is outside the buffer".to_string())
+        })?;
+        if validate_structure {
+            let validation = validate_ac_structure(buffer, 0, node_count, pattern_count, true);
+            if !validation.is_valid() {
+                return Err(ACError::InvalidInput(format!(
+                    "Invalid serialized AC automaton: {}",
+                    validation.errors.join("; ")
+                )));
+            }
+        }
+        Ok(Self {
+            buffer,
+            nodes,
+            node_count,
+            pattern_count,
+            pattern_lengths,
+            mode,
+        })
+    }
+
+    /// Create an independent cursor positioned at the beginning of a stream.
+    #[must_use]
+    pub const fn create_state(&self) -> ACMatchState {
+        ACMatchState {
+            current_offset: 0,
+            position: 0,
+        }
+    }
+
+    /// Reset a cursor without releasing any caller-owned storage.
+    pub const fn reset_state(&self, state: &mut ACMatchState) {
+        state.current_offset = 0;
+        state.position = 0;
+    }
+
+    /// Advance a cursor and visit every overlapping occurrence with an exact
+    /// start and end offset.
+    ///
+    /// # Errors
+    /// Returns an error if this view was created without pattern lengths.
+    pub fn advance(
+        &self,
+        state: &mut ACMatchState,
+        input: &[u8],
+        mut visit: impl FnMut(ACMatch),
+    ) -> Result<(), ACError> {
+        let pattern_lengths = self.pattern_lengths.ok_or_else(|| {
+            ACError::InvalidInput("Exact-span queries require pattern lengths".to_string())
+        })?;
+        let result = self.try_advance(state, input, |event| {
+            if let ACQueryEvent::Output(output) = event {
+                let length = usize::try_from(output.pattern_id)
+                    .ok()
+                    .and_then(|pattern_id| pattern_lengths.get(pattern_id))
+                    .and_then(|length| u64::try_from(*length).ok());
+                if let Some(length) = length {
+                    visit(ACMatch {
+                        pattern_id: output.pattern_id,
+                        start: output.end.saturating_sub(length),
+                        end: output.end,
+                    });
+                }
+            }
+            ControlFlow::<()>::Continue(())
+        });
+        debug_assert!(result.is_continue());
+        Ok(())
+    }
+
+    /// Advance a cursor while exposing conservative work units and raw output
+    /// IDs to an allocation-free handler.
+    ///
+    /// Returning `ControlFlow::Break` stops immediately. The cursor should be
+    /// discarded or reset after an early break because the remaining input was
+    /// not consumed.
+    pub fn try_advance<B>(
+        &self,
+        state: &mut ACMatchState,
+        input: &[u8],
+        handle: impl FnMut(ACQueryEvent) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        self.try_advance_impl(state, input, true, handle)
+    }
+
+    /// Equivalent to [`try_advance`](Self::try_advance), but accepts input that
+    /// has already been normalized for the automaton's match mode.
+    ///
+    /// For case-insensitive automata, callers must ASCII-lowercase the input.
+    /// This is useful for consumers that already maintain a reusable SIMD
+    /// normalization buffer.
+    pub fn try_advance_normalized<B>(
+        &self,
+        state: &mut ACMatchState,
+        input: &[u8],
+        handle: impl FnMut(ACQueryEvent) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        self.try_advance_impl(state, input, false, handle)
+    }
+
+    fn try_advance_impl<B>(
+        &self,
+        state: &mut ACMatchState,
+        input: &[u8],
+        normalize_input: bool,
+        mut handle: impl FnMut(ACQueryEvent) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        let node_size = mem::size_of::<ACNodeHot>();
+        if state.current_offset >= self.nodes.len()
+            || !state.current_offset.is_multiple_of(node_size)
+        {
+            state.current_offset = 0;
+        }
+        let Some(root) = self.read_node(0) else {
+            return ControlFlow::Continue(());
+        };
+        let root_kind = StateKind::from_u8(root.state_kind).unwrap_or(StateKind::Empty);
+        let root_dense_table = if root_kind == StateKind::Dense {
+            usize::try_from(root.edges_offset)
+                .ok()
+                .filter(|offset| {
+                    *offset >= self.nodes.len() && offset.is_multiple_of(mem::size_of::<u32>())
+                })
+                .and_then(|offset| {
+                    let end = offset.checked_add(mem::size_of::<DenseLookup>())?;
+                    self.buffer.get(offset..end)
+                })
+        } else {
+            None
+        };
+
+        for &input_byte in input {
+            let search_byte = if normalize_input && self.mode == MatchMode::CaseInsensitive {
+                input_byte.to_ascii_lowercase()
+            } else {
+                input_byte
+            };
+            let mut failure_hops_remaining = self.node_count;
+
+            loop {
+                if state.current_offset == 0 {
+                    if let Some(root_dense_table) = root_dense_table {
+                        handle(ACQueryEvent::Work(1))?;
+                        let target = read_u32_le(
+                            root_dense_table,
+                            usize::from(search_byte) * mem::size_of::<u32>(),
+                        )
+                        .unwrap_or(0);
+                        if let Some(target) = self.checked_target(target) {
+                            state.current_offset = target;
+                        }
+                    } else {
+                        handle(ACQueryEvent::Work(transition_work(root)))?;
+                        if let Some(target) = self.find_transition(root, search_byte) {
+                            state.current_offset = target;
+                        }
+                    }
+                    break;
+                }
+
+                let Some(node) = self.read_node(state.current_offset) else {
+                    state.current_offset = 0;
+                    break;
+                };
+                if StateKind::from_u8(node.state_kind).is_none() {
+                    state.current_offset = 0;
+                    break;
+                }
+                handle(ACQueryEvent::Work(transition_work(node)))?;
+                if let Some(target) = self.find_transition(node, search_byte) {
+                    state.current_offset = target;
+                    break;
+                }
+                if failure_hops_remaining == 0 {
+                    state.current_offset = 0;
+                    break;
+                }
+                handle(ACQueryEvent::Work(1))?;
+                failure_hops_remaining -= 1;
+                if node.failure_offset == 0 {
+                    state.current_offset = 0;
+                    continue;
+                }
+                let Some(failure_offset) = self.checked_target(node.failure_offset) else {
+                    state.current_offset = 0;
+                    break;
+                };
+                state.current_offset = failure_offset;
+            }
+
+            state.position = state.position.saturating_add(1);
+            if state.current_offset == 0 {
+                continue;
+            }
+            let Some(node) = self.read_node(state.current_offset) else {
+                state.current_offset = 0;
+                continue;
+            };
+            let Some(patterns_offset) = usize::try_from(node.patterns_offset).ok() else {
+                continue;
+            };
+            if patterns_offset < self.nodes.len()
+                || !patterns_offset.is_multiple_of(mem::size_of::<u32>())
+            {
+                continue;
+            }
+            let output_count = usize::from(node.pattern_count);
+            let Some(outputs_size) = output_count.checked_mul(mem::size_of::<u32>()) else {
+                continue;
+            };
+            let Some(outputs_end) = patterns_offset.checked_add(outputs_size) else {
+                continue;
+            };
+            let Some(outputs) = self.buffer.get(patterns_offset..outputs_end) else {
+                continue;
+            };
+            for output in outputs.chunks_exact(mem::size_of::<u32>()) {
+                handle(ACQueryEvent::Work(1))?;
+                let Some(pattern_id) =
+                    read_u32_le(output, 0).filter(|pattern_id| *pattern_id < self.pattern_count)
+                else {
+                    continue;
+                };
+                handle(ACQueryEvent::Output(ACOutput {
+                    pattern_id,
+                    end: state.position,
+                }))?;
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    #[inline(always)]
+    fn read_node(&self, offset: usize) -> Option<ACNodeHot> {
+        if !offset.is_multiple_of(mem::size_of::<ACNodeHot>()) {
+            return None;
+        }
+        let end = offset.checked_add(mem::size_of::<ACNodeHot>())?;
+        let bytes = self.nodes.get(offset..end)?;
+        ACNodeHot::read_from_prefix(bytes)
+            .ok()
+            .map(|(node, _)| node)
+    }
+
+    #[inline(always)]
+    fn checked_target(&self, target: u32) -> Option<usize> {
+        let target = usize::try_from(target).ok()?;
+        (target != 0 && target < self.nodes.len()).then_some(target)
+    }
+
+    #[inline(always)]
+    fn find_transition(&self, node: ACNodeHot, byte: u8) -> Option<usize> {
+        match StateKind::from_u8(node.state_kind)? {
+            StateKind::Empty => None,
+            StateKind::One => (node.one_char == byte && node.one_target == node.edges_offset)
+                .then(|| self.checked_target(node.one_target))?,
+            StateKind::Sparse => {
+                let edges_offset = usize::try_from(node.edges_offset).ok()?;
+                if edges_offset < self.nodes.len()
+                    || !edges_offset.is_multiple_of(mem::size_of::<u32>())
+                {
+                    return None;
+                }
+                let count = usize::from(node.edge_count);
+                let edges_size = count.checked_mul(mem::size_of::<ACEdge>())?;
+                let edges_end = edges_offset.checked_add(edges_size)?;
+                let edges = self.buffer.get(edges_offset..edges_end)?;
+                for edge in edges.chunks_exact(mem::size_of::<ACEdge>()) {
+                    let edge_byte = edge[0];
+                    if edge_byte == byte {
+                        let target =
+                            read_u32_le(edge, std::mem::offset_of!(ACEdge, target_offset))?;
+                        return self.checked_target(target);
+                    }
+                    if edge_byte > byte {
+                        return None;
+                    }
+                }
+                None
+            }
+            StateKind::Dense => {
+                let lookup_offset = usize::try_from(node.edges_offset).ok()?;
+                if lookup_offset < self.nodes.len()
+                    || !lookup_offset.is_multiple_of(mem::size_of::<u32>())
+                {
+                    return None;
+                }
+                let entry_offset = usize::from(byte).checked_mul(mem::size_of::<u32>())?;
+                let target_offset = lookup_offset.checked_add(entry_offset)?;
+                let target = read_u32_le(self.buffer, target_offset)?;
+                self.checked_target(target)
+            }
+        }
+    }
+}
+
+fn validate_pattern_lengths(pattern_lengths: &[usize]) -> Result<u32, ACError> {
+    if pattern_lengths.contains(&0) {
+        return Err(ACError::InvalidInput(
+            "Pattern lengths must be non-zero".to_string(),
+        ));
+    }
+    u32::try_from(pattern_lengths.len())
+        .map_err(|_| ACError::InvalidInput("Pattern length count exceeds u32::MAX".to_string()))
+}
+
+fn transition_work(node: ACNodeHot) -> usize {
+    if StateKind::from_u8(node.state_kind) == Some(StateKind::Sparse) {
+        usize::from(node.edge_count).max(1)
+    } else {
+        1
+    }
+}
+
+fn read_u32_le(buffer: &[u8], offset: usize) -> Option<u32> {
+    let bytes: [u8; 4] = buffer
+        .get(offset..offset.checked_add(mem::size_of::<u32>())?)?
+        .try_into()
+        .ok()?;
+    Some(u32::from_le_bytes(bytes))
+}
+
 // Note: Case-Insensitive Implementation
 //
 // Case-insensitive mode uses a memory-efficient approach:
@@ -141,8 +627,8 @@ struct ACBuilder {
     states: Vec<BuilderState>,
     /// Matching mode
     mode: MatchMode,
-    /// Original patterns
-    patterns: Vec<String>,
+    /// Normalized pattern lengths in builder-assigned ID order.
+    pattern_lengths: Vec<usize>,
 }
 
 /// Temporary state structure used during construction
@@ -185,7 +671,7 @@ impl ACBuilder {
         Self {
             states: vec![BuilderState::new()], // Root
             mode,
-            patterns: Vec::new(),
+            pattern_lengths: Vec::new(),
         }
     }
 
@@ -198,17 +684,17 @@ impl ACBuilder {
     ///
     /// Example: Pattern "Hello" becomes "hello" with a single transition path,
     /// rather than 2^5 = 32 paths for all case combinations.
-    fn add_pattern(&mut self, pattern: &str) -> Result<u32, ACError> {
-        let pattern_id = u32::try_from(self.patterns.len())
+    fn add_pattern(&mut self, pattern: &[u8]) -> Result<u32, ACError> {
+        let pattern_id = u32::try_from(self.pattern_lengths.len())
             .map_err(|_| ACError::ResourceLimitExceeded("Pattern count exceeds u32::MAX".into()))?;
-        self.patterns.push(pattern.to_string());
 
-        // For case-insensitive mode, normalize pattern to lowercase during build
-        // We'll normalize text to lowercase during search instead of doubling transitions
+        // Matchy's query semantics are byte-oriented and ASCII-insensitive.
+        // Normalize one byte at a time so arbitrary binary patterns remain valid.
         let pattern_bytes: Vec<u8> = match self.mode {
-            MatchMode::CaseSensitive => pattern.as_bytes().to_vec(),
-            MatchMode::CaseInsensitive => pattern.to_lowercase().into_bytes(),
+            MatchMode::CaseSensitive => pattern.to_vec(),
+            MatchMode::CaseInsensitive => pattern.iter().map(u8::to_ascii_lowercase).collect(),
         };
+        self.pattern_lengths.push(pattern_bytes.len());
 
         // Build trie path
         let mut current = 0u32;
@@ -544,25 +1030,30 @@ impl ACBuilder {
     }
 }
 
-/// Offset-based Aho-Corasick automaton for building
+/// Owned offset-based Aho-Corasick automaton.
 ///
-/// All data is stored in a single byte buffer using offsets.
-/// This struct is only used for building the automaton.
-/// Querying is done via paraglob_offset's optimized implementation.
+/// All automaton data is stored in a single byte buffer using offsets. Query
+/// views borrow that buffer without rebuilding any matching structures.
 pub struct ACAutomaton {
     /// Binary buffer containing all automaton data
     buffer: Vec<u8>,
     /// Number of AC nodes in the automaton
     node_count: usize,
+    /// Pattern lengths in builder-assigned ID order.
+    pattern_lengths: Vec<usize>,
+    /// Matching mode used to normalize patterns while building.
+    mode: MatchMode,
 }
 
 impl ACAutomaton {
     /// Create a new AC automaton (initially empty)
     #[must_use]
-    pub fn new(_mode: MatchMode) -> Self {
+    pub fn new(mode: MatchMode) -> Self {
         Self {
             buffer: Vec::new(),
             node_count: 0,
+            pattern_lengths: Vec::new(),
+            mode,
         }
     }
 
@@ -570,6 +1061,18 @@ impl ACAutomaton {
     ///
     /// This constructs the offset-based binary format directly.
     pub fn build(patterns: &[&str], mode: MatchMode) -> Result<Self, ACError> {
+        let byte_patterns = patterns
+            .iter()
+            .map(|pattern| pattern.as_bytes())
+            .collect::<Vec<_>>();
+        Self::build_bytes(&byte_patterns, mode)
+    }
+
+    /// Build an automaton from arbitrary byte patterns.
+    ///
+    /// Pattern IDs correspond to input order. Case-insensitive construction
+    /// performs ASCII byte folding and leaves non-ASCII bytes unchanged.
+    pub fn build_bytes(patterns: &[&[u8]], mode: MatchMode) -> Result<Self, ACError> {
         if patterns.is_empty() {
             return Err(ACError::InvalidPattern("No patterns provided".to_string()));
         }
@@ -585,9 +1088,15 @@ impl ACAutomaton {
 
         builder.build_failure_links();
         let node_count = builder.states.len();
+        let pattern_lengths = builder.pattern_lengths.clone();
         let buffer = builder.serialize()?;
 
-        Ok(Self { buffer, node_count })
+        Ok(Self {
+            buffer,
+            node_count,
+            pattern_lengths,
+            mode,
+        })
     }
 
     /// Get the buffer (for serialization)
@@ -600,6 +1109,34 @@ impl ACAutomaton {
     #[must_use]
     pub fn node_count(&self) -> usize {
         self.node_count
+    }
+
+    /// Get the number of patterns in builder-assigned ID order.
+    #[must_use]
+    pub fn pattern_count(&self) -> usize {
+        self.pattern_lengths.len()
+    }
+
+    /// Pattern lengths in builder-assigned ID order.
+    #[must_use]
+    pub fn pattern_lengths(&self) -> &[usize] {
+        &self.pattern_lengths
+    }
+
+    /// Get the matching mode used to normalize patterns.
+    #[must_use]
+    pub const fn match_mode(&self) -> MatchMode {
+        self.mode
+    }
+
+    /// Create a validated zero-copy query view over this automaton.
+    pub fn view(&self) -> Result<ACAutomatonView<'_>, ACError> {
+        ACAutomatonView::with_pattern_lengths(
+            &self.buffer,
+            self.node_count,
+            &self.pattern_lengths,
+            self.mode,
+        )
     }
 }
 
@@ -665,7 +1202,164 @@ mod tests {
         assert_eq!(ac.node_count(), pattern.len() + 1);
         assert!(!ac.buffer().is_empty());
     }
-}
 
-// Note: Query method tests removed - ACAutomaton is now only used for building.
-// Querying is done via paraglob_offset's optimized inline implementation.
+    #[test]
+    fn string_and_byte_builders_have_identical_encoding() {
+        let strings = ACAutomaton::build(&["he", "she", "hers"], MatchMode::CaseSensitive).unwrap();
+        let bytes = ACAutomaton::build_bytes(
+            &[b"he".as_slice(), b"she".as_slice(), b"hers".as_slice()],
+            MatchMode::CaseSensitive,
+        )
+        .unwrap();
+
+        assert_eq!(strings.buffer(), bytes.buffer());
+        assert_eq!(strings.node_count(), bytes.node_count());
+    }
+
+    #[test]
+    fn reports_overlapping_matches_across_chunks() {
+        let ac = ACAutomaton::build(&["he", "she", "hers"], MatchMode::CaseSensitive).unwrap();
+        let view = ACAutomatonView::from_parts_with_pattern_lengths(
+            ac.buffer(),
+            ac.node_count(),
+            ac.pattern_lengths(),
+            MatchMode::CaseSensitive,
+        )
+        .unwrap();
+        let mut state = view.create_state();
+        let mut matches = Vec::new();
+
+        view.advance(&mut state, b"us", |matched| matches.push(matched))
+            .unwrap();
+        view.advance(&mut state, b"hers", |matched| matches.push(matched))
+            .unwrap();
+
+        assert_eq!(
+            matches,
+            [
+                ACMatch {
+                    pattern_id: 1,
+                    start: 1,
+                    end: 4,
+                },
+                ACMatch {
+                    pattern_id: 0,
+                    start: 2,
+                    end: 4,
+                },
+                ACMatch {
+                    pattern_id: 2,
+                    start: 2,
+                    end: 6,
+                },
+            ]
+        );
+        assert_eq!(state.position(), 6);
+
+        view.reset_state(&mut state);
+        assert_eq!(state.position(), 0);
+    }
+
+    #[test]
+    fn byte_patterns_use_ascii_only_case_folding() {
+        let pattern = [0xff, b'A'];
+        let ac =
+            ACAutomaton::build_bytes(&[pattern.as_slice()], MatchMode::CaseInsensitive).unwrap();
+        let view = ac.view().unwrap();
+        let mut state = view.create_state();
+        let mut matches = Vec::new();
+
+        view.advance(&mut state, &[0xff, b'a'], |matched| matches.push(matched))
+            .unwrap();
+
+        assert_eq!(
+            matches,
+            [ACMatch {
+                pattern_id: 0,
+                start: 0,
+                end: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn serialized_view_reports_output_ids_without_pattern_strings() {
+        let ac = ACAutomaton::build(&["a", "aa"], MatchMode::CaseSensitive).unwrap();
+        let view = ACAutomatonView::new(
+            ac.buffer(),
+            ac.node_count(),
+            u32::try_from(ac.pattern_lengths().len()).unwrap(),
+            MatchMode::CaseSensitive,
+        )
+        .unwrap();
+        let mut state = view.create_state();
+        let mut outputs = Vec::new();
+
+        let completed = view.try_advance(&mut state, b"aaa", |event| {
+            if let ACQueryEvent::Output(output) = event {
+                outputs.push(output);
+            }
+            ControlFlow::<()>::Continue(())
+        });
+
+        assert!(completed.is_continue());
+        assert_eq!(
+            outputs,
+            [
+                ACOutput {
+                    pattern_id: 0,
+                    end: 1,
+                },
+                ACOutput {
+                    pattern_id: 1,
+                    end: 2,
+                },
+                ACOutput {
+                    pattern_id: 0,
+                    end: 2,
+                },
+                ACOutput {
+                    pattern_id: 1,
+                    end: 3,
+                },
+                ACOutput {
+                    pattern_id: 0,
+                    end: 3,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn strict_view_rejects_corrupt_offsets_and_lazy_view_fails_closed() {
+        let ac = ACAutomaton::build(&["needle"], MatchMode::CaseSensitive).unwrap();
+        let mut buffer = ac.buffer().to_vec();
+        let root_edges = std::mem::offset_of!(ACNodeHot, edges_offset);
+        buffer[root_edges..root_edges + mem::size_of::<u32>()]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+
+        assert!(
+            ACAutomatonView::new(&buffer, ac.node_count(), 1, MatchMode::CaseSensitive,).is_err()
+        );
+
+        let view =
+            ACAutomatonView::from_parts(&buffer, ac.node_count(), 1, MatchMode::CaseSensitive)
+                .unwrap();
+        let mut state = view.create_state();
+        let mut outputs = Vec::new();
+        let completed = view.try_advance(&mut state, b"needle", |event| {
+            if let ACQueryEvent::Output(output) = event {
+                outputs.push(output);
+            }
+            ControlFlow::<()>::Continue(())
+        });
+
+        assert!(completed.is_continue());
+        assert!(outputs.is_empty());
+    }
+
+    #[test]
+    fn serialized_view_rejects_impossible_node_table_sizes() {
+        assert!(ACAutomatonView::new(&[], usize::MAX, 1, MatchMode::CaseSensitive,).is_err());
+    }
+}

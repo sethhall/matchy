@@ -196,6 +196,12 @@ pub fn validate_ac_structure(
                         i, node.edge_count
                     ));
                 }
+                if node.one_target != node.edges_offset {
+                    result.error(format!(
+                        "AC node {i} (One) has inconsistent inline targets: one_target={}, edges_offset={}",
+                        node.one_target, node.edges_offset
+                    ));
+                }
                 // Validate target offset (stored in edges_offset for One encoding)
                 let target_offset = node.edges_offset as usize;
                 if target_offset != 0
