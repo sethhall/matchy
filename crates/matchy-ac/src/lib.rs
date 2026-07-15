@@ -207,6 +207,7 @@ pub struct ACAutomatonView<'a> {
     pattern_count: u32,
     pattern_lengths: Option<&'a [usize]>,
     mode: MatchMode,
+    structurally_validated: bool,
 }
 
 impl<'a> ACAutomatonView<'a> {
@@ -217,7 +218,7 @@ impl<'a> ACAutomatonView<'a> {
         pattern_count: u32,
         mode: MatchMode,
     ) -> Result<Self, ACError> {
-        Self::create(buffer, node_count, pattern_count, None, mode, true)
+        Self::create(buffer, node_count, pattern_count, None, mode, true, true)
     }
 
     /// Create a view with constant-time envelope validation.
@@ -232,7 +233,7 @@ impl<'a> ACAutomatonView<'a> {
         pattern_count: u32,
         mode: MatchMode,
     ) -> Result<Self, ACError> {
-        Self::create(buffer, node_count, pattern_count, None, mode, false)
+        Self::create(buffer, node_count, pattern_count, None, mode, false, false)
     }
 
     /// Create an exact-span view with constant-time envelope validation.
@@ -251,6 +252,7 @@ impl<'a> ACAutomatonView<'a> {
             pattern_count,
             Some(pattern_lengths),
             mode,
+            false,
             false,
         )
     }
@@ -272,6 +274,7 @@ impl<'a> ACAutomatonView<'a> {
             Some(pattern_lengths),
             mode,
             true,
+            true,
         )
     }
 
@@ -282,6 +285,7 @@ impl<'a> ACAutomatonView<'a> {
         pattern_lengths: Option<&'a [usize]>,
         mode: MatchMode,
         validate_structure: bool,
+        structurally_validated: bool,
     ) -> Result<Self, ACError> {
         if node_count == 0 || pattern_count == 0 {
             return Err(ACError::InvalidInput(
@@ -310,6 +314,7 @@ impl<'a> ACAutomatonView<'a> {
             pattern_count,
             pattern_lengths,
             mode,
+            structurally_validated,
         })
     }
 
@@ -331,6 +336,11 @@ impl<'a> ACAutomatonView<'a> {
     /// Advance a cursor and visit every overlapping occurrence with an exact
     /// start and end offset.
     ///
+    /// Views created by [`ACAutomaton::view`] or [`Self::with_pattern_lengths`]
+    /// amortize structural validation and use a direct exact-span query path.
+    /// Lazy views created by [`Self::from_parts_with_pattern_lengths`] retain
+    /// checked access for every serialized offset.
+    ///
     /// # Errors
     /// Returns an error if this view was created without pattern lengths.
     pub fn advance(
@@ -342,6 +352,10 @@ impl<'a> ACAutomatonView<'a> {
         let pattern_lengths = self.pattern_lengths.ok_or_else(|| {
             ACError::InvalidInput("Exact-span queries require pattern lengths".to_string())
         })?;
+        if self.structurally_validated {
+            self.advance_validated(state, input, pattern_lengths, visit);
+            return Ok(());
+        }
         let result = self.try_advance(state, input, |event| {
             if let ACQueryEvent::Output(output) = event {
                 let length = usize::try_from(output.pattern_id)
@@ -360,6 +374,142 @@ impl<'a> ACAutomatonView<'a> {
         });
         debug_assert!(result.is_continue());
         Ok(())
+    }
+
+    /// Advance an eagerly validated automaton without rechecking every
+    /// serialized offset and pattern ID. Validation establishes that all
+    /// indirect reads performed below are contained within `buffer` and all
+    /// node targets are aligned offsets into `nodes`.
+    fn advance_validated(
+        &self,
+        state: &mut ACMatchState,
+        input: &[u8],
+        pattern_lengths: &[usize],
+        mut visit: impl FnMut(ACMatch),
+    ) {
+        let node_size = mem::size_of::<ACNodeHot>();
+        if state.current_offset >= self.nodes.len() || state.current_offset % node_size != 0 {
+            state.current_offset = 0;
+        }
+
+        let root = self.read_node_validated(0);
+        let root_dense_offset = (root.state_kind == StateKind::Dense as u8)
+            .then(|| usize::try_from(root.edges_offset).expect("validated u32 offset fits usize"));
+
+        for &input_byte in input {
+            let search_byte = if self.mode == MatchMode::CaseInsensitive {
+                input_byte.to_ascii_lowercase()
+            } else {
+                input_byte
+            };
+            let mut failure_hops_remaining = self.node_count;
+
+            loop {
+                if state.current_offset == 0 {
+                    if let Some(root_dense_offset) = root_dense_offset {
+                        let target = self.read_u32_validated(
+                            root_dense_offset + usize::from(search_byte) * mem::size_of::<u32>(),
+                        );
+                        state.current_offset =
+                            usize::try_from(target).expect("validated u32 offset fits usize");
+                    } else {
+                        state.current_offset = self
+                            .find_transition_validated(root, search_byte)
+                            .unwrap_or_default();
+                    }
+                    break;
+                }
+
+                let node = self.read_node_validated(state.current_offset);
+                if let Some(target) = self.find_transition_validated(node, search_byte) {
+                    state.current_offset = target;
+                    break;
+                }
+                if failure_hops_remaining == 0 {
+                    state.current_offset = 0;
+                    break;
+                }
+                failure_hops_remaining -= 1;
+                state.current_offset =
+                    usize::try_from(node.failure_offset).expect("validated u32 offset fits usize");
+            }
+
+            state.position = state.position.saturating_add(1);
+            if state.current_offset == 0 {
+                continue;
+            }
+
+            let node = self.read_node_validated(state.current_offset);
+            let patterns_offset =
+                usize::try_from(node.patterns_offset).expect("validated u32 offset fits usize");
+            for output_index in 0..usize::from(node.pattern_count) {
+                let pattern_id =
+                    self.read_u32_validated(patterns_offset + output_index * mem::size_of::<u32>());
+                let length = pattern_lengths
+                    [usize::try_from(pattern_id).expect("validated u32 ID fits usize")];
+                let Ok(length) = u64::try_from(length) else {
+                    continue;
+                };
+                visit(ACMatch {
+                    pattern_id,
+                    start: state.position.saturating_sub(length),
+                    end: state.position,
+                });
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn read_node_validated(&self, offset: usize) -> ACNodeHot {
+        ACNodeHot::read_from_prefix(&self.nodes[offset..])
+            .expect("validated node offset is in bounds")
+            .0
+    }
+
+    #[inline(always)]
+    fn read_u32_validated(&self, offset: usize) -> u32 {
+        u32::from_le_bytes(
+            self.buffer[offset..offset + mem::size_of::<u32>()]
+                .try_into()
+                .expect("validated u32 range is in bounds"),
+        )
+    }
+
+    #[inline(always)]
+    fn find_transition_validated(&self, node: ACNodeHot, byte: u8) -> Option<usize> {
+        match node.state_kind {
+            kind if kind == StateKind::Empty as u8 => None,
+            kind if kind == StateKind::One as u8 => (node.one_char == byte)
+                .then(|| usize::try_from(node.one_target).expect("validated u32 offset fits usize"))
+                .filter(|target| *target != 0),
+            kind if kind == StateKind::Sparse as u8 => {
+                let edges_offset =
+                    usize::try_from(node.edges_offset).expect("validated u32 offset fits usize");
+                for edge_index in 0..usize::from(node.edge_count) {
+                    let edge_offset = edges_offset + edge_index * mem::size_of::<ACEdge>();
+                    let edge_byte = self.buffer[edge_offset];
+                    if edge_byte == byte {
+                        let target = self.read_u32_validated(edge_offset + AC_EDGE_TARGET_OFFSET);
+                        return Some(
+                            usize::try_from(target).expect("validated u32 offset fits usize"),
+                        );
+                    }
+                    if edge_byte > byte {
+                        return None;
+                    }
+                }
+                None
+            }
+            kind if kind == StateKind::Dense as u8 => {
+                let lookup_offset =
+                    usize::try_from(node.edges_offset).expect("validated u32 offset fits usize");
+                let target = self
+                    .read_u32_validated(lookup_offset + usize::from(byte) * mem::size_of::<u32>());
+                (target != 0)
+                    .then(|| usize::try_from(target).expect("validated u32 offset fits usize"))
+            }
+            _ => unreachable!("validated automaton has a known state kind"),
+        }
     }
 
     /// Advance a cursor while exposing conservative work units and raw output
@@ -1143,6 +1293,7 @@ impl ACAutomaton {
             Some(&self.pattern_lengths),
             self.mode,
             false,
+            true,
         )
     }
 }
@@ -1272,6 +1423,54 @@ mod tests {
 
         view.reset_state(&mut state);
         assert_eq!(state.position(), 0);
+    }
+
+    #[test]
+    fn validated_and_checked_queries_match_across_chunk_boundaries() {
+        fn collect(view: &ACAutomatonView<'_>, input: &[u8], chunk_size: usize) -> Vec<ACMatch> {
+            let mut state = view.create_state();
+            let mut matches = Vec::new();
+            for chunk in input.chunks(chunk_size) {
+                view.advance(&mut state, chunk, |matched| matches.push(matched))
+                    .unwrap();
+            }
+            matches
+        }
+
+        let patterns = ["a", "aa", "bab", "bc", "bca", "c", "caa"];
+        let input = b"ABCCABABCAABCAABAB";
+        for mode in [MatchMode::CaseSensitive, MatchMode::CaseInsensitive] {
+            let ac = ACAutomaton::build(&patterns, mode).unwrap();
+            let owned = ac.view().unwrap();
+            let validated = ACAutomatonView::with_pattern_lengths(
+                ac.buffer(),
+                ac.node_count(),
+                ac.pattern_lengths(),
+                mode,
+            )
+            .unwrap();
+            let checked = ACAutomatonView::from_parts_with_pattern_lengths(
+                ac.buffer(),
+                ac.node_count(),
+                ac.pattern_lengths(),
+                mode,
+            )
+            .unwrap();
+
+            for chunk_size in 1..=input.len() {
+                let expected = collect(&checked, input, chunk_size);
+                assert_eq!(
+                    collect(&owned, input, chunk_size),
+                    expected,
+                    "owned query differs for {mode:?} with chunk size {chunk_size}"
+                );
+                assert_eq!(
+                    collect(&validated, input, chunk_size),
+                    expected,
+                    "eagerly validated query differs for {mode:?} with chunk size {chunk_size}"
+                );
+            }
+        }
     }
 
     #[test]
