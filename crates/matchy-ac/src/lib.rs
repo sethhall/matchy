@@ -30,6 +30,11 @@ use std::mem;
 use std::ops::ControlFlow;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
+// Stable field offsets in the repr(C) serialized format.
+const AC_EDGE_TARGET_OFFSET: usize = 4;
+#[cfg(test)]
+const AC_NODE_EDGES_OFFSET: usize = 12;
+
 // Re-export MatchMode from shared crate
 pub use matchy_match_mode::MatchMode;
 
@@ -318,7 +323,7 @@ impl<'a> ACAutomatonView<'a> {
     }
 
     /// Reset a cursor without releasing any caller-owned storage.
-    pub const fn reset_state(&self, state: &mut ACMatchState) {
+    pub fn reset_state(&self, state: &mut ACMatchState) {
         state.current_offset = 0;
         state.position = 0;
     }
@@ -395,9 +400,7 @@ impl<'a> ACAutomatonView<'a> {
         mut handle: impl FnMut(ACQueryEvent) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
         let node_size = mem::size_of::<ACNodeHot>();
-        if state.current_offset >= self.nodes.len()
-            || !state.current_offset.is_multiple_of(node_size)
-        {
+        if state.current_offset >= self.nodes.len() || state.current_offset % node_size != 0 {
             state.current_offset = 0;
         }
         let Some(root) = self.read_node(0) else {
@@ -408,7 +411,7 @@ impl<'a> ACAutomatonView<'a> {
             usize::try_from(root.edges_offset)
                 .ok()
                 .filter(|offset| {
-                    *offset >= self.nodes.len() && offset.is_multiple_of(mem::size_of::<u32>())
+                    *offset >= self.nodes.len() && *offset % mem::size_of::<u32>() == 0
                 })
                 .and_then(|offset| {
                     let end = offset.checked_add(mem::size_of::<DenseLookup>())?;
@@ -488,9 +491,7 @@ impl<'a> ACAutomatonView<'a> {
             let Some(patterns_offset) = usize::try_from(node.patterns_offset).ok() else {
                 continue;
             };
-            if patterns_offset < self.nodes.len()
-                || !patterns_offset.is_multiple_of(mem::size_of::<u32>())
-            {
+            if patterns_offset < self.nodes.len() || patterns_offset % mem::size_of::<u32>() != 0 {
                 continue;
             }
             let output_count = usize::from(node.pattern_count);
@@ -521,7 +522,7 @@ impl<'a> ACAutomatonView<'a> {
 
     #[inline(always)]
     fn read_node(&self, offset: usize) -> Option<ACNodeHot> {
-        if !offset.is_multiple_of(mem::size_of::<ACNodeHot>()) {
+        if offset % mem::size_of::<ACNodeHot>() != 0 {
             return None;
         }
         let end = offset.checked_add(mem::size_of::<ACNodeHot>())?;
@@ -545,9 +546,7 @@ impl<'a> ACAutomatonView<'a> {
                 .then(|| self.checked_target(node.one_target))?,
             StateKind::Sparse => {
                 let edges_offset = usize::try_from(node.edges_offset).ok()?;
-                if edges_offset < self.nodes.len()
-                    || !edges_offset.is_multiple_of(mem::size_of::<u32>())
-                {
+                if edges_offset < self.nodes.len() || edges_offset % mem::size_of::<u32>() != 0 {
                     return None;
                 }
                 let count = usize::from(node.edge_count);
@@ -557,8 +556,7 @@ impl<'a> ACAutomatonView<'a> {
                 for edge in edges.chunks_exact(mem::size_of::<ACEdge>()) {
                     let edge_byte = edge[0];
                     if edge_byte == byte {
-                        let target =
-                            read_u32_le(edge, std::mem::offset_of!(ACEdge, target_offset))?;
+                        let target = read_u32_le(edge, AC_EDGE_TARGET_OFFSET)?;
                         return self.checked_target(target);
                     }
                     if edge_byte > byte {
@@ -569,9 +567,7 @@ impl<'a> ACAutomatonView<'a> {
             }
             StateKind::Dense => {
                 let lookup_offset = usize::try_from(node.edges_offset).ok()?;
-                if lookup_offset < self.nodes.len()
-                    || !lookup_offset.is_multiple_of(mem::size_of::<u32>())
-                {
+                if lookup_offset < self.nodes.len() || lookup_offset % mem::size_of::<u32>() != 0 {
                     return None;
                 }
                 let entry_offset = usize::from(byte).checked_mul(mem::size_of::<u32>())?;
@@ -1334,7 +1330,7 @@ mod tests {
     fn strict_view_rejects_corrupt_offsets_and_lazy_view_fails_closed() {
         let ac = ACAutomaton::build(&["needle"], MatchMode::CaseSensitive).unwrap();
         let mut buffer = ac.buffer().to_vec();
-        let root_edges = std::mem::offset_of!(ACNodeHot, edges_offset);
+        let root_edges = AC_NODE_EDGES_OFFSET;
         buffer[root_edges..root_edges + mem::size_of::<u32>()]
             .copy_from_slice(&u32::MAX.to_le_bytes());
 

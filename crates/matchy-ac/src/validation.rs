@@ -88,9 +88,7 @@ impl ACValidationResult {
 
 /// Validate that a range is within bounds
 fn validate_range(offset: usize, size: usize, buffer_len: usize) -> bool {
-    offset
-        .checked_add(size)
-        .is_some_and(|end| end <= buffer_len)
+    matches!(offset.checked_add(size), Some(end) if end <= buffer_len)
 }
 
 /// Validate AC automaton structure in a buffer
@@ -164,7 +162,7 @@ pub fn validate_ac_structure(
             let failure_node_offset = node.failure_offset as usize;
             if failure_node_offset < nodes_offset
                 || failure_node_offset >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
-                || !(failure_node_offset - nodes_offset).is_multiple_of(mem::size_of::<ACNodeHot>())
+                || (failure_node_offset - nodes_offset) % mem::size_of::<ACNodeHot>() != 0
             {
                 result.error(format!(
                     "AC node {} has invalid failure link offset: {}",
@@ -207,8 +205,7 @@ pub fn validate_ac_structure(
                 if target_offset != 0
                     && (target_offset < nodes_offset
                         || target_offset >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
-                        || !(target_offset - nodes_offset)
-                            .is_multiple_of(mem::size_of::<ACNodeHot>()))
+                        || (target_offset - nodes_offset) % mem::size_of::<ACNodeHot>() != 0)
                 {
                     result.error(format!(
                         "AC node {i} (One) has invalid target offset: {target_offset}"
@@ -236,8 +233,7 @@ pub fn validate_ac_structure(
                             if target_offset < nodes_offset
                                 || target_offset
                                     >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
-                                || !(target_offset - nodes_offset)
-                                    .is_multiple_of(mem::size_of::<ACNodeHot>())
+                                || (target_offset - nodes_offset) % mem::size_of::<ACNodeHot>() != 0
                             {
                                 result.error(format!(
                                     "AC node {i} edge {j} has invalid target: {target_offset}"
@@ -283,8 +279,8 @@ pub fn validate_ac_structure(
                                 && (target_offset < nodes_offset
                                     || target_offset
                                         >= nodes_offset + node_count * mem::size_of::<ACNodeHot>()
-                                    || !(target_offset - nodes_offset)
-                                        .is_multiple_of(mem::size_of::<ACNodeHot>()))
+                                    || (target_offset - nodes_offset) % mem::size_of::<ACNodeHot>()
+                                        != 0)
                             {
                                 result.error(format!(
                                     "AC node {i} dense entry [{j}] has invalid target: {target_offset}"

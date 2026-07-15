@@ -3,6 +3,7 @@ name = "matchy-ac"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+rust-version = "1.74"
 license.workspace = true
 repository.workspace = true
 description = "Offset-based, zero-copy Aho-Corasick automaton"
@@ -10,8 +11,7 @@ readme = "../../README.md"
 
 [dependencies]
 matchy-match-mode = { path = "../matchy-match-mode", version = "2.0.0" }
-zerocopy.workspace = true
-memchr.workspace = true
+zerocopy = { version = "=0.8.31", features = ["derive"] }
 
 [lints]
 workspace = true

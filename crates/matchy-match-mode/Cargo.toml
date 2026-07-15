@@ -3,6 +3,7 @@ name = "matchy-match-mode"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+rust-version = "1.74"
 license.workspace = true
 repository.workspace = true
 description = "Shared MatchMode enum for matchy workspace (internal)"
