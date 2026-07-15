@@ -1125,13 +1125,24 @@ impl ACAutomaton {
         self.mode
     }
 
-    /// Create a validated zero-copy query view over this automaton.
+    /// Create a zero-copy query view over this automaton.
+    ///
+    /// Automata built by this type already own structurally valid buffers and
+    /// non-zero pattern lengths, so creating repeated query views performs
+    /// only constant-time envelope validation. Serialized or memory-mapped
+    /// buffers should use [`ACAutomatonView::new`] when eager structural
+    /// validation is required.
     pub fn view(&self) -> Result<ACAutomatonView<'_>, ACError> {
-        ACAutomatonView::with_pattern_lengths(
+        let pattern_count = u32::try_from(self.pattern_lengths.len()).map_err(|_| {
+            ACError::InvalidInput("Pattern length count exceeds u32::MAX".to_string())
+        })?;
+        ACAutomatonView::create(
             &self.buffer,
             self.node_count,
-            &self.pattern_lengths,
+            pattern_count,
+            Some(&self.pattern_lengths),
             self.mode,
+            false,
         )
     }
 }
@@ -1146,6 +1157,13 @@ mod tests {
         let ac = ACAutomaton::build(&patterns, MatchMode::CaseSensitive).unwrap();
 
         assert!(!ac.buffer.is_empty());
+    }
+
+    #[test]
+    fn empty_owned_automaton_has_no_query_view() {
+        let ac = ACAutomaton::new(MatchMode::CaseSensitive);
+
+        assert!(matches!(ac.view(), Err(ACError::InvalidInput(_))));
     }
 
     #[test]
