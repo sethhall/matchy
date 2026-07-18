@@ -465,9 +465,9 @@ impl<'a> ACAutomatonView<'a> {
 
     #[inline(always)]
     fn read_node_validated(&self, offset: usize) -> ACNodeHot {
-        ACNodeHot::read_from_prefix(&self.nodes[offset..])
+        let node_size = mem::size_of::<ACNodeHot>();
+        ACNodeHot::read_from_bytes(&self.nodes[offset..offset + node_size])
             .expect("validated node offset is in bounds")
-            .0
     }
 
     #[inline(always)]
@@ -482,10 +482,10 @@ impl<'a> ACAutomatonView<'a> {
     #[inline(always)]
     fn find_transition_validated(&self, node: ACNodeHot, byte: u8) -> Option<usize> {
         match node.state_kind {
-            kind if kind == StateKind::Empty as u8 => None,
             kind if kind == StateKind::One as u8 => (node.one_char == byte)
                 .then(|| usize::try_from(node.one_target).expect("validated u32 offset fits usize"))
                 .filter(|target| *target != 0),
+            kind if kind == StateKind::Empty as u8 => None,
             kind if kind == StateKind::Sparse as u8 => {
                 let edges_offset =
                     usize::try_from(node.edges_offset).expect("validated u32 offset fits usize");
