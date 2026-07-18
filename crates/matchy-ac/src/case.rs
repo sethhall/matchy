@@ -370,7 +370,22 @@ impl ACCaseAutomaton {
         raw_lookbehind: &[u8],
         visit: impl FnMut(ACMatch),
     ) -> Result<(), ACError> {
-        self.view()?.advance(state, input, raw_lookbehind, visit)
+        self.advance_filtered(state, input, raw_lookbehind, |_| true, visit)
+    }
+
+    /// Advance while suppressing patterns that are currently ineligible.
+    ///
+    /// See [`ACCaseAutomatonView::advance_filtered`] for predicate semantics.
+    pub fn advance_filtered(
+        &self,
+        state: &mut ACCaseMatchState,
+        input: &[u8],
+        raw_lookbehind: &[u8],
+        enabled: impl FnMut(u32) -> bool,
+        visit: impl FnMut(ACMatch),
+    ) -> Result<(), ACError> {
+        self.view()?
+            .advance_filtered(state, input, raw_lookbehind, enabled, visit)
     }
 
     /// Number of semantic patterns in builder-assigned input order.
@@ -484,11 +499,35 @@ impl<'a> ACCaseAutomatonView<'a> {
         state: &mut ACCaseMatchState,
         input: &[u8],
         raw_lookbehind: &[u8],
+        visit: impl FnMut(ACMatch),
+    ) -> Result<(), ACError> {
+        self.advance_filtered(state, input, raw_lookbehind, |_| true, visit)
+    }
+
+    /// Advance while emitting only patterns accepted by `enabled`.
+    ///
+    /// Filtering happens before mixed representations perform exact-case
+    /// verification, allowing callers to avoid work for temporarily inactive
+    /// patterns. The predicate is an eligibility query, not an occurrence
+    /// notification: it may be called for a folded candidate whose exact
+    /// spelling does not match, and call order and count are representation
+    /// details. It should therefore be stable and free of side effects for the
+    /// duration of this call.
+    pub fn advance_filtered(
+        &self,
+        state: &mut ACCaseMatchState,
+        input: &[u8],
+        raw_lookbehind: &[u8],
+        mut enabled: impl FnMut(u32) -> bool,
         mut visit: impl FnMut(ACMatch),
     ) -> Result<(), ACError> {
         match (&self.kind, &mut state.kind) {
             (ACCaseAutomatonViewKind::Uniform(matcher), ACCaseMatchStateKind::Single(state)) => {
-                matcher.advance(state, input, visit)
+                matcher.advance(state, input, |matched| {
+                    if enabled(matched.pattern_id) {
+                        visit(matched);
+                    }
+                })
             }
             (
                 ACCaseAutomatonViewKind::Split {
@@ -511,7 +550,9 @@ impl<'a> ACCaseAutomatonView<'a> {
                         return;
                     };
                     matched.pattern_id = pattern_id;
-                    visit(matched);
+                    if enabled(pattern_id) {
+                        visit(matched);
+                    }
                 })?;
                 insensitive.advance(insensitive_state, input, |mut matched| {
                     let Some(pattern_id) = usize::try_from(matched.pattern_id)
@@ -522,7 +563,9 @@ impl<'a> ACCaseAutomatonView<'a> {
                         return;
                     };
                     matched.pattern_id = pattern_id;
-                    visit(matched);
+                    if enabled(pattern_id) {
+                        visit(matched);
+                    }
                 })
             }
             (
@@ -570,6 +613,9 @@ impl<'a> ACCaseAutomatonView<'a> {
                         .get(start..start.saturating_add(count))
                         .unwrap_or_default()
                     {
+                        if !enabled(variant.pattern_id) {
+                            continue;
+                        }
                         if variant.exact_offset != UNCONDITIONAL_VARIANT {
                             let Some(offset) = usize::try_from(variant.exact_offset).ok() else {
                                 continue;
@@ -766,6 +812,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn eligibility_filter_preserves_uniform_mixed_and_split_matches() {
+        let uniform_patterns = [
+            ACCasePattern::new(b"ab", MatchMode::CaseSensitive),
+            ACCasePattern::new(b"bc", MatchMode::CaseSensitive),
+        ];
+        let uniform = ACCaseAutomaton::build(&uniform_patterns).unwrap();
+        let mut uniform_state = uniform.create_state();
+        let mut uniform_matches = Vec::new();
+        uniform
+            .advance_filtered(
+                &mut uniform_state,
+                b"abc",
+                &[],
+                |pattern_id| pattern_id == 1,
+                |matched| uniform_matches.push(matched),
+            )
+            .unwrap();
+        assert_eq!(
+            uniform_matches,
+            [ACMatch {
+                pattern_id: 1,
+                start: 1,
+                end: 3
+            }]
+        );
+
+        let mixed_patterns = [
+            ACCasePattern::new(b"AbC", MatchMode::CaseSensitive),
+            ACCasePattern::new(b"ABC", MatchMode::CaseInsensitive),
+        ];
+        let mixed = ACCaseAutomaton::build(&mixed_patterns).unwrap();
+        let mut mixed_state = mixed.create_state();
+        let mut mixed_matches = Vec::new();
+        mixed
+            .advance_filtered(
+                &mut mixed_state,
+                b"AbC abc",
+                &[],
+                |pattern_id| pattern_id == 0,
+                |matched| mixed_matches.push(matched),
+            )
+            .unwrap();
+        assert_eq!(
+            mixed_matches,
+            [ACMatch {
+                pattern_id: 0,
+                start: 0,
+                end: 3
+            }]
+        );
+        assert_eq!(mixed_state.position(), 7);
+
+        let split = ACCaseAutomaton::build_with_lookbehind_limit(&mixed_patterns, 0).unwrap();
+        assert_eq!(split.scan_count(), 2);
+        let mut split_state = split.create_state();
+        let mut split_matches = Vec::new();
+        split
+            .advance_filtered(
+                &mut split_state,
+                b"AbC abc",
+                &[],
+                |pattern_id| pattern_id == 1,
+                |matched| split_matches.push(matched),
+            )
+            .unwrap();
+        assert_eq!(
+            split_matches,
+            [
+                ACMatch {
+                    pattern_id: 1,
+                    start: 0,
+                    end: 3
+                },
+                ACMatch {
+                    pattern_id: 1,
+                    start: 4,
+                    end: 7
+                },
+            ]
+        );
+        assert_eq!(split_state.position(), 7);
     }
 
     #[test]
