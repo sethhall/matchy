@@ -30,6 +30,10 @@ use std::mem;
 use std::ops::ControlFlow;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
+mod case;
+
+pub use case::{ACCaseAutomaton, ACCaseAutomatonView, ACCaseMatchState, ACCasePattern};
+
 // Stable field offsets in the repr(C) serialized format.
 const AC_EDGE_TARGET_OFFSET: usize = 4;
 #[cfg(test)]
