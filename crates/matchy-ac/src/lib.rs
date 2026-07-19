@@ -211,6 +211,9 @@ pub struct ACAutomatonView<'a> {
     pattern_count: u32,
     pattern_lengths: Option<&'a [usize]>,
     mode: MatchMode,
+    // True only after eager structural validation or construction by
+    // `ACAutomaton`'s serializer. The validated query helpers rely on this
+    // provenance before performing unchecked reads.
     structurally_validated: bool,
 }
 
@@ -463,20 +466,54 @@ impl<'a> ACAutomatonView<'a> {
         }
     }
 
+    // These direct readers are confined to the eagerly validated query path.
+    // They avoid repeating slice-range construction and bounds checks in the
+    // per-byte AC hot loop after the same ranges were already proven valid.
+    // Lazy views over externally supplied buffers never call them.
     #[inline(always)]
     fn read_node_validated(&self, offset: usize) -> ACNodeHot {
         let node_size = mem::size_of::<ACNodeHot>();
-        ACNodeHot::read_from_bytes(&self.nodes[offset..offset + node_size])
-            .expect("validated node offset is in bounds")
+        debug_assert!(self.structurally_validated);
+        debug_assert!(offset % node_size == 0);
+        debug_assert!(offset.saturating_add(node_size) <= self.nodes.len());
+        // SAFETY: `structurally_validated` views establish that every node
+        // offset is contained in the fixed-width node table. `ACNodeHot`
+        // contains only integers, so every bit pattern is valid. An unaligned
+        // read also keeps this correct if the borrowed buffer itself has only
+        // byte alignment.
+        unsafe {
+            self.nodes
+                .as_ptr()
+                .add(offset)
+                .cast::<ACNodeHot>()
+                .read_unaligned()
+        }
     }
 
     #[inline(always)]
     fn read_u32_validated(&self, offset: usize) -> u32 {
-        u32::from_le_bytes(
-            self.buffer[offset..offset + mem::size_of::<u32>()]
-                .try_into()
-                .expect("validated u32 range is in bounds"),
-        )
+        debug_assert!(self.structurally_validated);
+        debug_assert!(offset.saturating_add(mem::size_of::<u32>()) <= self.buffer.len());
+        // SAFETY: structural validation proves that every transition target
+        // and output ID read here is fully contained in `buffer`; unaligned
+        // access avoids imposing an alignment requirement on borrowed byte
+        // storage.
+        u32::from_le(unsafe {
+            self.buffer
+                .as_ptr()
+                .add(offset)
+                .cast::<u32>()
+                .read_unaligned()
+        })
+    }
+
+    #[inline(always)]
+    fn read_u8_validated(&self, offset: usize) -> u8 {
+        debug_assert!(self.structurally_validated);
+        debug_assert!(offset < self.buffer.len());
+        // SAFETY: structural validation proves that every sparse-edge record
+        // read here is fully contained in `buffer`.
+        unsafe { *self.buffer.get_unchecked(offset) }
     }
 
     #[inline(always)]
@@ -491,7 +528,7 @@ impl<'a> ACAutomatonView<'a> {
                     usize::try_from(node.edges_offset).expect("validated u32 offset fits usize");
                 for edge_index in 0..usize::from(node.edge_count) {
                     let edge_offset = edges_offset + edge_index * mem::size_of::<ACEdge>();
-                    let edge_byte = self.buffer[edge_offset];
+                    let edge_byte = self.read_u8_validated(edge_offset);
                     if edge_byte == byte {
                         let target = self.read_u32_validated(edge_offset + AC_EDGE_TARGET_OFFSET);
                         return Some(
@@ -1453,6 +1490,24 @@ mod tests {
                 mode,
             )
             .unwrap();
+            let node_alignment = mem::align_of::<ACNodeHot>();
+            assert!(node_alignment > 1);
+            let mut unaligned_storage = vec![0; ac.buffer().len() + node_alignment];
+            let base = unaligned_storage.as_ptr() as usize;
+            let prefix = (0..node_alignment)
+                .find(|prefix| (base + prefix) % node_alignment != 0)
+                .expect("an alignment greater than one has a misaligned offset");
+            let unaligned_buffer =
+                &mut unaligned_storage[prefix..prefix.saturating_add(ac.buffer().len())];
+            unaligned_buffer.copy_from_slice(ac.buffer());
+            assert_ne!(unaligned_buffer.as_ptr() as usize % node_alignment, 0);
+            let unaligned = ACAutomatonView::with_pattern_lengths(
+                unaligned_buffer,
+                ac.node_count(),
+                ac.pattern_lengths(),
+                mode,
+            )
+            .unwrap();
             let checked = ACAutomatonView::from_parts_with_pattern_lengths(
                 ac.buffer(),
                 ac.node_count(),
@@ -1472,6 +1527,11 @@ mod tests {
                     collect(&validated, input, chunk_size),
                     expected,
                     "eagerly validated query differs for {mode:?} with chunk size {chunk_size}"
+                );
+                assert_eq!(
+                    collect(&unaligned, input, chunk_size),
+                    expected,
+                    "unaligned validated query differs for {mode:?} with chunk size {chunk_size}"
                 );
             }
         }
