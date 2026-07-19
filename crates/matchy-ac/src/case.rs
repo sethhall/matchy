@@ -541,23 +541,22 @@ impl ACCaseAutomaton {
         }
     }
 
-    /// Encoded automaton buffers and immutable case-sidecar payload bytes.
+    /// Encoded automaton buffers and immutable execution/case-sidecar payload bytes.
     ///
     /// This excludes the automata's pattern-length vectors, object headers,
     /// and allocator overhead.
     #[must_use]
     pub fn memory_bytes(&self) -> usize {
         match &self.kind {
-            ACCaseAutomatonKind::Uniform(matcher) => matcher.buffer().len(),
+            ACCaseAutomatonKind::Uniform(matcher) => matcher.memory_bytes(),
             ACCaseAutomatonKind::Split {
                 sensitive,
                 sensitive_ids,
                 insensitive,
                 insensitive_ids,
             } => sensitive
-                .buffer()
-                .len()
-                .saturating_add(insensitive.buffer().len())
+                .memory_bytes()
+                .saturating_add(insensitive.memory_bytes())
                 .saturating_add(mem::size_of_val(sensitive_ids.as_ref()))
                 .saturating_add(mem::size_of_val(insensitive_ids.as_ref())),
             ACCaseAutomatonKind::Mixed {
@@ -577,8 +576,7 @@ impl ACCaseAutomaton {
                         .saturating_add(mem::size_of_val(multi_variants.as_ref())),
                 };
                 folded
-                    .buffer()
-                    .len()
+                    .memory_bytes()
                     .saturating_add(dispatch_bytes)
                     .saturating_add(exact_bytes.len())
             }
@@ -981,6 +979,71 @@ mod tests {
             }
         }
         assert_eq!(state.position(), input.len() as u64);
+        sorted(matches)
+    }
+
+    fn collect_filtered_chunks(
+        matcher: &ACCaseAutomaton,
+        input: &[u8],
+        chunk_size: usize,
+        eligible: &[bool],
+    ) -> Vec<ACMatch> {
+        let mut state = matcher.create_state();
+        let mut history = Vec::new();
+        let mut matches = Vec::new();
+        let retain = matcher.required_lookbehind();
+        for chunk in input.chunks(chunk_size) {
+            matcher
+                .advance_filtered(
+                    &mut state,
+                    chunk,
+                    &history,
+                    |pattern_id| {
+                        usize::try_from(pattern_id)
+                            .ok()
+                            .and_then(|pattern_id| eligible.get(pattern_id))
+                            .copied()
+                            .unwrap_or(false)
+                    },
+                    |matched| matches.push(matched),
+                )
+                .unwrap();
+            history.extend_from_slice(chunk);
+            if history.len() > retain {
+                history.drain(..history.len() - retain);
+            }
+        }
+        assert_eq!(state.position(), input.len() as u64);
+        sorted(matches)
+    }
+
+    fn reference_filtered_matches(
+        patterns: &[ACCasePattern<'_>],
+        input: &[u8],
+        eligible: &[bool],
+    ) -> Vec<ACMatch> {
+        let mut matches = Vec::new();
+        for (pattern_id, pattern) in patterns.iter().enumerate() {
+            if !eligible.get(pattern_id).copied().unwrap_or(false) {
+                continue;
+            }
+            for (start, candidate) in input.windows(pattern.bytes.len()).enumerate() {
+                let matches_case = match pattern.mode {
+                    MatchMode::CaseSensitive => candidate == pattern.bytes,
+                    MatchMode::CaseInsensitive => candidate
+                        .iter()
+                        .zip(pattern.bytes)
+                        .all(|(&actual, &expected)| actual.eq_ignore_ascii_case(&expected)),
+                };
+                if matches_case {
+                    matches.push(ACMatch {
+                        pattern_id: u32::try_from(pattern_id).unwrap(),
+                        start: u64::try_from(start).unwrap(),
+                        end: u64::try_from(start + pattern.bytes.len()).unwrap(),
+                    });
+                }
+            }
+        }
         sorted(matches)
     }
 
@@ -1411,6 +1474,104 @@ mod tests {
         view.reset_state(&mut state_a);
         assert_eq!(state_a.position(), 0);
         assert_eq!(state_b.position(), 4);
+    }
+
+    #[test]
+    fn large_mixed_and_split_sidecars_match_filtered_reference_across_chunks() {
+        let mut storage = vec![
+            (b"a".to_vec(), MatchMode::CaseSensitive),
+            (b"A".to_vec(), MatchMode::CaseInsensitive),
+            (b"ba".to_vec(), MatchMode::CaseSensitive),
+            (b"CBA".to_vec(), MatchMode::CaseInsensitive),
+            (b"AbCd".to_vec(), MatchMode::CaseSensitive),
+            (b"ABCD".to_vec(), MatchMode::CaseInsensitive),
+            (vec![0xff, b'A'], MatchMode::CaseSensitive),
+            (vec![0xff, b'A'], MatchMode::CaseInsensitive),
+        ];
+        storage.extend((0..192).map(|index| {
+            (
+                format!("sparse-sensitive-{index:03}-AbCdEfGhIjKl").into_bytes(),
+                MatchMode::CaseSensitive,
+            )
+        }));
+        storage.extend((0..192).map(|index| {
+            (
+                format!("sparse-insensitive-{index:03}-MnOpQrStUvWx").into_bytes(),
+                MatchMode::CaseInsensitive,
+            )
+        }));
+        let patterns = storage
+            .iter()
+            .map(|(bytes, mode)| ACCasePattern::new(bytes, *mode))
+            .collect::<Vec<_>>();
+
+        let mixed = ACCaseAutomaton::build(&patterns).unwrap();
+        assert!(mixed.required_lookbehind() > 0);
+        let ACCaseAutomatonKind::Mixed { folded, .. } = &mixed.kind else {
+            panic!("unrestricted lookbehind should select the mixed representation");
+        };
+        assert!(
+            folded.root_pair_filter.is_some(),
+            "large mixed automaton should receive a root-pair sidecar"
+        );
+
+        let split = ACCaseAutomaton::build_with_lookbehind_limit(&patterns, 0).unwrap();
+        let ACCaseAutomatonKind::Split {
+            sensitive,
+            insensitive,
+            ..
+        } = &split.kind
+        else {
+            panic!("zero lookbehind should force the split representation");
+        };
+        assert!(
+            sensitive.root_pair_filter.is_some(),
+            "large sensitive split automaton should receive a root-pair sidecar"
+        );
+        assert!(
+            insensitive.root_pair_filter.is_some(),
+            "large insensitive split automaton should receive a root-pair sidecar"
+        );
+
+        let mut input = b"zzAbCd/abcd/CBA/cba/ba/".to_vec();
+        input.extend_from_slice(&[0xff, b'A', b'/', 0xff, b'a', b'/']);
+        input.extend_from_slice(b"sparse-sensitive-042-AbCdEfGhIjKl/");
+        input.extend_from_slice(b"SPARSE-SENSITIVE-042-ABCDEFGHIJKL/");
+        input.extend_from_slice(b"SPARSE-INSENSITIVE-037-MNOPQRSTUVWX/");
+
+        let mut first_mask = (0..patterns.len())
+            .map(|pattern_id| pattern_id % 3 != 1)
+            .collect::<Vec<_>>();
+        // Keep both exact and folded variants of "AbCd" eligible while
+        // suppressing other candidates sharing folded paths.
+        first_mask[4] = true;
+        first_mask[5] = true;
+        first_mask[7] = false;
+        let second_mask = (0..patterns.len())
+            .map(|pattern_id| {
+                pattern_id == 0
+                    || pattern_id == 4
+                    || pattern_id == 7
+                    || pattern_id == 8 + 42
+                    || pattern_id == 8 + 192 + 37
+            })
+            .collect::<Vec<_>>();
+
+        for (mask_index, eligible) in [first_mask, second_mask].iter().enumerate() {
+            let expected = reference_filtered_matches(&patterns, &input, eligible);
+            for chunk_size in 1..=input.len() {
+                assert_eq!(
+                    collect_filtered_chunks(&mixed, &input, chunk_size, eligible),
+                    expected,
+                    "mixed mask {mask_index}, chunk size {chunk_size}"
+                );
+                assert_eq!(
+                    collect_filtered_chunks(&split, &input, chunk_size, eligible),
+                    expected,
+                    "split mask {mask_index}, chunk size {chunk_size}"
+                );
+            }
+        }
     }
 
     #[test]

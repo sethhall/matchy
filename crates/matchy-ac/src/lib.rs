@@ -7,12 +7,14 @@
 //!
 //! # Design
 //!
-//! The automaton is stored as a single `Vec<u8>` containing:
+//! The serialized automaton is stored as a single `Vec<u8>` containing:
 //! - AC nodes with offset-based transitions
 //! - Edge arrays referenced by nodes
 //! - Pattern ID arrays referenced by nodes
 //!
-//! All operations (both building and matching) work directly on this buffer.
+//! Matching works directly on this buffer. An owned [`ACAutomaton`] may also
+//! build immutable execution-only summaries that are not part of the stable
+//! serialized format; serialized and memory-mapped views do not require them.
 //!
 //! # Querying
 //!
@@ -200,6 +202,112 @@ pub struct DenseLookup {
     pub targets: [u32; 256],
 }
 
+const ROOT_PAIR_WORDS: usize = 65_536 / u64::BITS as usize;
+const ROOT_PAIR_COUNT: usize = 65_536;
+
+/// Execution-only summary of depth-two trie prefixes. It is deliberately not
+/// part of the serialized automaton format: owned automata can use it to skip
+/// impossible two-byte root prefixes, while borrowed external views retain the
+/// ordinary scalar traversal.
+struct RootPairFilter {
+    pairs: [u64; ROOT_PAIR_WORDS],
+}
+
+impl RootPairFilter {
+    fn build(patterns: &[&[u8]], mode: MatchMode) -> Self {
+        let mut result = Self {
+            pairs: [0; ROOT_PAIR_WORDS],
+        };
+        for pattern in patterns {
+            let first = normalize_byte(pattern[0], mode);
+            if pattern.len() == 1 {
+                // Every pair beginning with this byte must use the scalar
+                // path so it can emit the one-byte pattern before consuming
+                // the second byte. Each first-byte row spans four words.
+                let first_word = usize::from(first) * 256 / u64::BITS as usize;
+                result.pairs[first_word..first_word + 256 / u64::BITS as usize].fill(u64::MAX);
+                continue;
+            }
+            let second = normalize_byte(pattern[1], mode);
+            let pair = usize::from(u16::from_be_bytes([first, second]));
+            result.pairs[pair / u64::BITS as usize] |= 1_u64 << (pair % u64::BITS as usize);
+        }
+        result
+    }
+
+    #[inline(always)]
+    fn requires_scalar(&self, first: u8, second: u8) -> bool {
+        let pair = usize::from(u16::from_be_bytes([first, second]));
+        self.pairs[pair / u64::BITS as usize] & (1_u64 << (pair % u64::BITS as usize)) != 0
+    }
+
+    fn clear_raw_pair_count(&self, mode: MatchMode) -> usize {
+        if mode == MatchMode::CaseSensitive {
+            return ROOT_PAIR_COUNT.saturating_sub(
+                self.pairs
+                    .iter()
+                    .map(|word| word.count_ones() as usize)
+                    .sum(),
+            );
+        }
+
+        // ASCII uppercase bytes are folded before lookup and can never index
+        // the filter. A normalized lowercase byte represents two possible raw
+        // bytes, so weight clear lowercase rows and columns twice. The result
+        // is the exact number of raw byte pairs the hot loop can skip.
+        let uppercase_column_mask = ((1_u64 << 26) - 1) << 1;
+        let lowercase_column_mask = ((1_u64 << 26) - 1) << 33;
+        let mut clear = 0_usize;
+        for first in u8::MIN..=u8::MAX {
+            if first.is_ascii_uppercase() {
+                continue;
+            }
+            let row = usize::from(first) * 4;
+            let clear_reachable = (!self.pairs[row]).count_ones() as usize
+                + (!self.pairs[row + 1] & !uppercase_column_mask).count_ones() as usize
+                + (!self.pairs[row + 2]).count_ones() as usize
+                + (!self.pairs[row + 3]).count_ones() as usize;
+            let clear_lowercase =
+                (!self.pairs[row + 1] & lowercase_column_mask).count_ones() as usize;
+            let clear_raw_columns = clear_reachable.saturating_add(clear_lowercase);
+            clear = clear.saturating_add(if first.is_ascii_lowercase() {
+                clear_raw_columns.saturating_mul(2)
+            } else {
+                clear_raw_columns
+            });
+        }
+        clear
+    }
+
+    fn is_useful(&self, mode: MatchMode, buffer_len: usize) -> bool {
+        buffer_len >= MIN_ROOT_PAIR_FILTER_BUFFER_BYTES
+            && self.clear_raw_pair_count(mode) >= ROOT_PAIR_COUNT / 2
+    }
+
+    fn for_automaton(patterns: &[&[u8]], mode: MatchMode, buffer_len: usize) -> Option<Box<Self>> {
+        if buffer_len < MIN_ROOT_PAIR_FILTER_BUFFER_BYTES {
+            return None;
+        }
+        let filter = Self::build(patterns, mode);
+        filter.is_useful(mode, buffer_len).then(|| Box::new(filter))
+    }
+}
+
+// Limit the sidecar to at most half the encoded automaton and require it to
+// reject at least half of all byte pairs. This avoids adding a hot-loop lookup
+// to small or dense-prefix automata where it has little chance to pay for
+// itself.
+const MIN_ROOT_PAIR_FILTER_BUFFER_BYTES: usize = mem::size_of::<RootPairFilter>() * 2;
+
+#[inline(always)]
+fn normalize_byte(byte: u8, mode: MatchMode) -> u8 {
+    if mode == MatchMode::CaseInsensitive {
+        byte.to_ascii_lowercase()
+    } else {
+        byte
+    }
+}
+
 /// Zero-copy query view over a serialized AC automaton.
 ///
 /// The view borrows the encoded nodes, edges, and outputs directly. Advancing a
@@ -211,6 +319,7 @@ pub struct ACAutomatonView<'a> {
     pattern_count: u32,
     pattern_lengths: Option<&'a [usize]>,
     mode: MatchMode,
+    root_pair_filter: Option<&'a RootPairFilter>,
     // True only after eager structural validation or construction by
     // `ACAutomaton`'s serializer. The validated query helpers rely on this
     // provenance before performing unchecked reads.
@@ -321,6 +430,7 @@ impl<'a> ACAutomatonView<'a> {
             pattern_count,
             pattern_lengths,
             mode,
+            root_pair_filter: None,
             structurally_validated,
         })
     }
@@ -403,45 +513,63 @@ impl<'a> ACAutomatonView<'a> {
         let root_dense_offset = (root.state_kind == StateKind::Dense as u8)
             .then(|| usize::try_from(root.edges_offset).expect("validated u32 offset fits usize"));
 
-        for &input_byte in input {
-            let search_byte = if self.mode == MatchMode::CaseInsensitive {
-                input_byte.to_ascii_lowercase()
-            } else {
-                input_byte
-            };
-            let mut failure_hops_remaining = self.node_count;
+        let mut input_index = 0_usize;
+        while let Some(&input_byte) = input.get(input_index) {
+            let search_byte = normalize_byte(input_byte, self.mode);
 
-            loop {
-                if state.current_offset == 0 {
-                    if let Some(root_dense_offset) = root_dense_offset {
-                        let target = self.read_u32_validated(
-                            root_dense_offset + usize::from(search_byte) * mem::size_of::<u32>(),
-                        );
-                        state.current_offset =
-                            usize::try_from(target).expect("validated u32 offset fits usize");
+            let pair_advanced = if state.current_offset == 0 {
+                if let (Some(filter), Some(&next_input)) = (
+                    self.root_pair_filter,
+                    input.get(input_index.saturating_add(1)),
+                ) {
+                    let next_byte = normalize_byte(next_input, self.mode);
+                    if filter.requires_scalar(search_byte, next_byte) {
+                        false
                     } else {
-                        state.current_offset = self
-                            .find_transition_validated(root, search_byte)
-                            .unwrap_or_default();
+                        state.current_offset =
+                            self.root_transition_validated(root, root_dense_offset, next_byte);
+                        state.position = state.position.saturating_add(2);
+                        input_index = input_index.saturating_add(2);
+                        true
                     }
-                    break;
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if !pair_advanced {
+                let mut failure_hops_remaining = self.node_count;
+                loop {
+                    if state.current_offset == 0 {
+                        state.current_offset =
+                            self.root_transition_validated(root, root_dense_offset, search_byte);
+                        break;
+                    }
+
+                    let node = self.read_node_validated(state.current_offset);
+                    if let Some(target) = self.find_transition_validated(node, search_byte) {
+                        state.current_offset = target;
+                        break;
+                    }
+                    if failure_hops_remaining == 0 {
+                        state.current_offset = 0;
+                        break;
+                    }
+                    failure_hops_remaining -= 1;
+                    if node.failure_offset == 0 {
+                        state.current_offset =
+                            self.root_transition_validated(root, root_dense_offset, search_byte);
+                        break;
+                    }
+                    state.current_offset = usize::try_from(node.failure_offset)
+                        .expect("validated u32 offset fits usize");
                 }
 
-                let node = self.read_node_validated(state.current_offset);
-                if let Some(target) = self.find_transition_validated(node, search_byte) {
-                    state.current_offset = target;
-                    break;
-                }
-                if failure_hops_remaining == 0 {
-                    state.current_offset = 0;
-                    break;
-                }
-                failure_hops_remaining -= 1;
-                state.current_offset =
-                    usize::try_from(node.failure_offset).expect("validated u32 offset fits usize");
+                state.position = state.position.saturating_add(1);
+                input_index = input_index.saturating_add(1);
             }
-
-            state.position = state.position.saturating_add(1);
             if state.current_offset == 0 {
                 continue;
             }
@@ -463,6 +591,23 @@ impl<'a> ACAutomatonView<'a> {
                     end: state.position,
                 });
             }
+        }
+    }
+
+    #[inline(always)]
+    fn root_transition_validated(
+        &self,
+        root: ACNodeHot,
+        root_dense_offset: Option<usize>,
+        byte: u8,
+    ) -> usize {
+        if let Some(root_dense_offset) = root_dense_offset {
+            let target = self
+                .read_u32_validated(root_dense_offset + usize::from(byte) * mem::size_of::<u32>());
+            usize::try_from(target).expect("validated u32 offset fits usize")
+        } else {
+            self.find_transition_validated(root, byte)
+                .unwrap_or_default()
         }
     }
 
@@ -1219,8 +1364,10 @@ impl ACBuilder {
 
 /// Owned offset-based Aho-Corasick automaton.
 ///
-/// All automaton data is stored in a single byte buffer using offsets. Query
-/// views borrow that buffer without rebuilding any matching structures.
+/// Serialized automaton data is stored in a single byte buffer using offsets.
+/// Query views borrow that buffer without rebuilding matching structures.
+/// Large, sufficiently sparse owned automata may additionally keep an
+/// execution-only root summary; it does not change the serialized format.
 pub struct ACAutomaton {
     /// Binary buffer containing all automaton data
     buffer: Vec<u8>,
@@ -1230,6 +1377,8 @@ pub struct ACAutomaton {
     pattern_lengths: Vec<usize>,
     /// Matching mode used to normalize patterns while building.
     mode: MatchMode,
+    /// Optional execution sidecar for rejecting impossible depth-two roots.
+    root_pair_filter: Option<Box<RootPairFilter>>,
 }
 
 impl ACAutomaton {
@@ -1241,6 +1390,7 @@ impl ACAutomaton {
             node_count: 0,
             pattern_lengths: Vec::new(),
             mode,
+            root_pair_filter: None,
         }
     }
 
@@ -1277,12 +1427,14 @@ impl ACAutomaton {
         let node_count = builder.states.len();
         let pattern_lengths = builder.pattern_lengths.clone();
         let buffer = builder.serialize()?;
+        let root_pair_filter = RootPairFilter::for_automaton(patterns, mode, buffer.len());
 
         Ok(Self {
             buffer,
             node_count,
             pattern_lengths,
             mode,
+            root_pair_filter,
         })
     }
 
@@ -1290,6 +1442,19 @@ impl ACAutomaton {
     #[must_use]
     pub fn buffer(&self) -> &[u8] {
         &self.buffer
+    }
+
+    /// Encoded automaton buffers and immutable execution-sidecar payload bytes.
+    ///
+    /// This excludes the pattern-length vector, object headers, spare vector
+    /// capacity, and allocator overhead.
+    #[must_use]
+    pub fn memory_bytes(&self) -> usize {
+        self.buffer.len().saturating_add(
+            self.root_pair_filter
+                .as_ref()
+                .map_or(0, |_| mem::size_of::<RootPairFilter>()),
+        )
     }
 
     /// Get the number of AC nodes in the automaton
@@ -1327,7 +1492,7 @@ impl ACAutomaton {
         let pattern_count = u32::try_from(self.pattern_lengths.len()).map_err(|_| {
             ACError::InvalidInput("Pattern length count exceeds u32::MAX".to_string())
         })?;
-        ACAutomatonView::create(
+        let mut view = ACAutomatonView::create(
             &self.buffer,
             self.node_count,
             pattern_count,
@@ -1335,7 +1500,9 @@ impl ACAutomaton {
             self.mode,
             false,
             true,
-        )
+        )?;
+        view.root_pair_filter = self.root_pair_filter.as_deref();
+        Ok(view)
     }
 }
 
@@ -1533,6 +1700,224 @@ mod tests {
                     expected,
                     "unaligned validated query differs for {mode:?} with chunk size {chunk_size}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn owned_root_pair_filter_matches_serialized_scalar_path_exhaustively() {
+        fn collect(view: &ACAutomatonView<'_>, input: &[u8], chunk_size: usize) -> Vec<ACMatch> {
+            let mut state = view.create_state();
+            let mut matches = Vec::new();
+            for chunk in input.chunks(chunk_size) {
+                view.advance(&mut state, chunk, |matched| matches.push(matched))
+                    .unwrap();
+            }
+            assert_eq!(state.position(), input.len() as u64);
+            matches
+        }
+
+        let mut patterns = vec![
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"ba".to_vec(),
+            b"cba".to_vec(),
+            b"ab".to_vec(),
+            vec![0xff, b'A'],
+        ];
+        // Grow the serialized payload beyond the sidecar cutoff without
+        // materially filling the root-pair space exercised below.
+        for index in 0_u16..256 {
+            let mut pattern = Vec::with_capacity(40);
+            pattern.push(0x80_u8.saturating_add(u8::try_from(index >> 7).unwrap()));
+            pattern.push((index & 0x7f) as u8);
+            for offset in 0_u8..38 {
+                pattern.push(index.to_le_bytes()[0].wrapping_mul(31).wrapping_add(offset));
+            }
+            patterns.push(pattern);
+        }
+        let pattern_refs = patterns.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let alphabet = [b'a', b'b', b'c', b'x', b'A', b'B', 0xff];
+
+        for mode in [MatchMode::CaseSensitive, MatchMode::CaseInsensitive] {
+            let ac = ACAutomaton::build_bytes(&pattern_refs, mode).unwrap();
+            let filter = ac.root_pair_filter.as_deref().unwrap();
+            assert!(ac.buffer().len() >= MIN_ROOT_PAIR_FILTER_BUFFER_BYTES);
+            assert_eq!(
+                ac.memory_bytes(),
+                ac.buffer().len() + mem::size_of::<RootPairFilter>()
+            );
+            assert!(filter.requires_scalar(normalize_byte(b'a', mode), b'x'));
+            assert!(!filter.requires_scalar(b'x', normalize_byte(b'a', mode)));
+            let owned = ac.view().unwrap();
+            let scalar = ACAutomatonView::with_pattern_lengths(
+                ac.buffer(),
+                ac.node_count(),
+                ac.pattern_lengths(),
+                mode,
+            )
+            .unwrap();
+            assert!(scalar.root_pair_filter.is_none());
+
+            for input_len in 0_u32..=4 {
+                let input_count = alphabet.len().pow(input_len);
+                for mut encoded in 0..input_count {
+                    let mut input = vec![0; input_len as usize];
+                    for byte in &mut input {
+                        *byte = alphabet[encoded % alphabet.len()];
+                        encoded /= alphabet.len();
+                    }
+                    for chunk_size in 1..=input.len().max(1) {
+                        assert_eq!(
+                            collect(&owned, &input, chunk_size),
+                            collect(&scalar, &input, chunk_size),
+                            "pair stride differs for {mode:?}, input {input:?}, chunk size {chunk_size}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn root_pair_filter_requires_size_and_clear_pair_density() {
+        let sparse_patterns = [b"ab".as_slice(), b"cd".as_slice()];
+        assert!(RootPairFilter::for_automaton(
+            &sparse_patterns,
+            MatchMode::CaseSensitive,
+            MIN_ROOT_PAIR_FILTER_BUFFER_BYTES - 1,
+        )
+        .is_none());
+        assert!(RootPairFilter::for_automaton(
+            &sparse_patterns,
+            MatchMode::CaseSensitive,
+            MIN_ROOT_PAIR_FILTER_BUFFER_BYTES,
+        )
+        .is_some());
+
+        let one_byte_patterns = (u8::MIN..=u8::MAX)
+            .map(|byte| vec![byte])
+            .collect::<Vec<_>>();
+        let one_byte_refs = one_byte_patterns
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let dense = RootPairFilter::build(&one_byte_refs, MatchMode::CaseSensitive);
+        assert_eq!(dense.clear_raw_pair_count(MatchMode::CaseSensitive), 0);
+        assert!(RootPairFilter::for_automaton(
+            &one_byte_refs,
+            MatchMode::CaseSensitive,
+            usize::MAX,
+        )
+        .is_none());
+        assert_eq!(
+            RootPairFilter::build(&one_byte_refs, MatchMode::CaseInsensitive)
+                .clear_raw_pair_count(MatchMode::CaseInsensitive),
+            0
+        );
+        assert!(RootPairFilter::for_automaton(
+            &one_byte_refs,
+            MatchMode::CaseInsensitive,
+            usize::MAX,
+        )
+        .is_none());
+
+        let small = ACAutomaton::build(&["ab", "cd"], MatchMode::CaseSensitive).unwrap();
+        assert!(small.root_pair_filter.is_none());
+        assert_eq!(small.memory_bytes(), small.buffer().len());
+    }
+
+    #[test]
+    fn case_insensitive_filter_density_weights_folded_letter_pairs() {
+        let mut filter = RootPairFilter {
+            pairs: [u64::MAX; ROOT_PAIR_WORDS],
+        };
+        let weight_one_bytes = (u8::MIN..=u8::MAX)
+            .filter(|byte| !byte.is_ascii_alphabetic())
+            .collect::<Vec<_>>();
+        let mut cleared = 0_usize;
+        for &first in &weight_one_bytes {
+            for &second in &weight_one_bytes {
+                if cleared == 26_500 {
+                    break;
+                }
+                let pair = usize::from(u16::from_be_bytes([first, second]));
+                filter.pairs[pair / u64::BITS as usize] &= !(1_u64 << (pair % u64::BITS as usize));
+                cleared += 1;
+            }
+        }
+
+        // An unweighted normalized-pair gate would accept 26,500 clear pairs
+        // out of 230^2. They represent only 26,500 of the 65,536 raw pairs,
+        // however, and must not enable the hot-loop sidecar.
+        assert_eq!(cleared, 26_500);
+        assert_eq!(
+            filter.clear_raw_pair_count(MatchMode::CaseInsensitive),
+            cleared
+        );
+        assert!(!filter.is_useful(
+            MatchMode::CaseInsensitive,
+            MIN_ROOT_PAIR_FILTER_BUFFER_BYTES,
+        ));
+    }
+
+    #[test]
+    fn forced_root_pair_filter_matches_scalar_for_random_binary_streams() {
+        fn next_random(state: &mut u64) -> u8 {
+            *state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state.to_le_bytes()[4]
+        }
+
+        fn collect(view: &ACAutomatonView<'_>, input: &[u8], chunk_size: usize) -> Vec<ACMatch> {
+            let mut state = view.create_state();
+            let mut matches = Vec::new();
+            for chunk in input.chunks(chunk_size) {
+                view.advance(&mut state, chunk, |matched| matches.push(matched))
+                    .unwrap();
+            }
+            matches
+        }
+
+        let mut random = 0x86f1_5a3c_d274_09be_u64;
+        for case in 0..16 {
+            let patterns = (0..48)
+                .map(|index| {
+                    let length = if index < 4 {
+                        1
+                    } else {
+                        usize::from(next_random(&mut random) % 12) + 1
+                    };
+                    (0..length)
+                        .map(|_| next_random(&mut random))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let pattern_refs = patterns.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let input = (0..384)
+                .map(|_| next_random(&mut random))
+                .collect::<Vec<_>>();
+
+            for mode in [MatchMode::CaseSensitive, MatchMode::CaseInsensitive] {
+                let mut ac = ACAutomaton::build_bytes(&pattern_refs, mode).unwrap();
+                ac.root_pair_filter = Some(Box::new(RootPairFilter::build(&pattern_refs, mode)));
+                let owned = ac.view().unwrap();
+                let scalar = ACAutomatonView::with_pattern_lengths(
+                    ac.buffer(),
+                    ac.node_count(),
+                    ac.pattern_lengths(),
+                    mode,
+                )
+                .unwrap();
+
+                for chunk_size in [1, 2, 3, 7, 31, 128, input.len()] {
+                    assert_eq!(
+                        collect(&owned, &input, chunk_size),
+                        collect(&scalar, &input, chunk_size),
+                        "forced pair filter differs in case {case}, mode {mode:?}, chunk size {chunk_size}",
+                    );
+                }
             }
         }
     }

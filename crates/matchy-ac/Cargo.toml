@@ -13,5 +13,9 @@ readme = "../../README.md"
 matchy-match-mode = { path = "../matchy-match-mode", version = "2.0.0" }
 zerocopy = { version = "=0.8.31", features = ["derive"] }
 
+[[bench]]
+name = "ac_traversal_bench"
+harness = false
+
 [lints]
 workspace = true
