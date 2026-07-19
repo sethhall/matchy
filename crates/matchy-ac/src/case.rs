@@ -5,7 +5,8 @@ use std::mem;
 
 use crate::{ACAutomaton, ACAutomatonView, ACError, ACMatch, ACMatchState, MatchMode};
 
-const UNCONDITIONAL_VARIANT: u32 = u32::MAX;
+const NO_EXACT_CHECK: u32 = u32::MAX;
+const MULTI_VARIANT_TAG: u32 = u32::MAX;
 
 /// One arbitrary byte pattern and its ASCII case-matching mode.
 ///
@@ -26,8 +27,38 @@ impl<'a> ACCasePattern<'a> {
     }
 }
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct FoldedVariants {
+struct FoldedPathDispatch {
+    pattern_id_or_tag: u32,
+    exact_offset_or_range: u32,
+}
+
+const _: () = assert!(mem::size_of::<FoldedPathDispatch>() == 8);
+
+impl FoldedPathDispatch {
+    fn singleton(variant: CaseVariant) -> Result<Self, ACError> {
+        if variant.pattern_id == MULTI_VARIANT_TAG {
+            return Err(ACError::ResourceLimitExceeded(
+                "Singleton-optimized mixed case layout reserves pattern ID u32::MAX".to_string(),
+            ));
+        }
+        Ok(Self {
+            pattern_id_or_tag: variant.pattern_id,
+            exact_offset_or_range: variant.exact_offset,
+        })
+    }
+
+    fn multi(range_index: u32) -> Self {
+        Self {
+            pattern_id_or_tag: MULTI_VARIANT_TAG,
+            exact_offset_or_range: range_index,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VariantRange {
     start: u32,
     count: u32,
 }
@@ -36,6 +67,50 @@ struct FoldedVariants {
 struct CaseVariant {
     pattern_id: u32,
     exact_offset: u32,
+}
+
+enum MixedDispatch {
+    Flat {
+        paths: Box<[VariantRange]>,
+        variants: Box<[CaseVariant]>,
+    },
+    SingletonOptimized {
+        paths: Box<[FoldedPathDispatch]>,
+        variant_ranges: Box<[VariantRange]>,
+        multi_variants: Box<[CaseVariant]>,
+    },
+}
+
+fn encode_case_variant(
+    pattern_id: usize,
+    pattern: &ACCasePattern<'_>,
+    exact_bytes: &mut Vec<u8>,
+) -> Result<CaseVariant, ACError> {
+    let pattern_id = u32::try_from(pattern_id).map_err(|_| {
+        ACError::ResourceLimitExceeded("Pattern count exceeds u32::MAX".to_string())
+    })?;
+    let needs_exact = pattern.mode == MatchMode::CaseSensitive
+        && pattern.bytes.iter().any(u8::is_ascii_alphabetic);
+    let exact_offset = if needs_exact {
+        let offset = u32::try_from(exact_bytes.len()).map_err(|_| {
+            ACError::ResourceLimitExceeded("Mixed case exact bytes exceed u32::MAX".to_string())
+        })?;
+        let _exact_end = exact_bytes
+            .len()
+            .checked_add(pattern.bytes.len())
+            .and_then(|end| u32::try_from(end).ok())
+            .ok_or_else(|| {
+                ACError::ResourceLimitExceeded("Mixed case exact bytes exceed u32::MAX".to_string())
+            })?;
+        exact_bytes.extend_from_slice(pattern.bytes);
+        offset
+    } else {
+        NO_EXACT_CHECK
+    };
+    Ok(CaseVariant {
+        pattern_id,
+        exact_offset,
+    })
 }
 
 enum ACCaseAutomatonKind {
@@ -48,8 +123,7 @@ enum ACCaseAutomatonKind {
     },
     Mixed {
         folded: ACAutomaton,
-        paths: Box<[FoldedVariants]>,
-        variants: Box<[CaseVariant]>,
+        dispatch: MixedDispatch,
         exact_bytes: Box<[u8]>,
     },
 }
@@ -112,9 +186,21 @@ enum ACCaseAutomatonViewKind<'a> {
     },
     Mixed {
         folded: ACAutomatonView<'a>,
-        paths: &'a [FoldedVariants],
-        variants: &'a [CaseVariant],
+        dispatch: MixedDispatchView<'a>,
         exact_bytes: &'a [u8],
+    },
+}
+
+#[derive(Clone, Copy)]
+enum MixedDispatchView<'a> {
+    Flat {
+        paths: &'a [VariantRange],
+        variants: &'a [CaseVariant],
+    },
+    SingletonOptimized {
+        paths: &'a [FoldedPathDispatch],
+        variant_ranges: &'a [VariantRange],
+        multi_variants: &'a [CaseVariant],
     },
 }
 
@@ -201,62 +287,96 @@ impl ACCaseAutomaton {
 
         let folded_expressions = folded_paths.keys().map(Vec::as_slice).collect::<Vec<_>>();
         let folded = ACAutomaton::build_bytes(&folded_expressions, MatchMode::CaseInsensitive)?;
-        let mut paths = Vec::with_capacity(folded_paths.len());
-        let mut variants = Vec::with_capacity(patterns.len());
+        let singleton_path_count = folded_paths
+            .values()
+            .filter(|variants| variants.len() == 1)
+            .count();
+        let multi_path_count = folded_paths.len().saturating_sub(singleton_path_count);
         let mut exact_bytes = Vec::new();
-        for path_variants in folded_paths.into_values() {
-            let start = u32::try_from(variants.len()).map_err(|_| {
-                ACError::ResourceLimitExceeded(
-                    "Mixed case variant count exceeds u32::MAX".to_string(),
-                )
-            })?;
-            for (pattern_id, pattern) in path_variants {
-                let pattern_id = u32::try_from(pattern_id).map_err(|_| {
-                    ACError::ResourceLimitExceeded("Pattern count exceeds u32::MAX".to_string())
-                })?;
-                let needs_exact = pattern.mode == MatchMode::CaseSensitive
-                    && pattern.bytes.iter().any(u8::is_ascii_alphabetic);
-                let exact_offset = if needs_exact {
-                    let offset = u32::try_from(exact_bytes.len()).map_err(|_| {
-                        ACError::ResourceLimitExceeded(
-                            "Mixed case exact bytes exceed u32::MAX".to_string(),
-                        )
-                    })?;
-                    let _exact_end = exact_bytes
-                        .len()
-                        .checked_add(pattern.bytes.len())
-                        .and_then(|end| u32::try_from(end).ok())
-                        .ok_or_else(|| {
-                            ACError::ResourceLimitExceeded(
-                                "Mixed case exact bytes exceed u32::MAX".to_string(),
-                            )
-                        })?;
-                    exact_bytes.extend_from_slice(pattern.bytes);
-                    offset
-                } else {
-                    UNCONDITIONAL_VARIANT
-                };
-                variants.push(CaseVariant {
-                    pattern_id,
-                    exact_offset,
-                });
-            }
-            let count = u32::try_from(variants.len())
-                .ok()
-                .and_then(|end| end.checked_sub(start))
-                .ok_or_else(|| {
+        // The optimized sidecar removes one 8-byte CaseVariant for every
+        // singleton path and adds one 8-byte VariantRange for every multi path.
+        // Retain the flat layout unless that exchange strictly reduces memory;
+        // it also avoids adding a tag/range lookup to collision-heavy outputs.
+        let dispatch = if singleton_path_count > multi_path_count {
+            let mut paths = Vec::with_capacity(folded_paths.len());
+            let mut variant_ranges = Vec::with_capacity(multi_path_count);
+            let mut multi_variants = Vec::new();
+            for path_variants in folded_paths.into_values() {
+                if path_variants.len() == 1 {
+                    let (pattern_id, pattern) = path_variants[0];
+                    paths.push(FoldedPathDispatch::singleton(encode_case_variant(
+                        pattern_id,
+                        pattern,
+                        &mut exact_bytes,
+                    )?)?);
+                    continue;
+                }
+
+                let start = u32::try_from(multi_variants.len()).map_err(|_| {
                     ACError::ResourceLimitExceeded(
                         "Mixed case variant count exceeds u32::MAX".to_string(),
                     )
                 })?;
-            paths.push(FoldedVariants { start, count });
-        }
+                for (pattern_id, pattern) in path_variants {
+                    multi_variants.push(encode_case_variant(
+                        pattern_id,
+                        pattern,
+                        &mut exact_bytes,
+                    )?);
+                }
+                let count = u32::try_from(multi_variants.len())
+                    .ok()
+                    .and_then(|end| end.checked_sub(start))
+                    .ok_or_else(|| {
+                        ACError::ResourceLimitExceeded(
+                            "Mixed case variant count exceeds u32::MAX".to_string(),
+                        )
+                    })?;
+                let range_index = u32::try_from(variant_ranges.len()).map_err(|_| {
+                    ACError::ResourceLimitExceeded(
+                        "Mixed case variant range count exceeds u32::MAX".to_string(),
+                    )
+                })?;
+                variant_ranges.push(VariantRange { start, count });
+                paths.push(FoldedPathDispatch::multi(range_index));
+            }
+            MixedDispatch::SingletonOptimized {
+                paths: paths.into_boxed_slice(),
+                variant_ranges: variant_ranges.into_boxed_slice(),
+                multi_variants: multi_variants.into_boxed_slice(),
+            }
+        } else {
+            let mut paths = Vec::with_capacity(folded_paths.len());
+            let mut variants = Vec::with_capacity(patterns.len());
+            for path_variants in folded_paths.into_values() {
+                let start = u32::try_from(variants.len()).map_err(|_| {
+                    ACError::ResourceLimitExceeded(
+                        "Mixed case variant count exceeds u32::MAX".to_string(),
+                    )
+                })?;
+                for (pattern_id, pattern) in path_variants {
+                    variants.push(encode_case_variant(pattern_id, pattern, &mut exact_bytes)?);
+                }
+                let count = u32::try_from(variants.len())
+                    .ok()
+                    .and_then(|end| end.checked_sub(start))
+                    .ok_or_else(|| {
+                        ACError::ResourceLimitExceeded(
+                            "Mixed case variant count exceeds u32::MAX".to_string(),
+                        )
+                    })?;
+                paths.push(VariantRange { start, count });
+            }
+            MixedDispatch::Flat {
+                paths: paths.into_boxed_slice(),
+                variants: variants.into_boxed_slice(),
+            }
+        };
 
         Ok(Self {
             kind: ACCaseAutomatonKind::Mixed {
                 folded,
-                paths: paths.into_boxed_slice(),
-                variants: variants.into_boxed_slice(),
+                dispatch,
                 exact_bytes: exact_bytes.into_boxed_slice(),
             },
             pattern_count: patterns.len(),
@@ -318,13 +438,24 @@ impl ACCaseAutomaton {
             },
             ACCaseAutomatonKind::Mixed {
                 folded,
-                paths,
-                variants,
+                dispatch,
                 exact_bytes,
             } => ACCaseAutomatonViewKind::Mixed {
                 folded: folded.view()?,
-                paths,
-                variants,
+                dispatch: match dispatch {
+                    MixedDispatch::Flat { paths, variants } => {
+                        MixedDispatchView::Flat { paths, variants }
+                    }
+                    MixedDispatch::SingletonOptimized {
+                        paths,
+                        variant_ranges,
+                        multi_variants,
+                    } => MixedDispatchView::SingletonOptimized {
+                        paths,
+                        variant_ranges,
+                        multi_variants,
+                    },
+                },
                 exact_bytes,
             },
         };
@@ -431,15 +562,26 @@ impl ACCaseAutomaton {
                 .saturating_add(mem::size_of_val(insensitive_ids.as_ref())),
             ACCaseAutomatonKind::Mixed {
                 folded,
-                paths,
-                variants,
+                dispatch,
                 exact_bytes,
-            } => folded
-                .buffer()
-                .len()
-                .saturating_add(mem::size_of_val(paths.as_ref()))
-                .saturating_add(mem::size_of_val(variants.as_ref()))
-                .saturating_add(exact_bytes.len()),
+            } => {
+                let dispatch_bytes = match dispatch {
+                    MixedDispatch::Flat { paths, variants } => mem::size_of_val(paths.as_ref())
+                        .saturating_add(mem::size_of_val(variants.as_ref())),
+                    MixedDispatch::SingletonOptimized {
+                        paths,
+                        variant_ranges,
+                        multi_variants,
+                    } => mem::size_of_val(paths.as_ref())
+                        .saturating_add(mem::size_of_val(variant_ranges.as_ref()))
+                        .saturating_add(mem::size_of_val(multi_variants.as_ref())),
+                };
+                folded
+                    .buffer()
+                    .len()
+                    .saturating_add(dispatch_bytes)
+                    .saturating_add(exact_bytes.len())
+            }
         }
     }
 
@@ -571,8 +713,7 @@ impl<'a> ACCaseAutomatonView<'a> {
             (
                 ACCaseAutomatonViewKind::Mixed {
                     folded,
-                    paths,
-                    variants,
+                    dispatch,
                     exact_bytes,
                 },
                 ACCaseMatchStateKind::Single(state),
@@ -591,49 +732,135 @@ impl<'a> ACCaseAutomatonView<'a> {
                     input_position,
                     input,
                 };
-                folded.advance(state, input, |matched| {
-                    let Some(path) = usize::try_from(matched.pattern_id)
-                        .ok()
-                        .and_then(|pattern| paths.get(pattern))
-                    else {
-                        return;
-                    };
-                    let Some(start) = usize::try_from(path.start).ok() else {
-                        return;
-                    };
-                    let Some(count) = usize::try_from(path.count).ok() else {
-                        return;
-                    };
-                    let Some(length) =
-                        usize::try_from(matched.end.saturating_sub(matched.start)).ok()
-                    else {
-                        return;
-                    };
-                    for variant in variants
-                        .get(start..start.saturating_add(count))
-                        .unwrap_or_default()
-                    {
-                        if !enabled(variant.pattern_id) {
-                            continue;
-                        }
-                        if variant.exact_offset != UNCONDITIONAL_VARIANT {
-                            let Some(offset) = usize::try_from(variant.exact_offset).ok() else {
-                                continue;
-                            };
-                            let Some(expected) =
-                                exact_bytes.get(offset..offset.saturating_add(length))
-                            else {
-                                continue;
-                            };
-                            if !exact.matches(matched.start, expected) {
+                folded.advance(state, input, |matched| match dispatch {
+                    MixedDispatchView::Flat { paths, variants } => {
+                        let Some(path) = usize::try_from(matched.pattern_id)
+                            .ok()
+                            .and_then(|pattern| paths.get(pattern))
+                        else {
+                            return;
+                        };
+                        let Some(start) = usize::try_from(path.start).ok() else {
+                            return;
+                        };
+                        let Some(count) = usize::try_from(path.count).ok() else {
+                            return;
+                        };
+                        let Some(length) =
+                            usize::try_from(matched.end.saturating_sub(matched.start)).ok()
+                        else {
+                            return;
+                        };
+                        for variant in variants
+                            .get(start..start.saturating_add(count))
+                            .unwrap_or_default()
+                        {
+                            if !enabled(variant.pattern_id) {
                                 continue;
                             }
+                            if variant.exact_offset != NO_EXACT_CHECK {
+                                let Some(offset) = usize::try_from(variant.exact_offset).ok()
+                                else {
+                                    continue;
+                                };
+                                let Some(expected) =
+                                    exact_bytes.get(offset..offset.saturating_add(length))
+                                else {
+                                    continue;
+                                };
+                                if !exact.matches(matched.start, expected) {
+                                    continue;
+                                }
+                            }
+                            visit(ACMatch {
+                                pattern_id: variant.pattern_id,
+                                start: matched.start,
+                                end: matched.end,
+                            });
                         }
-                        visit(ACMatch {
-                            pattern_id: variant.pattern_id,
-                            start: matched.start,
-                            end: matched.end,
-                        });
+                    }
+                    MixedDispatchView::SingletonOptimized {
+                        paths,
+                        variant_ranges,
+                        multi_variants,
+                    } => {
+                        let Some(path) = usize::try_from(matched.pattern_id)
+                            .ok()
+                            .and_then(|pattern| paths.get(pattern))
+                            .copied()
+                        else {
+                            return;
+                        };
+                        let Some(length) =
+                            usize::try_from(matched.end.saturating_sub(matched.start)).ok()
+                        else {
+                            return;
+                        };
+                        if path.pattern_id_or_tag != MULTI_VARIANT_TAG {
+                            if !enabled(path.pattern_id_or_tag) {
+                                return;
+                            }
+                            if path.exact_offset_or_range != NO_EXACT_CHECK {
+                                let Some(offset) = usize::try_from(path.exact_offset_or_range).ok()
+                                else {
+                                    return;
+                                };
+                                let Some(expected) =
+                                    exact_bytes.get(offset..offset.saturating_add(length))
+                                else {
+                                    return;
+                                };
+                                if !exact.matches(matched.start, expected) {
+                                    return;
+                                }
+                            }
+                            visit(ACMatch {
+                                pattern_id: path.pattern_id_or_tag,
+                                start: matched.start,
+                                end: matched.end,
+                            });
+                            return;
+                        }
+
+                        let Some(range) = usize::try_from(path.exact_offset_or_range)
+                            .ok()
+                            .and_then(|index| variant_ranges.get(index))
+                        else {
+                            return;
+                        };
+                        let Some(start) = usize::try_from(range.start).ok() else {
+                            return;
+                        };
+                        let Some(count) = usize::try_from(range.count).ok() else {
+                            return;
+                        };
+                        for variant in multi_variants
+                            .get(start..start.saturating_add(count))
+                            .unwrap_or_default()
+                        {
+                            if !enabled(variant.pattern_id) {
+                                continue;
+                            }
+                            if variant.exact_offset != NO_EXACT_CHECK {
+                                let Some(offset) = usize::try_from(variant.exact_offset).ok()
+                                else {
+                                    continue;
+                                };
+                                let Some(expected) =
+                                    exact_bytes.get(offset..offset.saturating_add(length))
+                                else {
+                                    continue;
+                                };
+                                if !exact.matches(matched.start, expected) {
+                                    continue;
+                                }
+                            }
+                            visit(ACMatch {
+                                pattern_id: variant.pattern_id,
+                                start: matched.start,
+                                end: matched.end,
+                            });
+                        }
                     }
                 })
             }
@@ -812,6 +1039,148 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn mixed_layout_inlines_singleton_dispatch() {
+        assert_eq!(mem::size_of::<FoldedPathDispatch>(), 8);
+
+        let patterns = [
+            ACCasePattern::new(b"Alpha", MatchMode::CaseSensitive),
+            ACCasePattern::new(b"BRAVO", MatchMode::CaseInsensitive),
+            ACCasePattern::new(b"123", MatchMode::CaseSensitive),
+            ACCasePattern::new(b"Dupe", MatchMode::CaseSensitive),
+            ACCasePattern::new(b"DUPE", MatchMode::CaseInsensitive),
+        ];
+        let matcher = ACCaseAutomaton::build(&patterns).unwrap();
+        let ACCaseAutomatonKind::Mixed {
+            folded, dispatch, ..
+        } = &matcher.kind
+        else {
+            panic!("mixed pattern modes should select the fused layout");
+        };
+        let MixedDispatch::SingletonOptimized {
+            paths,
+            variant_ranges,
+            multi_variants,
+        } = dispatch
+        else {
+            panic!("singleton-heavy paths should select the optimized sidecar");
+        };
+
+        assert_eq!(folded.pattern_count(), paths.len());
+        assert_eq!(paths.len(), 4);
+        assert_eq!(variant_ranges.len(), 1);
+        assert_eq!(multi_variants.len(), 2);
+        assert_eq!(
+            multi_variants
+                .iter()
+                .map(|variant| variant.pattern_id)
+                .collect::<Vec<_>>(),
+            [3, 4]
+        );
+
+        let exact_singleton = paths
+            .iter()
+            .find(|path| path.pattern_id_or_tag == 0)
+            .unwrap();
+        assert_ne!(exact_singleton.exact_offset_or_range, NO_EXACT_CHECK);
+        for pattern_id in [1, 2] {
+            let unconditional = paths
+                .iter()
+                .find(|path| path.pattern_id_or_tag == pattern_id)
+                .unwrap();
+            assert_eq!(unconditional.exact_offset_or_range, NO_EXACT_CHECK);
+        }
+        let multi = paths
+            .iter()
+            .find(|path| path.pattern_id_or_tag == MULTI_VARIANT_TAG)
+            .unwrap();
+        assert_eq!(multi.exact_offset_or_range, 0);
+        assert_eq!(variant_ranges[0].start, 0);
+        assert_eq!(variant_ranges[0].count, 2);
+    }
+
+    #[test]
+    fn mixed_layout_keeps_flat_dispatch_for_collision_heavy_sets() {
+        for patterns in [
+            vec![
+                ACCasePattern::new(b"Alpha", MatchMode::CaseSensitive),
+                ACCasePattern::new(b"ALPHA", MatchMode::CaseInsensitive),
+                ACCasePattern::new(b"bravo", MatchMode::CaseInsensitive),
+            ],
+            vec![
+                ACCasePattern::new(b"Alpha", MatchMode::CaseSensitive),
+                ACCasePattern::new(b"ALPHA", MatchMode::CaseInsensitive),
+                ACCasePattern::new(b"Bravo", MatchMode::CaseSensitive),
+                ACCasePattern::new(b"BRAVO", MatchMode::CaseInsensitive),
+                ACCasePattern::new(b"charlie", MatchMode::CaseInsensitive),
+            ],
+        ] {
+            let matcher = ACCaseAutomaton::build(&patterns).unwrap();
+            let ACCaseAutomatonKind::Mixed { dispatch, .. } = &matcher.kind else {
+                panic!("mixed pattern modes should select the fused layout");
+            };
+            assert!(matches!(dispatch, MixedDispatch::Flat { .. }));
+        }
+    }
+
+    #[test]
+    fn mixed_singleton_exact_matches_across_every_chunk_boundary() {
+        let patterns = [
+            ACCasePattern::new(b"AbCd", MatchMode::CaseSensitive),
+            ACCasePattern::new(b"other", MatchMode::CaseInsensitive),
+            ACCasePattern::new(b"123", MatchMode::CaseSensitive),
+        ];
+        let matcher = ACCaseAutomaton::build(&patterns).unwrap();
+        let input = b"xxAbCd-abcd-OTHER-123";
+        for chunk_size in 1..=input.len() {
+            let matches = collect_chunks(&matcher, input, chunk_size);
+            assert_eq!(
+                matches
+                    .iter()
+                    .map(|matched| matched.pattern_id)
+                    .collect::<Vec<_>>(),
+                [0, 1, 2],
+                "chunk size {chunk_size}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_singleton_dispatch_respects_filtering() {
+        let patterns = [
+            ACCasePattern::new(b"AbCd", MatchMode::CaseSensitive),
+            ACCasePattern::new(b"other", MatchMode::CaseInsensitive),
+            ACCasePattern::new(b"123", MatchMode::CaseSensitive),
+        ];
+        let matcher = ACCaseAutomaton::build(&patterns).unwrap();
+        assert!(matches!(
+            &matcher.kind,
+            ACCaseAutomatonKind::Mixed {
+                dispatch: MixedDispatch::SingletonOptimized { .. },
+                ..
+            }
+        ));
+
+        let mut state = matcher.create_state();
+        let mut matches = Vec::new();
+        matcher
+            .advance_filtered(
+                &mut state,
+                b"AbCd abcd OTHER 123",
+                &[],
+                |pattern_id| pattern_id != 1,
+                |matched| matches.push(matched),
+            )
+            .unwrap();
+        assert_eq!(
+            matches
+                .iter()
+                .map(|matched| matched.pattern_id)
+                .collect::<Vec<_>>(),
+            [0, 2]
+        );
     }
 
     #[test]
