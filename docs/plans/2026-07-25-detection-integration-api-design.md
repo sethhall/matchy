@@ -706,10 +706,10 @@ The intended workspace shape is:
 ```text
 matchy-detection-types     small shared IDs, source/config, schema contracts
 matchy-detection-ir        frontend-neutral logical rules
-matchy-detection-plan      legalization, logical graph, cost planning
 matchy-detection-regex     regular-language analysis and backend contracts
 matchy-detection-pcre      PCRE translation frontend/helper
-matchy-detection-runtime   compiled detector, sessions, matcher/VM execution
+matchy-detection-engine    legalization, planning, compiled detector, sessions,
+                           matcher/VM execution
 matchy-suricata            Suricata syntax, variables, compatibility, lowering
 matchy-detection-network   optional network schema/profile and conveniences
 ```
@@ -718,8 +718,12 @@ The exact number of crates should remain pragmatic. In particular:
 
 - shared types must not become a dumping ground for network compatibility;
 - `matchy-suricata` stops at logical lowering and diagnostics;
-- the runtime does not depend on `matchy-suricata`;
-- frontends depend on the IR, not the runtime's private physical operators;
+- the engine does not depend on `matchy-suricata`;
+- frontends depend on the IR, not the engine's private planner or physical
+  operators;
+- legalization, planning, and execution remain distinct engine modules, but
+  their lockstep private contracts do not become independently versioned
+  crates;
 - Zeek-specific CXX wire types remain in Zeek; and
 - the top-level `matchy` crate need not expose every detection crate
   immediately.
