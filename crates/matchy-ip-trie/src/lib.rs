@@ -7,9 +7,12 @@ use std::collections::HashSet;
 use std::fmt;
 use std::net::IpAddr;
 
+mod reader;
+
 // Validation module for IP tree structures
 pub mod validation;
 
+pub use reader::{IpLookup, IpTree, IpTreeLookupError};
 // Re-export validation types for convenience
 pub use validation::{validate_ip_tree, IpTreeStats, IpTreeValidationResult};
 /// Error type for IP tree operations
@@ -98,10 +101,12 @@ pub struct IpTreeBuilder {
     ip_version: IpVersion,
 }
 
-/// IP version for the tree
+/// Address width used by an IP tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IpVersion {
+pub enum IpVersion {
+    /// IPv4-only tree.
     V4,
+    /// IPv6 tree, optionally including IPv4 under the MMDB 96-zero-bit prefix.
     V6,
 }
 
@@ -896,28 +901,6 @@ fn bits_to_u128(bits: (u64, u64)) -> u128 {
 mod tests {
     use super::*;
 
-    fn read_24bit_record(tree: &[u8], node: u32, bit: u8) -> u32 {
-        let offset = node as usize * 6 + usize::from(bit) * 3;
-        u32::from_be_bytes([0, tree[offset], tree[offset + 1], tree[offset + 2]])
-    }
-
-    fn lookup_24bit(tree: &[u8], node_count: u32, bits: u128, depth: u8) -> Option<u32> {
-        let mut node = 0;
-        for bit_index in 0..depth {
-            let bit = ((bits >> (127 - bit_index)) & 1) as u8;
-            let record = read_24bit_record(tree, node, bit);
-            if record == node_count {
-                return None;
-            }
-            if record < node_count {
-                node = record;
-            } else {
-                return Some(record - node_count - 16);
-            }
-        }
-        None
-    }
-
     #[test]
     fn test_ipv4_to_bits() {
         let addr = std::net::Ipv4Addr::new(192, 168, 1, 1);
@@ -1110,10 +1093,15 @@ mod tests {
             .insert(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 42)
             .unwrap();
         let (tree, node_count) = builder.build().unwrap();
+        let tree = IpTree::new(&tree, node_count, RecordSize::Bits24, IpVersion::V4);
 
         for addr in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(203, 0, 113, 7)] {
-            let bits = u128::from(ipv4_to_bits(addr)) << 96;
-            assert_eq!(lookup_24bit(&tree, node_count, bits, 32), Some(42));
+            assert_eq!(
+                tree.lookup_v4(addr)
+                    .unwrap()
+                    .map(|result| result.data_offset),
+                Some(42)
+            );
         }
     }
 
@@ -1132,11 +1120,20 @@ mod tests {
             .insert(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)), 24, 20)
             .unwrap();
         let (tree, node_count) = builder.build().unwrap();
+        let tree = IpTree::new(&tree, node_count, RecordSize::Bits24, IpVersion::V4);
 
-        let host_bits = u128::from(ipv4_to_bits(Ipv4Addr::new(192, 0, 2, 1))) << 96;
-        let network_bits = u128::from(ipv4_to_bits(Ipv4Addr::new(192, 0, 2, 2))) << 96;
-        assert_eq!(lookup_24bit(&tree, node_count, host_bits, 32), Some(30));
-        assert_eq!(lookup_24bit(&tree, node_count, network_bits, 32), Some(20));
+        assert_eq!(
+            tree.lookup_v4(Ipv4Addr::new(192, 0, 2, 1))
+                .unwrap()
+                .map(|result| result.data_offset),
+            Some(30)
+        );
+        assert_eq!(
+            tree.lookup_v4(Ipv4Addr::new(192, 0, 2, 2))
+                .unwrap()
+                .map(|result| result.data_offset),
+            Some(20)
+        );
     }
 
     #[test]
@@ -1170,10 +1167,10 @@ mod tests {
                 Ok(offset)
             })
             .unwrap();
+        let tree = IpTree::new(&tree, node_count, RecordSize::Bits24, IpVersion::V4);
 
         let lookup_set = |addr: Ipv4Addr| {
-            let bits = u128::from(ipv4_to_bits(addr)) << 96;
-            let offset = lookup_24bit(&tree, node_count, bits, 32).unwrap();
+            let offset = tree.lookup_v4(addr).unwrap().unwrap().data_offset;
             encoded_sets[offset as usize].clone()
         };
 
@@ -1225,11 +1222,18 @@ mod tests {
                 Ok(offset)
             })
             .unwrap();
+        let tree = IpTree::new(&tree, node_count, RecordSize::Bits24, IpVersion::V6);
 
-        let v6_bits = bits_to_u128(ipv6_to_bits("2001:db8::1".parse().unwrap()));
-        let v4_bits = u128::from(ipv4_to_bits(Ipv4Addr::new(192, 0, 2, 7)));
-        let v6_offset = lookup_24bit(&tree, node_count, v6_bits, 128).unwrap();
-        let v4_offset = lookup_24bit(&tree, node_count, v4_bits, 128).unwrap();
+        let v6_offset = tree
+            .lookup_v6("2001:db8::1".parse().unwrap())
+            .unwrap()
+            .unwrap()
+            .data_offset;
+        let v4_offset = tree
+            .lookup_v4(Ipv4Addr::new(192, 0, 2, 7))
+            .unwrap()
+            .unwrap()
+            .data_offset;
 
         assert_eq!(encoded_sets[v6_offset as usize], [1, 2]);
         assert_eq!(encoded_sets[v4_offset as usize], [1, 3]);

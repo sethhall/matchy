@@ -50,17 +50,9 @@ impl From<String> for MmdbError {
     }
 }
 
-/// IP version
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IpVersion {
-    /// IPv4 only
-    V4,
-    /// IPv6 (may include IPv4-mapped addresses)
-    V6,
-}
-
-// Re-export RecordSize from ip-trie (it's an IP trie concern, not MMDB-specific)
-pub use matchy_ip_trie::RecordSize;
+// Re-export tree vocabulary from ip-trie; MMDB metadata selects these values
+// but does not own their semantics.
+pub use matchy_ip_trie::{IpVersion, RecordSize};
 
 // Helper function for MMDB metadata parsing
 pub fn record_size_from_bits(bits: u16) -> Result<RecordSize, MmdbError> {
