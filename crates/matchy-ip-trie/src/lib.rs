@@ -3,6 +3,7 @@
 //! Builds a binary search tree for IP address lookups with CIDR prefix support.
 //! Supports both IPv4 and IPv6 addresses.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::net::IpAddr;
 
@@ -91,6 +92,8 @@ pub struct IpTreeBuilder {
     record_size: RecordSize,
     /// All nodes in the tree (arena)
     nodes: Vec<Node>,
+    /// Original prefix attachments retained for all-matches builds.
+    prefix_matches: Vec<PrefixMatch>,
     /// IP version (determines tree depth)
     ip_version: IpVersion,
 }
@@ -109,6 +112,21 @@ struct Node {
     left: NodePointer,
     /// Right child (bit 1)
     right: NodePointer,
+}
+
+/// One value attached to an exact prefix.
+#[derive(Debug, Clone, Copy)]
+struct PrefixMatch {
+    bits: u128,
+    prefix_len: u8,
+    value: u32,
+}
+
+/// A temporary logical prefix node used to form cumulative match sets.
+#[derive(Debug, Clone)]
+struct CompleteNode {
+    children: [Option<u32>; 2],
+    values: Vec<u32>,
 }
 
 /// Node pointer - can point to another node, data, or be empty
@@ -133,6 +151,7 @@ impl IpTreeBuilder {
         let mut builder = Self {
             record_size,
             nodes: Vec::new(),
+            prefix_matches: Vec::new(),
             ip_version: IpVersion::V4,
         };
         // Allocate root node
@@ -146,6 +165,7 @@ impl IpTreeBuilder {
         let mut builder = Self {
             record_size,
             nodes: Vec::new(),
+            prefix_matches: Vec::new(),
             ip_version: IpVersion::V6,
         };
         // Allocate root node
@@ -174,21 +194,22 @@ impl IpTreeBuilder {
         prefix_len: u8,
         data_offset: u32,
     ) -> Result<(), IpTreeError> {
-        match addr {
+        let (bits, tree_prefix_len) = match addr {
             IpAddr::V4(v4) => {
+                if prefix_len > 32 {
+                    return Err(IpTreeError::InvalidPattern(format!(
+                        "IPv4 prefix length {prefix_len} exceeds 32"
+                    )));
+                }
+
                 if self.ip_version == IpVersion::V6 {
-                    // Insert IPv4 into IPv6 tree (as IPv4-mapped at ::ffff:0:0/96)
+                    // Per MMDB, IPv4 addresses occupy the 96-zero-bit prefix.
                     let bits = u128::from(ipv4_to_bits(v4));
-                    self.insert_bits_u128(bits, 96 + prefix_len, data_offset)
+                    (bits, 96 + prefix_len)
                 } else {
                     // Pure IPv4 tree
-                    if prefix_len > 32 {
-                        return Err(IpTreeError::InvalidPattern(format!(
-                            "IPv4 prefix length {prefix_len} exceeds 32"
-                        )));
-                    }
                     let bits = u128::from(ipv4_to_bits(v4));
-                    self.insert_bits_u128(bits << 96, prefix_len, data_offset)
+                    (bits << 96, prefix_len)
                 }
             }
             IpAddr::V6(v6) => {
@@ -203,9 +224,17 @@ impl IpTreeBuilder {
                     )));
                 }
                 let bits = bits_to_u128(ipv6_to_bits(v6));
-                self.insert_bits_u128(bits, prefix_len, data_offset)
+                (bits, prefix_len)
             }
-        }
+        };
+
+        self.insert_bits_u128(bits, tree_prefix_len, data_offset)?;
+        self.prefix_matches.push(PrefixMatch {
+            bits,
+            prefix_len: tree_prefix_len,
+            value: data_offset,
+        });
+        Ok(())
     }
 
     /// Insert bits into tree using iterative approach (avoids borrow checker issues)
@@ -224,6 +253,11 @@ impl IpTreeBuilder {
             return Err(IpTreeError::InvalidPattern(format!(
                 "Prefix length {prefix_len} exceeds maximum {max_depth}"
             )));
+        }
+
+        if prefix_len == 0 {
+            self.backfill_less_specific(0, data_offset, prefix_len);
+            return Ok(());
         }
 
         let mut node_id = 0u32; // Start at root
@@ -371,8 +405,8 @@ impl IpTreeBuilder {
                 node.left = NodePointer::Data(data_offset, prefix_len);
             }
             NodePointer::Data(_, existing_prefix_len) => {
-                // Existing data - replace only if we're more specific
-                if prefix_len > existing_prefix_len {
+                // Replace less-specific data and earlier data for this prefix.
+                if prefix_len >= existing_prefix_len {
                     let node = &mut self.nodes[node_id as usize];
                     node.left = NodePointer::Data(data_offset, prefix_len);
                 }
@@ -392,8 +426,8 @@ impl IpTreeBuilder {
                 node.right = NodePointer::Data(data_offset, prefix_len);
             }
             NodePointer::Data(_, existing_prefix_len) => {
-                // Existing data - replace only if we're more specific
-                if prefix_len > existing_prefix_len {
+                // Replace less-specific data and earlier data for this prefix.
+                if prefix_len >= existing_prefix_len {
                     let node = &mut self.nodes[node_id as usize];
                     node.right = NodePointer::Data(data_offset, prefix_len);
                 }
@@ -432,6 +466,153 @@ impl IpTreeBuilder {
         let tree_bytes = self.serialize(node_count, record_size)?;
 
         Ok((tree_bytes, node_count, record_size))
+    }
+
+    /// Build a tree whose lookup value represents every matching prefix.
+    ///
+    /// `encode_match_set` is called at each prefix that adds a value. It
+    /// receives the cumulative values in least-specific to most-specific
+    /// order, preserving insertion order among values attached to the same
+    /// prefix. Repeated values are omitted. The callback returns the
+    /// data-section offset that represents that complete set; callers may
+    /// intern equal sets there if desired.
+    ///
+    /// The resulting bytes use the same longest-prefix MMDB tree encoding as
+    /// [`Self::build`]. A normal lookup therefore returns one offset, but that
+    /// offset identifies a caller-encoded set containing all matches.
+    pub fn build_all_matches<F>(&self, encode_match_set: F) -> Result<(Vec<u8>, u32), IpTreeError>
+    where
+        F: FnMut(&[u32]) -> Result<u32, IpTreeError>,
+    {
+        self.materialize_all_matches(encode_match_set)?.build()
+    }
+
+    /// Build an all-matches tree, widening the record size when necessary.
+    ///
+    /// This combines the cumulative-set behavior of
+    /// [`Self::build_all_matches`] with the automatic-width behavior of
+    /// [`Self::build_auto`].
+    pub fn build_all_matches_auto<F>(
+        &self,
+        encode_match_set: F,
+    ) -> Result<(Vec<u8>, u32, RecordSize), IpTreeError>
+    where
+        F: FnMut(&[u32]) -> Result<u32, IpTreeError>,
+    {
+        self.materialize_all_matches(encode_match_set)?.build_auto()
+    }
+
+    /// Rebuild the inserted prefixes as cumulative match sets.
+    fn materialize_all_matches<F>(&self, mut encode_match_set: F) -> Result<Self, IpTreeError>
+    where
+        F: FnMut(&[u32]) -> Result<u32, IpTreeError>,
+    {
+        let mut complete_nodes = vec![CompleteNode::new()];
+        for prefix_match in &self.prefix_matches {
+            Self::insert_complete_node(&mut complete_nodes, *prefix_match)?;
+        }
+
+        let mut tree = match self.ip_version {
+            IpVersion::V4 => Self::new_v4(self.record_size),
+            IpVersion::V6 => Self::new_v6(self.record_size),
+        };
+        tree.reserve_nodes(self.nodes.len());
+
+        let mut active_values = Vec::new();
+        let mut active_value_set = HashSet::new();
+        Self::materialize_complete_node(
+            &complete_nodes,
+            0,
+            0,
+            0,
+            &mut active_values,
+            &mut active_value_set,
+            &mut encode_match_set,
+            &mut tree,
+        )?;
+        Ok(tree)
+    }
+
+    fn insert_complete_node(
+        nodes: &mut Vec<CompleteNode>,
+        prefix_match: PrefixMatch,
+    ) -> Result<(), IpTreeError> {
+        let mut node_id = 0u32;
+
+        for depth in 0..prefix_match.prefix_len {
+            let bit = ((prefix_match.bits >> (127 - depth)) & 1) as usize;
+            let child = nodes[node_id as usize].children[bit];
+            node_id = match child {
+                Some(child_id) => child_id,
+                None => {
+                    let child_id = u32::try_from(nodes.len()).map_err(|_| {
+                        IpTreeError::ResourceLimitExceeded(
+                            "Complete IP tree node count exceeds u32::MAX".into(),
+                        )
+                    })?;
+                    nodes.push(CompleteNode::new());
+                    nodes[node_id as usize].children[bit] = Some(child_id);
+                    child_id
+                }
+            };
+        }
+
+        let values = &mut nodes[node_id as usize].values;
+        if !values.contains(&prefix_match.value) {
+            values.push(prefix_match.value);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_complete_node<F>(
+        nodes: &[CompleteNode],
+        node_id: u32,
+        depth: u8,
+        prefix_bits: u128,
+        active_values: &mut Vec<u32>,
+        active_value_set: &mut HashSet<u32>,
+        encode_match_set: &mut F,
+        tree: &mut Self,
+    ) -> Result<(), IpTreeError>
+    where
+        F: FnMut(&[u32]) -> Result<u32, IpTreeError>,
+    {
+        let node = &nodes[node_id as usize];
+        let original_len = active_values.len();
+        for value in &node.values {
+            if active_value_set.insert(*value) {
+                active_values.push(*value);
+            }
+        }
+
+        if active_values.len() != original_len {
+            let data_offset = encode_match_set(active_values)?;
+            tree.insert_bits_u128(prefix_bits, depth, data_offset)?;
+        }
+
+        for (bit, child) in node.children.iter().enumerate() {
+            if let Some(child_id) = child {
+                let child_bits = prefix_bits | ((bit as u128) << (127 - depth));
+                Self::materialize_complete_node(
+                    nodes,
+                    *child_id,
+                    depth + 1,
+                    child_bits,
+                    active_values,
+                    active_value_set,
+                    encode_match_set,
+                    tree,
+                )?;
+            }
+        }
+
+        while active_values.len() > original_len {
+            if let Some(value) = active_values.pop() {
+                active_value_set.remove(&value);
+            }
+        }
+        Ok(())
     }
 
     /// Compute the maximum serialized record without allocating the output tree.
@@ -674,6 +855,15 @@ impl Node {
     }
 }
 
+impl CompleteNode {
+    fn new() -> Self {
+        Self {
+            children: [None, None],
+            values: Vec::new(),
+        }
+    }
+}
+
 /// Convert IPv4 address to 32-bit integer
 fn ipv4_to_bits(addr: std::net::Ipv4Addr) -> u32 {
     let octets = addr.octets();
@@ -705,6 +895,28 @@ fn bits_to_u128(bits: (u64, u64)) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_24bit_record(tree: &[u8], node: u32, bit: u8) -> u32 {
+        let offset = node as usize * 6 + usize::from(bit) * 3;
+        u32::from_be_bytes([0, tree[offset], tree[offset + 1], tree[offset + 2]])
+    }
+
+    fn lookup_24bit(tree: &[u8], node_count: u32, bits: u128, depth: u8) -> Option<u32> {
+        let mut node = 0;
+        for bit_index in 0..depth {
+            let bit = ((bits >> (127 - bit_index)) & 1) as u8;
+            let record = read_24bit_record(tree, node, bit);
+            if record == node_count {
+                return None;
+            }
+            if record < node_count {
+                node = record;
+            } else {
+                return Some(record - node_count - 16);
+            }
+        }
+        None
+    }
 
     #[test]
     fn test_ipv4_to_bits() {
@@ -890,6 +1102,140 @@ mod tests {
     }
 
     #[test]
+    fn default_ipv4_route_matches_every_address() {
+        use std::net::Ipv4Addr;
+
+        let mut builder = IpTreeBuilder::new_v4(RecordSize::Bits24);
+        builder
+            .insert(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 42)
+            .unwrap();
+        let (tree, node_count) = builder.build().unwrap();
+
+        for addr in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(203, 0, 113, 7)] {
+            let bits = u128::from(ipv4_to_bits(addr)) << 96;
+            assert_eq!(lookup_24bit(&tree, node_count, bits, 32), Some(42));
+        }
+    }
+
+    #[test]
+    fn reinserting_prefix_replaces_it_without_hiding_more_specific_data() {
+        use std::net::Ipv4Addr;
+
+        let mut builder = IpTreeBuilder::new_v4(RecordSize::Bits24);
+        builder
+            .insert(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)), 24, 10)
+            .unwrap();
+        builder
+            .insert(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 32, 30)
+            .unwrap();
+        builder
+            .insert(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)), 24, 20)
+            .unwrap();
+        let (tree, node_count) = builder.build().unwrap();
+
+        let host_bits = u128::from(ipv4_to_bits(Ipv4Addr::new(192, 0, 2, 1))) << 96;
+        let network_bits = u128::from(ipv4_to_bits(Ipv4Addr::new(192, 0, 2, 2))) << 96;
+        assert_eq!(lookup_24bit(&tree, node_count, host_bits, 32), Some(30));
+        assert_eq!(lookup_24bit(&tree, node_count, network_bits, 32), Some(20));
+    }
+
+    #[test]
+    fn all_matches_build_encodes_cumulative_deduplicated_sets() {
+        use std::net::Ipv4Addr;
+
+        let mut builder = IpTreeBuilder::new_v4(RecordSize::Bits24);
+        // Insert most-specific first to verify construction order does not
+        // control the cumulative prefix order.
+        builder
+            .insert(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 0)), 16, 3)
+            .unwrap();
+        builder
+            .insert(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 0)), 16, 3)
+            .unwrap();
+        builder
+            .insert(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 0)), 16, 4)
+            .unwrap();
+        builder
+            .insert(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)), 8, 2)
+            .unwrap();
+        builder
+            .insert(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 1)
+            .unwrap();
+
+        let mut encoded_sets = Vec::new();
+        let (tree, node_count) = builder
+            .build_all_matches(|values| {
+                let offset = u32::try_from(encoded_sets.len()).unwrap();
+                encoded_sets.push(values.to_vec());
+                Ok(offset)
+            })
+            .unwrap();
+
+        let lookup_set = |addr: Ipv4Addr| {
+            let bits = u128::from(ipv4_to_bits(addr)) << 96;
+            let offset = lookup_24bit(&tree, node_count, bits, 32).unwrap();
+            encoded_sets[offset as usize].clone()
+        };
+
+        assert_eq!(lookup_set(Ipv4Addr::new(203, 0, 113, 7)), [1]);
+        assert_eq!(lookup_set(Ipv4Addr::new(10, 2, 0, 1)), [1, 2]);
+        assert_eq!(lookup_set(Ipv4Addr::new(10, 1, 2, 3)), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn all_matches_build_uses_existing_tree_encoding() {
+        use std::net::Ipv4Addr;
+
+        let mut builder = IpTreeBuilder::new_v4(RecordSize::Bits24);
+        builder
+            .insert(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)), 24, 7)
+            .unwrap();
+
+        let longest = builder.build().unwrap();
+        let all_matches = builder
+            .build_all_matches(|values| {
+                assert_eq!(values.len(), 1);
+                Ok(values[0])
+            })
+            .unwrap();
+
+        assert_eq!(all_matches, longest);
+    }
+
+    #[test]
+    fn all_matches_build_supports_ipv4_and_ipv6_in_one_tree() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        let mut builder = IpTreeBuilder::new_v6(RecordSize::Bits24);
+        builder
+            .insert(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0, 1)
+            .unwrap();
+        builder
+            .insert(IpAddr::V6("2001:db8::".parse().unwrap()), 32, 2)
+            .unwrap();
+        builder
+            .insert(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)), 24, 3)
+            .unwrap();
+
+        let mut encoded_sets = Vec::new();
+        let (tree, node_count) = builder
+            .build_all_matches(|values| {
+                let offset = u32::try_from(encoded_sets.len()).unwrap();
+                encoded_sets.push(values.to_vec());
+                Ok(offset)
+            })
+            .unwrap();
+
+        let v6_bits = bits_to_u128(ipv6_to_bits("2001:db8::1".parse().unwrap()));
+        let v4_bits = u128::from(ipv4_to_bits(Ipv4Addr::new(192, 0, 2, 7)));
+        let v6_offset = lookup_24bit(&tree, node_count, v6_bits, 128).unwrap();
+        let v4_offset = lookup_24bit(&tree, node_count, v4_bits, 128).unwrap();
+
+        assert_eq!(encoded_sets[v6_offset as usize], [1, 2]);
+        assert_eq!(encoded_sets[v4_offset as usize], [1, 3]);
+    }
+
+    #[test]
     fn test_insert_multiple_ipv4() {
         use std::net::Ipv4Addr;
 
@@ -937,6 +1283,13 @@ mod tests {
 
         // Try to insert with prefix > 32 for IPv4
         let result = builder.insert(addr, 33, 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_ipv4_prefix_in_ipv6_tree_is_rejected() {
+        let mut builder = IpTreeBuilder::new_v6(RecordSize::Bits24);
+        let result = builder.insert(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), u8::MAX, 100);
         assert!(result.is_err());
     }
 
