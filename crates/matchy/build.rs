@@ -3,6 +3,9 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=MATCHY_SKIP_CBINDGEN");
+    if env::var_os("CARGO_FEATURE_C_API").is_none() {
+        return;
+    }
     generate_c_header();
 }
 
