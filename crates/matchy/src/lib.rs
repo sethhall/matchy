@@ -141,7 +141,7 @@ pub mod validation;
 pub mod updater;
 
 // Public C API (native platforms only - FFI not available on WASM)
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "c-api"))]
 pub mod c_api;
 
 // Re-exports for Rust consumers
