@@ -5,6 +5,8 @@ use std::mem;
 
 use crate::{ACAutomaton, ACAutomatonView, ACError, ACMatch, ACMatchState, MatchMode};
 
+mod image;
+
 const NO_EXACT_CHECK: u32 = u32::MAX;
 const MULTI_VARIANT_TAG: u32 = u32::MAX;
 
@@ -136,8 +138,9 @@ enum ACCaseAutomatonKind {
 /// resource limit that two per-mode automata avoid, construction falls back to
 /// two exact streaming cursors without weakening matching semantics.
 ///
-/// This type does not change or extend the serialized [`ACAutomaton`] format.
-/// Its sidecars are ordinary owned Rust data.
+/// Owned instances keep construction-friendly Rust sidecars. Use
+/// [`Self::to_image`] and [`ACCaseAutomatonView::from_image`] for a versioned,
+/// mmap-safe representation whose immutable sidecars remain in the image.
 pub struct ACCaseAutomaton {
     kind: ACCaseAutomatonKind,
     pattern_count: usize,
@@ -177,31 +180,215 @@ impl ACCaseMatchState {
 }
 
 enum ACCaseAutomatonViewKind<'a> {
-    Uniform(ACAutomatonView<'a>),
+    Uniform(ExactAutomatonView<'a>),
     Split {
-        sensitive: ACAutomatonView<'a>,
-        sensitive_ids: &'a [u32],
-        insensitive: ACAutomatonView<'a>,
-        insensitive_ids: &'a [u32],
+        sensitive: ExactAutomatonView<'a>,
+        sensitive_ids: U32Values<'a>,
+        insensitive: ExactAutomatonView<'a>,
+        insensitive_ids: U32Values<'a>,
     },
     Mixed {
-        folded: ACAutomatonView<'a>,
+        folded: ExactAutomatonView<'a>,
         dispatch: MixedDispatchView<'a>,
         exact_bytes: &'a [u8],
     },
 }
 
+enum ExactAutomatonView<'a> {
+    Native(ACAutomatonView<'a>),
+    Wire {
+        matcher: ACAutomatonView<'a>,
+        pattern_lengths: U32Values<'a>,
+    },
+}
+
+impl<'a> ExactAutomatonView<'a> {
+    fn from_owned(matcher: &'a ACAutomaton) -> Result<Self, ACError> {
+        Ok(Self::Native(matcher.view()?))
+    }
+
+    fn from_wire(
+        buffer: &'a [u8],
+        node_count: usize,
+        pattern_count: u32,
+        mode: MatchMode,
+        pattern_lengths: U32Values<'a>,
+    ) -> Result<Self, ACError> {
+        if pattern_lengths.len() != usize::try_from(pattern_count).unwrap_or(usize::MAX)
+            || pattern_lengths.iter().any(|length| length == 0)
+        {
+            return Err(ACError::InvalidInput(
+                "Case image pattern lengths are inconsistent".to_string(),
+            ));
+        }
+        Ok(Self::Wire {
+            matcher: ACAutomatonView::new(buffer, node_count, pattern_count, mode)?,
+            pattern_lengths,
+        })
+    }
+
+    fn advance(
+        &self,
+        state: &mut ACMatchState,
+        input: &[u8],
+        mut visit: impl FnMut(ACMatch),
+    ) -> Result<(), ACError> {
+        match self {
+            Self::Native(matcher) => matcher.advance(state, input, visit),
+            Self::Wire {
+                matcher,
+                pattern_lengths,
+            } => {
+                matcher.advance_outputs_validated(state, input, |output| {
+                    if let Some(length) = pattern_lengths.get(output.pattern_id) {
+                        visit(ACMatch {
+                            pattern_id: output.pattern_id,
+                            start: output.end.saturating_sub(u64::from(length)),
+                            end: output.end,
+                        });
+                    }
+                });
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum U32Values<'a> {
+    Native(&'a [u32]),
+    Wire(&'a [u8]),
+}
+
+impl<'a> U32Values<'a> {
+    fn wire(bytes: &[u8]) -> Result<U32Values<'_>, ACError> {
+        if bytes.len() % mem::size_of::<u32>() != 0 {
+            return Err(ACError::InvalidInput(
+                "Case image u32 table has a partial record".to_string(),
+            ));
+        }
+        Ok(U32Values::Wire(bytes))
+    }
+
+    fn len(self) -> usize {
+        match self {
+            Self::Native(values) => values.len(),
+            Self::Wire(bytes) => bytes.len() / mem::size_of::<u32>(),
+        }
+    }
+
+    fn get(self, index: u32) -> Option<u32> {
+        let index = usize::try_from(index).ok()?;
+        match self {
+            Self::Native(values) => values.get(index).copied(),
+            Self::Wire(bytes) => read_wire_u32(bytes, index),
+        }
+    }
+
+    fn iter(self) -> impl Iterator<Item = u32> + 'a {
+        (0..self.len()).filter_map(move |index| self.get(u32::try_from(index).ok()?))
+    }
+}
+
+fn read_wire_u32(bytes: &[u8], index: usize) -> Option<u32> {
+    let start = index.checked_mul(mem::size_of::<u32>())?;
+    let encoded: [u8; 4] = bytes.get(start..start.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_le_bytes(encoded))
+}
+
 #[derive(Clone, Copy)]
 enum MixedDispatchView<'a> {
     Flat {
-        paths: &'a [VariantRange],
-        variants: &'a [CaseVariant],
+        paths: VariantRanges<'a>,
+        variants: CaseVariants<'a>,
     },
     SingletonOptimized {
-        paths: &'a [FoldedPathDispatch],
-        variant_ranges: &'a [VariantRange],
-        multi_variants: &'a [CaseVariant],
+        paths: FoldedPathDispatches<'a>,
+        variant_ranges: VariantRanges<'a>,
+        multi_variants: CaseVariants<'a>,
     },
+}
+
+#[derive(Clone, Copy)]
+enum VariantRanges<'a> {
+    Native(&'a [VariantRange]),
+    Wire(&'a [u8]),
+}
+
+impl VariantRanges<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Native(values) => values.len(),
+            Self::Wire(bytes) => bytes.len() / 8,
+        }
+    }
+
+    fn get(self, index: u32) -> Option<VariantRange> {
+        let index = usize::try_from(index).ok()?;
+        match self {
+            Self::Native(values) => values.get(index).copied(),
+            Self::Wire(bytes) => Some(VariantRange {
+                start: read_wire_u32(bytes, index.checked_mul(2)?)?,
+                count: read_wire_u32(bytes, index.checked_mul(2)?.checked_add(1)?)?,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CaseVariants<'a> {
+    Native(&'a [CaseVariant]),
+    Wire(&'a [u8]),
+}
+
+impl<'a> CaseVariants<'a> {
+    fn len(self) -> usize {
+        match self {
+            Self::Native(values) => values.len(),
+            Self::Wire(bytes) => bytes.len() / 8,
+        }
+    }
+
+    fn get(self, index: usize) -> Option<CaseVariant> {
+        match self {
+            Self::Native(values) => values.get(index).copied(),
+            Self::Wire(bytes) => Some(CaseVariant {
+                pattern_id: read_wire_u32(bytes, index.checked_mul(2)?)?,
+                exact_offset: read_wire_u32(bytes, index.checked_mul(2)?.checked_add(1)?)?,
+            }),
+        }
+    }
+
+    fn range(self, start: usize, count: usize) -> impl Iterator<Item = CaseVariant> + 'a {
+        let end = start.saturating_add(count).min(self.len());
+        (start..end).filter_map(move |index| self.get(index))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FoldedPathDispatches<'a> {
+    Native(&'a [FoldedPathDispatch]),
+    Wire(&'a [u8]),
+}
+
+impl FoldedPathDispatches<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Native(values) => values.len(),
+            Self::Wire(bytes) => bytes.len() / 8,
+        }
+    }
+
+    fn get(self, index: u32) -> Option<FoldedPathDispatch> {
+        let index = usize::try_from(index).ok()?;
+        match self {
+            Self::Native(values) => values.get(index).copied(),
+            Self::Wire(bytes) => Some(FoldedPathDispatch {
+                pattern_id_or_tag: read_wire_u32(bytes, index.checked_mul(2)?)?,
+                exact_offset_or_range: read_wire_u32(bytes, index.checked_mul(2)?.checked_add(1)?)?,
+            }),
+        }
+    }
 }
 
 /// Borrowed query view over an [`ACCaseAutomaton`].
@@ -423,7 +610,7 @@ impl ACCaseAutomaton {
     pub fn view(&self) -> Result<ACCaseAutomatonView<'_>, ACError> {
         let kind = match &self.kind {
             ACCaseAutomatonKind::Uniform(matcher) => {
-                ACCaseAutomatonViewKind::Uniform(matcher.view()?)
+                ACCaseAutomatonViewKind::Uniform(ExactAutomatonView::from_owned(matcher)?)
             }
             ACCaseAutomatonKind::Split {
                 sensitive,
@@ -431,29 +618,30 @@ impl ACCaseAutomaton {
                 insensitive,
                 insensitive_ids,
             } => ACCaseAutomatonViewKind::Split {
-                sensitive: sensitive.view()?,
-                sensitive_ids,
-                insensitive: insensitive.view()?,
-                insensitive_ids,
+                sensitive: ExactAutomatonView::from_owned(sensitive)?,
+                sensitive_ids: U32Values::Native(sensitive_ids),
+                insensitive: ExactAutomatonView::from_owned(insensitive)?,
+                insensitive_ids: U32Values::Native(insensitive_ids),
             },
             ACCaseAutomatonKind::Mixed {
                 folded,
                 dispatch,
                 exact_bytes,
             } => ACCaseAutomatonViewKind::Mixed {
-                folded: folded.view()?,
+                folded: ExactAutomatonView::from_owned(folded)?,
                 dispatch: match dispatch {
-                    MixedDispatch::Flat { paths, variants } => {
-                        MixedDispatchView::Flat { paths, variants }
-                    }
+                    MixedDispatch::Flat { paths, variants } => MixedDispatchView::Flat {
+                        paths: VariantRanges::Native(paths),
+                        variants: CaseVariants::Native(variants),
+                    },
                     MixedDispatch::SingletonOptimized {
                         paths,
                         variant_ranges,
                         multi_variants,
                     } => MixedDispatchView::SingletonOptimized {
-                        paths,
-                        variant_ranges,
-                        multi_variants,
+                        paths: FoldedPathDispatches::Native(paths),
+                        variant_ranges: VariantRanges::Native(variant_ranges),
+                        multi_variants: CaseVariants::Native(multi_variants),
                     },
                 },
                 exact_bytes,
@@ -682,11 +870,7 @@ impl<'a> ACCaseAutomatonView<'a> {
                 },
             ) => {
                 sensitive.advance(sensitive_state, input, |mut matched| {
-                    let Some(pattern_id) = usize::try_from(matched.pattern_id)
-                        .ok()
-                        .and_then(|pattern| sensitive_ids.get(pattern))
-                        .copied()
-                    else {
+                    let Some(pattern_id) = sensitive_ids.get(matched.pattern_id) else {
                         return;
                     };
                     matched.pattern_id = pattern_id;
@@ -695,11 +879,7 @@ impl<'a> ACCaseAutomatonView<'a> {
                     }
                 })?;
                 insensitive.advance(insensitive_state, input, |mut matched| {
-                    let Some(pattern_id) = usize::try_from(matched.pattern_id)
-                        .ok()
-                        .and_then(|pattern| insensitive_ids.get(pattern))
-                        .copied()
-                    else {
+                    let Some(pattern_id) = insensitive_ids.get(matched.pattern_id) else {
                         return;
                     };
                     matched.pattern_id = pattern_id;
@@ -732,10 +912,7 @@ impl<'a> ACCaseAutomatonView<'a> {
                 };
                 folded.advance(state, input, |matched| match dispatch {
                     MixedDispatchView::Flat { paths, variants } => {
-                        let Some(path) = usize::try_from(matched.pattern_id)
-                            .ok()
-                            .and_then(|pattern| paths.get(pattern))
-                        else {
+                        let Some(path) = paths.get(matched.pattern_id) else {
                             return;
                         };
                         let Some(start) = usize::try_from(path.start).ok() else {
@@ -749,10 +926,7 @@ impl<'a> ACCaseAutomatonView<'a> {
                         else {
                             return;
                         };
-                        for variant in variants
-                            .get(start..start.saturating_add(count))
-                            .unwrap_or_default()
-                        {
+                        for variant in variants.range(start, count) {
                             if !enabled(variant.pattern_id) {
                                 continue;
                             }
@@ -782,11 +956,7 @@ impl<'a> ACCaseAutomatonView<'a> {
                         variant_ranges,
                         multi_variants,
                     } => {
-                        let Some(path) = usize::try_from(matched.pattern_id)
-                            .ok()
-                            .and_then(|pattern| paths.get(pattern))
-                            .copied()
-                        else {
+                        let Some(path) = paths.get(matched.pattern_id) else {
                             return;
                         };
                         let Some(length) =
@@ -820,10 +990,7 @@ impl<'a> ACCaseAutomatonView<'a> {
                             return;
                         }
 
-                        let Some(range) = usize::try_from(path.exact_offset_or_range)
-                            .ok()
-                            .and_then(|index| variant_ranges.get(index))
-                        else {
+                        let Some(range) = variant_ranges.get(path.exact_offset_or_range) else {
                             return;
                         };
                         let Some(start) = usize::try_from(range.start).ok() else {
@@ -832,10 +999,7 @@ impl<'a> ACCaseAutomatonView<'a> {
                         let Some(count) = usize::try_from(range.count).ok() else {
                             return;
                         };
-                        for variant in multi_variants
-                            .get(start..start.saturating_add(count))
-                            .unwrap_or_default()
-                        {
+                        for variant in multi_variants.range(start, count) {
                             if !enabled(variant.pattern_id) {
                                 continue;
                             }

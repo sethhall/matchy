@@ -194,6 +194,15 @@ field order and padding for serialized extension structs. Fixed-width fields,
 explicit format versions, and checked decoding are still required for binary
 compatibility; `#[repr(C)]` alone is not a cross-platform wire-format guarantee.
 
+`matchy-ac` also exposes a standalone case-automaton image. Version 1 uses a
+160-byte `MACCASE\0` header followed by densely packed, four-byte-aligned AC
+buffers, little-endian `u32` pattern-length and pattern-ID tables, and the
+sidecars needed for mixed per-pattern case semantics. All offsets are relative
+to the beginning of the image. `ACCaseAutomatonView::from_image` verifies the
+complete envelope, embedded AC topology, sidecar topology, IDs, lengths, and
+exact-case byte ranges before returning a zero-copy borrowed view. Streaming
+cursors remain process-local and are never serialized.
+
 ## Performance Characteristics
 
 Performance varies significantly based on query type, database size, and glob pattern complexity. General behaviors:

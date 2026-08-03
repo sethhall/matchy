@@ -504,6 +504,28 @@ impl<'a> ACAutomatonView<'a> {
         pattern_lengths: &[usize],
         mut visit: impl FnMut(ACMatch),
     ) {
+        self.advance_outputs_validated(state, input, |output| {
+            let length = pattern_lengths
+                [usize::try_from(output.pattern_id).expect("validated u32 ID fits usize")];
+            let Ok(length) = u64::try_from(length) else {
+                return;
+            };
+            visit(ACMatch {
+                pattern_id: output.pattern_id,
+                start: output.end.saturating_sub(length),
+                end: output.end,
+            });
+        });
+    }
+
+    /// Advance an eagerly validated automaton and report raw outputs without
+    /// requiring a native-width pattern-length sidecar.
+    pub(crate) fn advance_outputs_validated(
+        &self,
+        state: &mut ACMatchState,
+        input: &[u8],
+        mut visit: impl FnMut(ACOutput),
+    ) {
         let node_size = mem::size_of::<ACNodeHot>();
         if state.current_offset >= self.nodes.len() || state.current_offset % node_size != 0 {
             state.current_offset = 0;
@@ -580,14 +602,8 @@ impl<'a> ACAutomatonView<'a> {
             for output_index in 0..usize::from(node.pattern_count) {
                 let pattern_id =
                     self.read_u32_validated(patterns_offset + output_index * mem::size_of::<u32>());
-                let length = pattern_lengths
-                    [usize::try_from(pattern_id).expect("validated u32 ID fits usize")];
-                let Ok(length) = u64::try_from(length) else {
-                    continue;
-                };
-                visit(ACMatch {
+                visit(ACOutput {
                     pattern_id,
-                    start: state.position.saturating_sub(length),
                     end: state.position,
                 });
             }
