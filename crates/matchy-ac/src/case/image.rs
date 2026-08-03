@@ -434,6 +434,7 @@ fn copy_region(image: &mut [u8], region: Region, values: &[u8]) -> Result<(), AC
 
 struct DecodedAutomaton<'a> {
     matcher: ExactAutomatonView<'a>,
+    node_count: u32,
     pattern_count: u32,
     mode: MatchMode,
     pattern_lengths: U32Values<'a>,
@@ -504,6 +505,9 @@ impl<'a> Decoder<'a> {
             }
             None
         };
+        let node_count = first
+            .node_count
+            .saturating_add(second.as_ref().map_or(0, |automaton| automaton.node_count));
 
         let sensitive_ids = self.decode_values(SENSITIVE_IDS_REGION)?;
         let insensitive_ids = self.decode_values(INSENSITIVE_IDS_REGION)?;
@@ -617,6 +621,7 @@ impl<'a> Decoder<'a> {
         Ok(ACCaseAutomatonView {
             kind,
             pattern_count: usize::try_from(self.pattern_count).unwrap_or(usize::MAX),
+            node_count: usize::try_from(node_count).unwrap_or(usize::MAX),
             required_lookbehind: usize::try_from(self.required_lookbehind).unwrap_or(usize::MAX),
         })
     }
@@ -652,6 +657,7 @@ impl<'a> Decoder<'a> {
         )?;
         Ok(DecodedAutomaton {
             matcher,
+            node_count,
             pattern_count,
             mode,
             pattern_lengths,
@@ -1114,6 +1120,7 @@ mod tests {
             unaligned.extend_from_slice(&image);
             let view = ACCaseAutomatonView::from_image(&unaligned[1..]).unwrap();
             assert_eq!(view.pattern_count(), matcher.pattern_count());
+            assert_eq!(view.node_count(), matcher.node_count());
             assert_eq!(view.scan_count(), matcher.scan_count());
             assert_eq!(view.required_lookbehind(), matcher.required_lookbehind());
             for chunk_size in 1..=input.len() {

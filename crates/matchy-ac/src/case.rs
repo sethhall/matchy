@@ -395,6 +395,7 @@ impl FoldedPathDispatches<'_> {
 pub struct ACCaseAutomatonView<'a> {
     kind: ACCaseAutomatonViewKind<'a>,
     pattern_count: usize,
+    node_count: usize,
     required_lookbehind: usize,
 }
 
@@ -650,6 +651,7 @@ impl ACCaseAutomaton {
         Ok(ACCaseAutomatonView {
             kind,
             pattern_count: self.pattern_count,
+            node_count: self.node_count(),
             required_lookbehind: self.required_lookbehind,
         })
     }
@@ -1036,6 +1038,12 @@ impl<'a> ACCaseAutomatonView<'a> {
     #[must_use]
     pub const fn pattern_count(&self) -> usize {
         self.pattern_count
+    }
+
+    /// Total nodes across the physical AC automata in this view.
+    #[must_use]
+    pub const fn node_count(&self) -> usize {
+        self.node_count
     }
 
     /// Raw suffix bytes required for exact cross-chunk sensitive matches.
