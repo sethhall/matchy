@@ -628,7 +628,14 @@ fn validate_literal_hash_section(buffer: &[u8], offset: usize, report: &mut Vali
             return;
         }
     };
-    let Some(bounded_buffer) = buffer.get(..metadata_offset) else {
+    let sections = match crate::Database::locate_embedded_sections(buffer, metadata_offset) {
+        Ok(sections) => sections,
+        Err(error) => {
+            report.error(format!("Cannot locate embedded sections: {error}"));
+            return;
+        }
+    };
+    let Some(bounded_buffer) = buffer.get(..sections.literal_data_end()) else {
         report.error("Literal section metadata boundary is invalid");
         return;
     };
@@ -1477,8 +1484,9 @@ fn get_literal_data_offsets(
     let metadata_offset = crate::mmdb::find_metadata_marker(buffer).map_err(|error| {
         format!("Could not bound literal mappings before MMDB metadata: {error}")
     })?;
+    let sections = crate::Database::locate_embedded_sections(buffer, metadata_offset)?;
     let literal_data = buffer
-        .get(literal_offset..metadata_offset)
+        .get(literal_offset..sections.literal_data_end())
         .ok_or_else(|| "Literal section range is invalid".to_string())?;
     let literal_hash = matchy_literal_hash::LiteralHash::from_buffer(
         literal_data,

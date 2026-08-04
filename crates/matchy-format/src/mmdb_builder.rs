@@ -16,6 +16,18 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 
+const MAX_EMBEDDED_SECTION_ALIGNMENT: usize = 64 * 1024;
+const PATTERN_SECTION_MARKER: &[u8; 16] = b"MMDB_PATTERN\x00\x00\x00\x00";
+const LITERAL_SECTION_MARKER: &[u8; 16] = b"MMDB_LITERAL\x00\x00\x00\x00";
+
+#[derive(Debug, Clone)]
+struct EmbeddedSection {
+    name: String,
+    format: String,
+    alignment: usize,
+    bytes: Vec<u8>,
+}
+
 /// Entry type classification
 #[derive(Debug, Clone)]
 pub enum EntryType {
@@ -49,6 +61,7 @@ pub struct DatabaseBuilder {
     description: HashMap<String, String>,
     validator: Option<Box<dyn EntryValidator>>,
     update_url: Option<String>,
+    embedded_sections: Vec<EmbeddedSection>,
 }
 
 impl DatabaseBuilder {
@@ -63,7 +76,59 @@ impl DatabaseBuilder {
             description: HashMap::new(),
             validator: None,
             update_url: None,
+            embedded_sections: Vec::new(),
         }
+    }
+
+    /// Add an opaque, independently versioned section to the database image.
+    ///
+    /// The section is placed before the trailing MMDB metadata and padded so
+    /// its database-relative offset satisfies `alignment`. The metadata records
+    /// its name, format, offset, length, and alignment for validated zero-copy
+    /// access when the database is memory mapped.
+    pub fn add_embedded_section(
+        &mut self,
+        name: impl Into<String>,
+        format: impl Into<String>,
+        alignment: usize,
+        bytes: impl Into<Vec<u8>>,
+    ) -> Result<(), FormatError> {
+        let name = name.into();
+        let format = format.into();
+        if name.is_empty() {
+            return Err(FormatError::Other(
+                "Embedded section name cannot be empty".to_string(),
+            ));
+        }
+        if format.is_empty() {
+            return Err(FormatError::Other(format!(
+                "Embedded section {name:?} format cannot be empty"
+            )));
+        }
+        if alignment == 0
+            || !alignment.is_power_of_two()
+            || alignment > MAX_EMBEDDED_SECTION_ALIGNMENT
+        {
+            return Err(FormatError::Other(format!(
+                "Embedded section {name:?} alignment must be a power of two no greater than {MAX_EMBEDDED_SECTION_ALIGNMENT}"
+            )));
+        }
+        if self
+            .embedded_sections
+            .iter()
+            .any(|section| section.name == name)
+        {
+            return Err(FormatError::Other(format!(
+                "Embedded section name {name:?} is already present"
+            )));
+        }
+        self.embedded_sections.push(EmbeddedSection {
+            name,
+            format,
+            alignment,
+            bytes: bytes.into(),
+        });
+        Ok(())
     }
 
     /// Set a custom database type name
@@ -587,13 +652,66 @@ impl DatabaseBuilder {
         // Data section
         database.extend_from_slice(&data_section);
 
-        // Add padding to ensure paraglob section (if present) starts at 4-byte aligned offset
-        // ParaglobHeader requires 4-byte alignment for zerocopy
-        if has_globs {
-            let current_offset = database.len() + 16; // +16 for "MMDB_PATTERN" separator
-            let padding_needed = (4 - (current_offset % 4)) % 4;
-            database.extend(std::iter::repeat_n(0u8, padding_needed));
+        // Opaque sections precede the legacy pattern and literal appendages.
+        // Existing readers treat these bytes as unreferenced MMDB data-section
+        // slack, while retaining their historical pattern/literal boundaries.
+        let mut embedded_directory = HashMap::with_capacity(self.embedded_sections.len());
+        for section in &self.embedded_sections {
+            let padding =
+                (section.alignment - (database.len() % section.alignment)) % section.alignment;
+            let offset = database
+                .len()
+                .checked_add(padding)
+                .ok_or_else(|| FormatError::Other("Database size overflow".to_string()))?;
+            database.resize(offset, 0);
+            database.extend_from_slice(&section.bytes);
+
+            let mut descriptor = HashMap::new();
+            descriptor.insert(
+                "format".to_string(),
+                DataValue::String(section.format.clone()),
+            );
+            descriptor.insert(
+                "offset".to_string(),
+                DataValue::Uint64(u64::try_from(offset).map_err(|_| {
+                    FormatError::Other("Embedded section offset exceeds u64::MAX".to_string())
+                })?),
+            );
+            descriptor.insert(
+                "length".to_string(),
+                DataValue::Uint64(u64::try_from(section.bytes.len()).map_err(|_| {
+                    FormatError::Other("Embedded section length exceeds u64::MAX".to_string())
+                })?),
+            );
+            descriptor.insert(
+                "alignment".to_string(),
+                DataValue::Uint32(u32::try_from(section.alignment).map_err(|_| {
+                    FormatError::Other("Embedded section alignment exceeds u32::MAX".to_string())
+                })?),
+            );
+            embedded_directory.insert(section.name.clone(), DataValue::Map(descriptor));
         }
+
+        // Keep the legacy pattern data 4-byte aligned after any opaque sections.
+        let pattern_offset = if has_globs {
+            let padding = (4 - ((database.len() + PATTERN_SECTION_MARKER.len()) % 4)) % 4;
+            database.extend(std::iter::repeat_n(0u8, padding));
+            database.extend_from_slice(PATTERN_SECTION_MARKER);
+            let offset = database.len();
+            database.extend_from_slice(&glob_section_bytes);
+            offset
+        } else {
+            0
+        };
+
+        let literal_offset = if has_literals {
+            database.extend_from_slice(LITERAL_SECTION_MARKER);
+            let offset = database.len();
+            database.extend_from_slice(&literal_section_bytes);
+            offset
+        } else {
+            0
+        };
 
         // Add MMDB metadata section (always present)
         {
@@ -706,27 +824,7 @@ impl DatabaseBuilder {
                 metadata.insert("update_url".to_string(), DataValue::String(url.clone()));
             }
 
-            // ALWAYS write section offset fields for fast loading (0 = not present)
-            // This eliminates the need to scan the entire file for separators
-            let tree_and_separator_size = ip_tree_bytes.len() + 16;
-            let data_section_size = data_section.len();
-
-            // Calculate padding before paraglob section for 4-byte alignment
-            let padding_before_paraglob = if has_globs {
-                let current_offset = tree_and_separator_size + data_section_size + 16; // +16 for separator
-                (4 - (current_offset % 4)) % 4
-            } else {
-                0
-            };
-
-            // Pattern section offset (after tree + separator + data section + padding)
-            // 0 means no pattern section present
-            let pattern_offset = if has_globs {
-                tree_and_separator_size + data_section_size + padding_before_paraglob + 16
-            // +16 for "MMDB_PATTERN" separator
-            } else {
-                0 // No pattern section
-            };
+            // ALWAYS write section offset fields for fast loading (0 = not present).
             metadata.insert(
                 "pattern_section_offset".to_string(),
                 DataValue::Uint32(
@@ -734,22 +832,6 @@ impl DatabaseBuilder {
                 ),
             );
 
-            // Literal section offset (after pattern section if present)
-            // 0 means no literal section present
-            let literal_offset = if has_literals {
-                if has_globs {
-                    tree_and_separator_size
-                        + data_section_size
-                        + padding_before_paraglob
-                        + 16
-                        + glob_section_bytes.len()
-                        + 16
-                } else {
-                    tree_and_separator_size + data_section_size + 16 // +16 for "MMDB_LITERAL" separator
-                }
-            } else {
-                0 // No literal section
-            };
             metadata.insert(
                 "literal_section_offset".to_string(),
                 DataValue::Uint32(
@@ -757,26 +839,22 @@ impl DatabaseBuilder {
                 ),
             );
 
+            if !embedded_directory.is_empty() {
+                metadata.insert(
+                    "embedded_section_directory_version".to_string(),
+                    DataValue::Uint16(1),
+                );
+                metadata.insert(
+                    "embedded_sections".to_string(),
+                    DataValue::Map(embedded_directory),
+                );
+            }
+
             // Encode metadata
             let mut meta_encoder = DataEncoder::new();
             let metadata_value = DataValue::Map(metadata);
             meta_encoder.encode(&metadata_value);
             let metadata_bytes = meta_encoder.into_bytes();
-
-            // Save metadata for end of file (will be added after pattern section)
-            // This ensures it's in the last 128KB for the metadata marker search
-
-            // Add MMDB_PATTERN separator before globs (if any)
-            if has_globs {
-                database.extend_from_slice(b"MMDB_PATTERN\x00\x00\x00\x00");
-                database.extend_from_slice(&glob_section_bytes);
-            }
-
-            // Add MMDB_LITERAL separator before literals (if any)
-            if has_literals {
-                database.extend_from_slice(b"MMDB_LITERAL\x00\x00\x00\x00");
-                database.extend_from_slice(&literal_section_bytes);
-            }
 
             // Add metadata at the END of the file so it's within the 128KB search window
             database.extend_from_slice(b"\xAB\xCD\xEFMaxMind.com");

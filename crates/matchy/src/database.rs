@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use std::hash::BuildHasherDefault;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
+use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -687,6 +688,7 @@ const LITERAL_SECTION_MARKER: &[u8; 16] = b"MMDB_LITERAL\x00\x00\x00\x00";
 pub(crate) struct EmbeddedSections {
     pattern_data_offset: Option<usize>,
     literal_marker_offset: Option<usize>,
+    opaque_data_offset: Option<usize>,
     metadata_offset: usize,
 }
 
@@ -695,6 +697,7 @@ impl EmbeddedSections {
         Self {
             pattern_data_offset: None,
             literal_marker_offset: None,
+            opaque_data_offset: None,
             metadata_offset: file_len,
         }
     }
@@ -707,6 +710,7 @@ impl EmbeddedSections {
             Some(self.metadata_offset),
             pattern_marker_offset,
             self.literal_marker_offset,
+            self.opaque_data_offset,
         ]
         .into_iter()
         .flatten()
@@ -722,6 +726,10 @@ impl EmbeddedSections {
             .and_then(|offset| offset.checked_add(LITERAL_SECTION_MARKER.len()))
     }
 
+    pub(crate) fn literal_data_end(self) -> usize {
+        self.metadata_offset
+    }
+
     fn validate_after_mmdb_separator(self, data_section_start: usize) -> Result<(), String> {
         let pattern_marker_offset = match self.pattern_data_offset {
             Some(offset) => Some(
@@ -735,6 +743,7 @@ impl EmbeddedSections {
         for (section_name, marker_offset) in [
             ("Pattern", pattern_marker_offset),
             ("Literal", self.literal_marker_offset),
+            ("Opaque", self.opaque_data_offset),
         ] {
             if let Some(marker_offset) = marker_offset {
                 if marker_offset < data_section_start {
@@ -787,6 +796,95 @@ impl DatabaseStorage {
             #[cfg(not(target_family = "wasm"))]
             Self::Mmap(m) => &m[..],
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddedSectionLocation {
+    name: String,
+    format: String,
+    range: Range<usize>,
+    alignment: usize,
+}
+
+/// An owned view of an opaque section embedded in a Matchy database.
+///
+/// Cloning this handle is inexpensive. It keeps the complete database storage
+/// alive, so the returned byte address remains stable even after the originating
+/// [`Database`] is dropped or a live database swaps to a newer generation.
+#[derive(Clone)]
+pub struct DatabaseSection {
+    storage: Arc<DatabaseStorage>,
+    location: EmbeddedSectionLocation,
+}
+
+impl DatabaseSection {
+    /// Return the logical section name recorded in database metadata.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.location.name
+    }
+
+    /// Return the independently versioned format identifier for this section.
+    #[must_use]
+    pub fn format(&self) -> &str {
+        &self.location.format
+    }
+
+    /// Return the section's database-relative byte offset.
+    #[must_use]
+    pub fn offset(&self) -> usize {
+        self.location.range.start
+    }
+
+    /// Return the section's declared database-relative alignment.
+    ///
+    /// This is also the in-memory address alignment for a file-backed mapping,
+    /// whose base address is page-aligned. Owned byte buffers only guarantee
+    /// the relative layout and should be consumed through byte-safe readers.
+    #[must_use]
+    pub fn alignment(&self) -> usize {
+        self.location.alignment
+    }
+
+    /// Whether this section is retained in a file-backed memory map.
+    #[must_use]
+    pub fn is_memory_mapped(&self) -> bool {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            matches!(self.storage.as_ref(), DatabaseStorage::Mmap(_))
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            false
+        }
+    }
+
+    /// Return the validated section bytes without copying them.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.storage.as_slice()[self.location.range.clone()]
+    }
+}
+
+impl Deref for DatabaseSection {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_bytes()
+    }
+}
+
+impl std::fmt::Debug for DatabaseSection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DatabaseSection")
+            .field("name", &self.name())
+            .field("format", &self.format())
+            .field("offset", &self.offset())
+            .field("length", &self.len())
+            .field("alignment", &self.alignment())
+            .finish()
     }
 }
 
@@ -1043,7 +1141,7 @@ impl DatabaseOpener {
 /// Unified database for IP and pattern lookups.
 /// Supports optional live-reloading when opened with `.watch()` or `.auto_update()`.
 pub struct Database {
-    data: DatabaseStorage,
+    data: Arc<DatabaseStorage>,
     format: DatabaseFormat,
     ip_header: Option<MmdbHeader>,
     /// Exclusive end of the MMDB data section, before extensions/metadata.
@@ -1051,6 +1149,7 @@ pub struct Database {
     literal_hash: Option<LiteralHash<'static>>,
     pattern_matcher: Option<Paraglob>,
     pattern_data_mappings: Option<PatternDataMappings>,
+    embedded_sections: Vec<EmbeddedSectionLocation>,
     cache_capacity: usize,
     cache_enabled: bool,
     stats: Arc<DatabaseStats>,
@@ -1362,13 +1461,14 @@ impl Database {
     fn with_live_state(live_state: LiveState) -> Self {
         let snapshot = live_state.current.load_full();
         Self {
-            data: DatabaseStorage::Owned(vec![]),
+            data: Arc::new(DatabaseStorage::Owned(vec![])),
             format: snapshot.format,
             ip_header: None,
             data_section_end: None,
             literal_hash: None,
             pattern_matcher: None,
             pattern_data_mappings: None,
+            embedded_sections: Vec::new(),
             cache_capacity: snapshot.cache_capacity,
             cache_enabled: snapshot.cache_enabled,
             stats: snapshot.stats.clone(),
@@ -1441,6 +1541,7 @@ impl Database {
     }
 
     fn from_storage(storage: DatabaseStorage) -> Result<Self, DatabaseError> {
+        let storage = Arc::new(storage);
         let mut db = Self {
             data: storage,
             format: DatabaseFormat::IpOnly,
@@ -1449,6 +1550,7 @@ impl Database {
             literal_hash: None,
             pattern_matcher: None,
             pattern_data_mappings: None,
+            embedded_sections: Vec::new(),
             cache_capacity: DEFAULT_QUERY_CACHE_SIZE,
             cache_enabled: true,
             stats: Arc::new(DatabaseStats::default()),
@@ -1482,6 +1584,10 @@ impl Database {
         let (format, sections) = Self::detect_format_and_sections(data)?;
         db.format = format;
         if db.format != DatabaseFormat::PatternOnly {
+            db.embedded_sections = Self::parse_opaque_sections(data, sections.metadata_offset)
+                .map_err(|error| DatabaseError::Format(MmdbError::InvalidFormat(error)))?;
+        }
+        if db.format != DatabaseFormat::PatternOnly {
             db.data_section_end = sections.data_section_end();
         }
 
@@ -1510,6 +1616,13 @@ impl Database {
                     let section_limit = sections
                         .literal_marker_offset
                         .filter(|literal_offset| *literal_offset >= offset)
+                        .into_iter()
+                        .chain(
+                            sections
+                                .opaque_data_offset
+                                .filter(|opaque| *opaque >= offset),
+                        )
+                        .min()
                         .unwrap_or(sections.metadata_offset);
                     let (pg, map) = Self::load_combined_pattern_section(
                         data,
@@ -1535,11 +1648,11 @@ impl Database {
                     )
                 })?;
             let literal_data = data
-                .get(literal_start..sections.metadata_offset)
+                .get(literal_start..sections.literal_data_end())
                 .ok_or_else(|| {
                     DatabaseError::Unsupported(format!(
                         "Literal section range [{literal_start}, {}) is invalid for file length {}",
-                        sections.metadata_offset,
+                        sections.literal_data_end(),
                         data.len()
                     ))
                 })?;
@@ -2330,6 +2443,43 @@ impl Database {
         self.pattern_matcher.is_some()
     }
 
+    /// Return the names of opaque sections embedded in this database image.
+    #[must_use]
+    pub fn embedded_section_names(&self) -> Vec<String> {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(live) = &self.live {
+            return Self::resolve_live_db(live).embedded_section_names();
+        }
+
+        self.embedded_sections
+            .iter()
+            .map(|section| section.name.clone())
+            .collect()
+    }
+
+    /// Open an opaque embedded section by its logical name without copying it.
+    ///
+    /// The returned handle owns the backing database storage and remains valid
+    /// independently of this [`Database`]. For a watched database, it refers to
+    /// the generation current when this method is called.
+    #[must_use]
+    pub fn embedded_section(&self, name: &str) -> Option<DatabaseSection> {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(live) = &self.live {
+            return Self::resolve_live_db(live).embedded_section(name);
+        }
+
+        let location = self
+            .embedded_sections
+            .iter()
+            .find(|section| section.name == name)?
+            .clone();
+        Some(DatabaseSection {
+            storage: self.data.clone(),
+            location,
+        })
+    }
+
     /// Check if database supports pattern lookups (deprecated, use has_literal_data or has_glob_data)
     #[deprecated(
         since = "0.5.0",
@@ -2471,6 +2621,102 @@ impl Database {
         }
     }
 
+    fn parse_opaque_sections(
+        data: &[u8],
+        metadata_offset: usize,
+    ) -> Result<Vec<EmbeddedSectionLocation>, String> {
+        let metadata = crate::mmdb::MmdbMetadata::from_file(data)
+            .map_err(|error| format!("Could not read embedded section metadata: {error}"))?
+            .as_value()
+            .map_err(|error| format!("Could not decode embedded section metadata: {error}"))?;
+        let DataValue::Map(metadata) = metadata else {
+            return Err("MMDB metadata is not a map".to_string());
+        };
+        let Some(directory) = metadata.get("embedded_sections") else {
+            return Ok(Vec::new());
+        };
+        let version = metadata
+            .get("embedded_section_directory_version")
+            .and_then(Self::extract_uint_from_datavalue)
+            .ok_or_else(|| "Embedded section directory has no numeric version".to_string())?;
+        if version != 1 {
+            return Err(format!(
+                "Unsupported embedded section directory version {version}"
+            ));
+        }
+        let DataValue::Map(directory) = directory else {
+            return Err("embedded_sections metadata is not a map".to_string());
+        };
+
+        let mut sections = Vec::with_capacity(directory.len());
+        for (name, descriptor) in directory {
+            if name.is_empty() {
+                return Err("Embedded section name cannot be empty".to_string());
+            }
+            let DataValue::Map(descriptor) = descriptor else {
+                return Err(format!("Embedded section {name:?} descriptor is not a map"));
+            };
+            let format = match descriptor.get("format") {
+                Some(DataValue::String(format)) if !format.is_empty() => format.clone(),
+                _ => {
+                    return Err(format!("Embedded section {name:?} has no non-empty format"));
+                }
+            };
+            let numeric = |field: &str| {
+                descriptor
+                    .get(field)
+                    .and_then(Self::extract_uint_from_datavalue)
+                    .ok_or_else(|| format!("Embedded section {name:?} has no numeric {field}"))
+            };
+            let offset = usize::try_from(numeric("offset")?)
+                .map_err(|_| format!("Embedded section {name:?} offset exceeds usize"))?;
+            let length = usize::try_from(numeric("length")?)
+                .map_err(|_| format!("Embedded section {name:?} length exceeds usize"))?;
+            let alignment = usize::try_from(numeric("alignment")?)
+                .map_err(|_| format!("Embedded section {name:?} alignment exceeds usize"))?;
+            if alignment == 0 || !alignment.is_power_of_two() || alignment > 64 * 1024 {
+                return Err(format!(
+                    "Embedded section {name:?} alignment must be a power of two no greater than 65536"
+                ));
+            }
+            if offset % alignment != 0 {
+                return Err(format!(
+                    "Embedded section {name:?} offset {offset} is not aligned to {alignment}"
+                ));
+            }
+            let end = offset
+                .checked_add(length)
+                .ok_or_else(|| format!("Embedded section {name:?} range overflows usize"))?;
+            if end > metadata_offset {
+                return Err(format!(
+                    "Embedded section {name:?} range [{offset}, {end}) crosses metadata at {metadata_offset}"
+                ));
+            }
+            sections.push(EmbeddedSectionLocation {
+                name: name.clone(),
+                format,
+                range: offset..end,
+                alignment,
+            });
+        }
+
+        sections.sort_unstable_by(|left, right| {
+            left.range
+                .start
+                .cmp(&right.range.start)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        for pair in sections.windows(2) {
+            if pair[0].range.end > pair[1].range.start {
+                return Err(format!(
+                    "Embedded sections {:?} and {:?} overlap",
+                    pair[0].name, pair[1].name
+                ));
+            }
+        }
+        Ok(sections)
+    }
+
     /// Locate embedded pattern and literal sections. Metadata offsets are the
     /// fast path, but each non-zero offset must point immediately after the
     /// corresponding marker and remain before MMDB metadata. Older databases
@@ -2567,9 +2813,14 @@ impl Database {
             }
         }
 
+        let opaque_data_offset = Self::parse_opaque_sections(data, metadata_offset)?
+            .first()
+            .map(|section| section.range.start);
+
         Ok(EmbeddedSections {
             pattern_data_offset,
             literal_marker_offset,
+            opaque_data_offset,
             metadata_offset,
         })
     }
@@ -2857,6 +3108,36 @@ mod tests {
         let mut encoder = DataEncoder::new();
         encoder.encode(&DataValue::Map(map));
         rewritten.extend_from_slice(METADATA_MARKER);
+        rewritten.extend_from_slice(&encoder.into_bytes());
+        rewritten
+    }
+
+    fn rewrite_opaque_section_field(
+        bytes: &[u8],
+        section_name: &str,
+        field: &str,
+        value: DataValue,
+    ) -> Vec<u8> {
+        let metadata = crate::mmdb::MmdbMetadata::from_file(bytes)
+            .unwrap()
+            .as_value()
+            .unwrap();
+        let DataValue::Map(mut metadata) = metadata else {
+            panic!("test database metadata must be a map");
+        };
+        let Some(DataValue::Map(directory)) = metadata.get_mut("embedded_sections") else {
+            panic!("test database lacks an embedded section directory");
+        };
+        let Some(DataValue::Map(descriptor)) = directory.get_mut(section_name) else {
+            panic!("test database lacks embedded section {section_name:?}");
+        };
+        descriptor.insert(field.to_string(), value);
+
+        let metadata_offset = crate::mmdb::find_metadata_marker(bytes).unwrap();
+        let mut rewritten = bytes[..metadata_offset].to_vec();
+        rewritten.extend_from_slice(METADATA_MARKER);
+        let mut encoder = DataEncoder::new();
+        encoder.encode(&DataValue::Map(metadata));
         rewritten.extend_from_slice(&encoder.into_bytes());
         rewritten
     }
@@ -3930,5 +4211,136 @@ mod tests {
         } else {
             panic!("Full lookup should also find 1.1.1.1");
         }
+    }
+
+    #[test]
+    fn embedded_sections_round_trip_without_copying() {
+        let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+        builder
+            .add_entry(
+                "indicator.example",
+                HashMap::from([("kind".to_string(), DataValue::String("ioc".to_string()))]),
+            )
+            .unwrap();
+        builder
+            .add_entry(
+                "*.evil.example",
+                HashMap::from([("kind".to_string(), DataValue::String("glob".to_string()))]),
+            )
+            .unwrap();
+        builder
+            .add_embedded_section(
+                "network-program",
+                "matchy-detection-network/v1",
+                64,
+                b"compiled rules".to_vec(),
+            )
+            .unwrap();
+        builder
+            .add_embedded_section(
+                "ioc-dataset",
+                "matchy-ioc/v1",
+                4096,
+                b"co-located indicators".to_vec(),
+            )
+            .unwrap();
+        let bytes = builder.build().unwrap();
+
+        let metadata = crate::mmdb::MmdbMetadata::from_file(&bytes)
+            .unwrap()
+            .as_value()
+            .unwrap();
+        let DataValue::Map(metadata) = metadata else {
+            panic!("metadata must be a map");
+        };
+        let Some(DataValue::Map(directory)) = metadata.get("embedded_sections") else {
+            panic!("metadata must contain the embedded section directory");
+        };
+        for (name, expected_alignment) in [("network-program", 64_u64), ("ioc-dataset", 4096_u64)] {
+            let Some(DataValue::Map(descriptor)) = directory.get(name) else {
+                panic!("missing descriptor for {name}");
+            };
+            let offset = Database::extract_uint_from_datavalue(&descriptor["offset"]).unwrap();
+            assert_eq!(offset % expected_alignment, 0);
+        }
+        let opaque_end = directory
+            .values()
+            .map(|descriptor| {
+                let DataValue::Map(descriptor) = descriptor else {
+                    panic!("section descriptor must be a map");
+                };
+                Database::extract_uint_from_datavalue(&descriptor["offset"]).unwrap()
+                    + Database::extract_uint_from_datavalue(&descriptor["length"]).unwrap()
+            })
+            .max()
+            .unwrap();
+        let pattern_data_offset =
+            Database::extract_uint_from_datavalue(&metadata["pattern_section_offset"]).unwrap();
+        assert!(
+            opaque_end <= pattern_data_offset - PATTERN_SECTION_MARKER.len() as u64,
+            "opaque sections must precede the legacy pattern marker"
+        );
+
+        let db = Database::from_bytes(bytes.clone()).unwrap();
+        assert!(db.lookup("indicator.example").unwrap().is_some());
+        assert!(db.lookup("host.evil.example").unwrap().is_some());
+        assert_eq!(
+            db.embedded_section_names(),
+            vec!["network-program".to_string(), "ioc-dataset".to_string()]
+        );
+        let program = db.embedded_section("network-program").unwrap();
+        assert_eq!(program.format(), "matchy-detection-network/v1");
+        assert_eq!(program.alignment(), 64);
+        assert_eq!(program.as_bytes(), b"compiled rules");
+        drop(db);
+        assert_eq!(program.as_bytes(), b"compiled rules");
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let path = temp_dir.path().join("embedded.mxy");
+        std::fs::write(&path, bytes).unwrap();
+        let validation =
+            crate::validation::validate_database(&path, crate::validation::ValidationLevel::Strict)
+                .unwrap();
+        assert!(validation.is_valid(), "{:?}", validation.errors);
+        let mapped = Database::from(path.to_str().unwrap()).open().unwrap();
+        let dataset = mapped.embedded_section("ioc-dataset").unwrap();
+        assert_eq!(dataset.as_bytes(), b"co-located indicators");
+        assert_eq!((dataset.as_ptr() as usize) % dataset.alignment(), 0);
+    }
+
+    #[test]
+    fn malformed_embedded_section_ranges_are_rejected() {
+        let mut builder = DatabaseBuilder::new(MatchMode::CaseSensitive);
+        builder
+            .add_embedded_section("first", "test/v1", 8, vec![1, 2, 3, 4])
+            .unwrap();
+        builder
+            .add_embedded_section("second", "test/v1", 8, vec![5, 6, 7, 8])
+            .unwrap();
+        let valid = builder.build().unwrap();
+        let first = Database::from_bytes(valid.clone())
+            .unwrap()
+            .embedded_section("first")
+            .unwrap();
+
+        let overlapping = rewrite_opaque_section_field(
+            &valid,
+            "second",
+            "offset",
+            DataValue::Uint64(u64::try_from(first.offset()).unwrap()),
+        );
+        assert!(Database::from_bytes(overlapping).is_err());
+
+        let crosses_metadata =
+            rewrite_opaque_section_field(&valid, "first", "length", DataValue::Uint64(u64::MAX));
+        assert!(Database::from_bytes(crosses_metadata).is_err());
+
+        let misaligned = rewrite_opaque_section_field(
+            &valid,
+            "first",
+            "offset",
+            DataValue::Uint64(u64::try_from(first.offset() + 1).unwrap()),
+        );
+        assert!(Database::from_bytes(misaligned).is_err());
     }
 }
