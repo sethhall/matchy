@@ -592,26 +592,29 @@ impl DataEncoder {
     fn encode_array_interned(&mut self, a: &[DataValue]) {
         let size = a.len();
 
-        // Control byte: type 0 << 5 | size bits
+        // Extended types place their type byte immediately after the control
+        // byte. Any additional array-size bytes follow it; the decoder reads
+        // fields in that order too.
         if size < 29 {
             self.buffer.push(u8::try_from(size).unwrap());
+            self.buffer.push(0x04); // 11 - 7 = 4
         } else if size < 29 + 256 {
             self.buffer.push(29);
+            self.buffer.push(0x04); // 11 - 7 = 4
             self.buffer.push(u8::try_from(size - 29).unwrap());
         } else if size < 29 + 256 + 65536 {
             self.buffer.push(30);
+            self.buffer.push(0x04); // 11 - 7 = 4
             let adjusted = size - 29 - 256;
             self.buffer
                 .extend_from_slice(&u16::try_from(adjusted).unwrap().to_be_bytes());
         } else {
             self.buffer.push(31);
+            self.buffer.push(0x04); // 11 - 7 = 4
             let adjusted = size - 29 - 256 - 65536;
             self.buffer
                 .extend_from_slice(&u32::try_from(adjusted).unwrap().to_be_bytes()[1..]);
         }
-
-        // Extended type byte
-        self.buffer.push(0x04); // 11 - 7 = 4
 
         // Recursively encode each element with interning
         for value in a {
@@ -629,21 +632,22 @@ impl DataEncoder {
         // Control byte: type 0 << 5 | size bits
         if size < 29 {
             buffer.push(u8::try_from(size).unwrap());
+            buffer.push(0x04); // 11 - 7 = 4
         } else if size < 29 + 256 {
             buffer.push(29);
+            buffer.push(0x04); // 11 - 7 = 4
             buffer.push(u8::try_from(size - 29).unwrap());
         } else if size < 29 + 256 + 65536 {
             buffer.push(30);
+            buffer.push(0x04); // 11 - 7 = 4
             let adjusted = size - 29 - 256;
             buffer.extend_from_slice(&u16::try_from(adjusted).unwrap().to_be_bytes());
         } else {
             buffer.push(31);
+            buffer.push(0x04); // 11 - 7 = 4
             let adjusted = size - 29 - 256 - 65536;
             buffer.extend_from_slice(&u32::try_from(adjusted).unwrap().to_be_bytes()[1..]);
         }
-
-        // Extended type byte
-        buffer.push(0x04); // 11 - 7 = 4
 
         for value in a {
             Self::encode_to_buffer(value, buffer);
@@ -1383,6 +1387,27 @@ mod tests {
         let decoded = decoder.decode(offset).unwrap();
 
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn test_encode_decode_extended_array_lengths() {
+        for length in [29_usize, 285, 1024] {
+            let value = DataValue::Array(
+                (0..length)
+                    .map(|index| {
+                        DataValue::Uint32(u32::try_from(index).expect("test index fits in u32"))
+                    })
+                    .collect(),
+            );
+            let mut encoder = DataEncoder::new();
+            let offset = encoder.encode(&value);
+            let bytes = encoder.into_bytes();
+            assert_eq!(
+                DataDecoder::new(&bytes, 0).decode(offset),
+                Ok(value),
+                "array length {length} should round trip"
+            );
+        }
     }
 
     #[test]
