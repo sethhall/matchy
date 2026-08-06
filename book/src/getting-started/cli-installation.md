@@ -42,7 +42,7 @@ To install the latest development version:
 ```console
 $ git clone https://github.com/matchylabs/matchy
 $ cd matchy
-$ cargo install --path .
+$ cargo install --path crates/matchy
 ```
 
 ## Using without installation

@@ -79,7 +79,7 @@ cargo install matchy
 ### From source
 
 ```bash
-cargo install --path .
+cargo install --path crates/matchy
 ```
 
 Verify:
