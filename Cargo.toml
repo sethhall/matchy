@@ -69,7 +69,7 @@ chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 
 # Dev dependencies (shared)
 criterion = "0.8"
-tempfile = "3.8"
+tempfile = "3.24"
 proptest = "1.9"
 
 [workspace.lints.clippy]
