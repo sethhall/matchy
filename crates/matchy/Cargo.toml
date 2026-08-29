@@ -102,7 +102,7 @@ crossbeam-channel.workspace = true
 arc-swap.workspace = true
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies.ureq]
-version = "2.10"
+version = "3.1"
 optional = true
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies.dirs]
